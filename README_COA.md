@@ -30,12 +30,13 @@ The core and the module must come from the **same tag**. Each tag matches one je
 
 | jealous-sound release | Tag (core and module) |
 |---|---|
-| issue-batch-20260915 (`a8b28faac98d`) | `bots-issue-batch-20260915` |
+| issue-batch-20260915 (`a8b28faac98d`) | `bots-issue-batch-20260915-v1.1` (latest, same code as the CoA Bots v1.1 zip) |
+| issue-batch-20260915 (`a8b28faac98d`) | `bots-issue-batch-20260915` (v1.0) |
 
 The core needs the mod-playerbots core hooks and a small CoA specialization API. Until they are part of
 jealous-sound's repository, use [Zyth45/azerothcore-wotlk-coa](https://github.com/Zyth45/azerothcore-wotlk-coa):
 
-- tag `bots-issue-batch-20260915` (branch `coa-bots`): the jealous-sound release, the core hooks, the
+- tag `bots-issue-batch-20260915-v1.1` (branch `coa-bots`): the jealous-sound release, the core hooks, the
   specialization API and fixes for crashes that bots trigger often. **Use this one.**
 - branch `playerbots-support`: only the core hooks and the specialization API (the changes proposed to
   jealous-sound).
@@ -45,8 +46,8 @@ jealous-sound's repository, use [Zyth45/azerothcore-wotlk-coa](https://github.co
 1. Get the core and this module:
 
    ```bash
-   git clone --branch bots-issue-batch-20260915 https://github.com/Zyth45/azerothcore-wotlk-coa.git
-   git clone --branch bots-issue-batch-20260915 https://github.com/Zyth45/mod-playerbots.git azerothcore-wotlk-coa/modules/mod-playerbots
+   git clone --branch bots-issue-batch-20260915-v1.1 https://github.com/Zyth45/azerothcore-wotlk-coa.git
+   git clone --branch bots-issue-batch-20260915-v1.1 https://github.com/Zyth45/mod-playerbots.git azerothcore-wotlk-coa/modules/mod-playerbots
    ```
 
 2. Build and install the server as usual:
