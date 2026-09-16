@@ -5535,7 +5535,9 @@ Item* PlayerbotAI::FindOpenableItem() const
     return FindItemInInventory(
         [this](ItemTemplate const* itemTemplate) -> bool
         {
-            return itemTemplate->HasFlag(ITEM_FLAG_HAS_LOOT) &&
+            // A container with its own item script (CoA Adventurer's Satchel / Cache) is opened by using it:
+            // opening it as a plain loot container bypasses the script (suspected cause of autosave crashes on a freed item).
+            return itemTemplate->HasFlag(ITEM_FLAG_HAS_LOOT) && !itemTemplate->ScriptId &&
                    (itemTemplate->LockID == 0 || !this->bot->GetItemByEntry(itemTemplate->ItemId)->IsLocked());
         });
 }
