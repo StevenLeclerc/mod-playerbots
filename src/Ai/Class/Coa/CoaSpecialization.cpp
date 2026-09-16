@@ -15,7 +15,6 @@
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "SharedDefines.h"
-#include "mod-ascension-compat/src/AscensionCoATalentData.h"
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
 
 #include <algorithm>
@@ -29,7 +28,7 @@ namespace
 constexpr uint8 SpecializationLevel = 10;
 
 // Nothing in the specialization data names a role. These come from the live tier lists,
-// matched to AscensionCoATalentData ids through the heals, taunts and mitigation each
+// matched to the CoA specialization ids through the heals, taunts and mitigation each
 // specialization's spells carry.
 CoaRole RoleOf(uint32 specializationId)
 {
@@ -83,9 +82,9 @@ bool IsExcludedSpecialization(uint32 specializationId)
 std::array<std::vector<uint32>, 3> SpecializationsByRole(uint8 classId)
 {
     std::set<uint32> specializations;
-    for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
-        if (entry.ClassId == classId && entry.SpecId && !IsExcludedSpecialization(entry.SpecId))
-            specializations.insert(entry.SpecId);
+    for (AscensionClassAbility const& learnable : GetAscensionClassAbilities(classId))
+        if (learnable.SpecId && !IsExcludedSpecialization(learnable.SpecId))
+            specializations.insert(learnable.SpecId);
 
     std::array<std::vector<uint32>, 3> byRole;
     for (uint32 specializationId : specializations)
@@ -179,7 +178,7 @@ CoaStyle ClassStyle(uint8 classId, uint8& stats)
 
 CoaRole GetCoaRole(Player const* player)
 {
-    if (!player || player->getClass() <= CLASS_DRUID)
+    if (!player || !IsAscensionCustomClassId(player->getClass()))
         return CoaRole::Dps;
 
     return RoleOf(GetAscensionActiveSpecialization(player));
@@ -187,7 +186,7 @@ CoaRole GetCoaRole(Player const* player)
 
 CoaStyle GetCoaStyle(Player const* player)
 {
-    if (!player || player->getClass() <= CLASS_DRUID)
+    if (!player || !IsAscensionCustomClassId(player->getClass()))
         return CoaStyle::Melee;
 
     if (SpecializationProfile const* profile = FindProfile(GetAscensionActiveSpecialization(player)))
@@ -199,7 +198,7 @@ CoaStyle GetCoaStyle(Player const* player)
 
 uint8 GetCoaPrimaryStats(Player const* player)
 {
-    if (!player || player->getClass() <= CLASS_DRUID)
+    if (!player || !IsAscensionCustomClassId(player->getClass()))
         return 0;
 
     if (SpecializationProfile const* profile = FindProfile(GetAscensionActiveSpecialization(player)))
@@ -212,7 +211,7 @@ uint8 GetCoaPrimaryStats(Player const* player)
 
 bool EnsureCoaSpecialization(Player* bot)
 {
-    if (!bot || bot->getClass() <= CLASS_DRUID || bot->GetLevel() < SpecializationLevel)
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel)
         return false;
 
     // Characters of real players, even played through the bot AI, keep their own choice. A random
@@ -266,7 +265,7 @@ bool EnsureCoaSpecialization(Player* bot)
 
 uint32 ApplyCoaTalents(Player* bot)
 {
-    if (!bot || bot->getClass() <= CLASS_DRUID || bot->GetLevel() < SpecializationLevel ||
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel ||
         !sRandomPlayerbotMgr.IsRandomBot(bot))
         return 0;
 
@@ -319,7 +318,7 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
     for (auto const& [guid, bot] : sRandomPlayerbotMgr.GetAllBots())
     {
         if (!bot || bot == master || !bot->IsInWorld() || bot->IsBeingTeleported() ||
-            bot->getClass() <= CLASS_DRUID || !bot->IsAlive() || bot->IsInCombat() || bot->GetGroup() ||
+            !IsAscensionCustomClassId(bot->getClass()) || !bot->IsAlive() || bot->IsInCombat() || bot->GetGroup() ||
             bot->InBattleground() || bot->IsInFlight())
             continue;
 

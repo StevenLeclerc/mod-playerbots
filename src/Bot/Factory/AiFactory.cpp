@@ -27,6 +27,7 @@
 #include "SpellMgr.h"
 #include "WarlockAiObjectContext.h"
 #include "WarriorAiObjectContext.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
 
 namespace
 {
@@ -66,7 +67,7 @@ AiObjectContext* AiFactory::createAiObjectContext(Player* player, PlayerbotAI* b
     // Conquest of Azeroth custom classes (12 and above) have no hand written context.
     // Without this they fall through to the plain context, which has no combat rotation:
     // the bot follows and quests but never fights.
-    if (player->getClass() > CLASS_DRUID)
+    if (IsAscensionCustomClassId(player->getClass()))
         return new CoaAiObjectContext(botAI);
 
     return new AiObjectContext(botAI);
@@ -407,7 +408,7 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
     // Conquest of Azeroth custom classes never appear in the switch above, so they
     // would enter combat with no rotation strategy at all. "coa" chooses spells at
     // runtime from what the bot actually knows; see CoaAiObjectContext.
-    if (player->getClass() > CLASS_DRUID)
+    if (IsAscensionCustomClassId(player->getClass()))
     {
         // Random bots take a specialization from level 10; its role picks the rotation.
         EnsureCoaSpecialization(player);
@@ -608,7 +609,7 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
             break;
         default:
             // Conquest of Azeroth classes: party buffs, and tanks take the lead like the vanilla tanks.
-            if (player->getClass() > CLASS_DRUID)
+            if (IsAscensionCustomClassId(player->getClass()))
                 nonCombatEngine->addStrategiesNoInit(GetCoaRole(player) == CoaRole::Tank ? "tank assist" : "dps assist",
                                                      "coa buff", nullptr);
             else

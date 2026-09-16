@@ -19,6 +19,7 @@
 #include "SpellMgr.h"
 #include "StatsCollector.h"
 #include "Unit.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
 #include <memory>
 
 namespace
@@ -272,7 +273,7 @@ void StatsWeightCalculator::GenerateBasicWeights(Player* player)
 
     // Conquest of Azeroth classes have no talent tabs: without this they all fell through to
     // the bear tank weights below, casters included.
-    if (cls > CLASS_DRUID)
+    if (IsAscensionCustomClassId(cls))
     {
         GenerateCoaWeights(player);
         return;

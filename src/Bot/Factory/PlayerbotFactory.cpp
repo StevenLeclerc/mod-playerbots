@@ -38,6 +38,7 @@
 #include "SpellMgr.h"
 #include "Trainer.h"
 #include "World.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
 #include <array>
 #include <unordered_set>
 #include <utility>
@@ -1629,7 +1630,7 @@ void PlayerbotFactory::ClearSpells()
     // which grants them at login and reconciles them on every level change. Wiping them here
     // leaves the bot with nothing to cast until its next login, since InitClassSpells only
     // knows the vanilla classes.
-    if (bot->getClass() > CLASS_DRUID)
+    if (IsAscensionCustomClassId(bot->getClass()))
         return;
 
     std::list<uint32> spells;

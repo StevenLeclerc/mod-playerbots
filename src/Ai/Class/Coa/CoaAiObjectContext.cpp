@@ -20,9 +20,7 @@
 #include "SpellMgr.h"
 #include "Strategy.h"
 #include "Trigger.h"
-// Data only (constexpr arrays).
-#include "mod-ascension-compat/src/AscensionCoATalentData.h"
-#include "mod-ascension-compat/src/AscensionCustomClassData.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
 
 #include <algorithm>
 #include <array>
@@ -58,8 +56,8 @@ enum AbilityKind : uint16
 /*
  * Class abilities, indexed by class id, ordered by required level.
  *
- * Most CoA abilities are scripted (dummy or script effects), so the class ability table
- * and the specialization data are the only reliable lists of what a class can cast.
+ * Most CoA abilities are scripted (dummy or script effects), so what mod-ascension-compat says
+ * a class can learn is the only reliable list of what it can cast.
  */
 struct CoaAbility
 {
@@ -67,6 +65,7 @@ struct CoaAbility
     uint8 requiredLevel;
     uint16 kind;
     uint32 dispelMask;
+    uint32 firstSpellId;  // first rank: ranks of one spell replace each other
 };
 
 struct ClassKit
@@ -256,54 +255,47 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
     static std::unordered_map<uint8, ClassKit> const abilities = []
     {
         std::unordered_map<uint8, ClassKit> byClass;
-        std::unordered_map<uint8, std::unordered_set<uint32>> known;
+        std::unordered_map<uint8, std::unordered_map<uint32, size_t>> known;
 
-        auto add = [&byClass, &known](uint8 classId, uint32 spellId, uint8 requiredLevel)
+        auto add = [&byClass, &known](uint8 classId, AscensionClassAbility const& learnable)
         {
-            if (!known[classId].insert(spellId).second)
+            ClassKit& kit = byClass[classId];
+            auto const [itr, inserted] = known[classId].try_emplace(learnable.SpellId, kit.abilities.size());
+            if (!inserted)
+            {
+                // Listed again as a higher rank of another spell: remember the link.
+                if (learnable.FirstSpellId != learnable.SpellId)
+                    kit.abilities[itr->second].firstSpellId = learnable.FirstSpellId;
                 return false;
+            }
 
-            CoaAbility ability = { spellId, requiredLevel, 0, 0 };
-            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId))
+            CoaAbility ability = { learnable.SpellId, learnable.RequiredLevel, 0, 0, learnable.FirstSpellId };
+            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(learnable.SpellId))
                 Classify(info, ability);
 
-            ClassKit& kit = byClass[classId];
             kit.abilities.push_back(ability);
             kit.kinds |= ability.kind;
             return true;
         };
 
-        // Flags 8706 and 10754 mark passives (weapon skills, ratings, Auto Shot).
-        QueryResult result = WorldDatabase.Query(
-            "SELECT `class`, `spell_id`, `required_level` FROM `ascension_custom_class_spell` "
-            "WHERE `flags` NOT IN (8706, 10754) ORDER BY `class`, `required_level`");
-
-        uint32 count = 0;
-        if (result)
+        // Class grants, Character Advancement entries (a bot only knows those of its own
+        // specialization, which HasSpell sorts out at run time) and higher ranks. Ids below
+        // 100000 are vanilla weapon skills and Auto Attack.
+        uint32 count = 0, ranks = 0;
+        for (uint8 classId = 1; classId < MAX_CLASSES; ++classId)
         {
-            do
+            if (!IsAscensionCustomClassId(classId))
+                continue;
+
+            for (AscensionClassAbility const& learnable : GetAscensionClassAbilities(classId))
             {
-                Field* fields = result->Fetch();
-                count += add(fields[0].Get<uint8>(), fields[1].Get<uint32>(), fields[2].Get<uint8>());
-            } while (result->NextRow());
+                if (learnable.SpellId < 100000 || !add(classId, learnable))
+                    continue;
+
+                ++count;
+                ranks += learnable.SpellId != learnable.FirstSpellId;
+            }
         }
-
-        // The table still lists the previous class layout for several classes (13, 15, 19,
-        // 22, 27, 31 share no id with what players are actually granted). The ids
-        // mod-ascension-compat really teaches are the authority, so merge them in.
-        // Ids below 100000 are vanilla weapon skills and Auto Attack.
-        uint32 merged = 0;
-        for (AscensionCompatData::ClassSpell const& grant : AscensionCompatData::ClassSpells)
-            if (grant.SpellId >= 100000)
-                merged += add(grant.ClassId, grant.SpellId, grant.RequiredLevel);
-
-        // Specialization abilities: a bot only knows those of its own specialization, which
-        // HasSpell sorts out at run time.
-        uint32 specialization = 0;
-        for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
-            for (uint32 spellId : entry.SpellIds)
-                if (spellId)
-                    specialization += add(entry.ClassId, spellId, entry.RequiredLevel);
 
         uint32 heals = 0, aoe = 0, buffs = 0, defensives = 0, dispels = 0, interrupts = 0;
         for (auto& [classId, kit] : byClass)
@@ -322,8 +314,8 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
             }
         }
 
-        LOG_INFO("playerbots", "coa: {} abilities from the table, {} granted by mod-ascension-compat, "
-                 "{} from specializations, {} classes", count, merged, specialization, byClass.size());
+        LOG_INFO("playerbots", "coa: {} abilities ({} higher ranks) from mod-ascension-compat, {} classes",
+                 count, ranks, byClass.size());
         LOG_INFO("playerbots", "coa: {} heals, {} area attacks, {} buffs, {} defensives, {} dispels, {} interrupts",
                  heals, aoe, buffs, defensives, dispels, interrupts);
         return byClass;
@@ -358,15 +350,24 @@ std::vector<Usable> KnownAbilities(Player* bot, Filter wanted)
     if (found == all.end())
         return usable;
 
+    // A bot can still know the lower ranks of a spell: only cast the highest one it has reached.
+    // Abilities are ordered by required level, so a later rank replaces an earlier one.
+    std::unordered_map<uint32, size_t> rankIndex;
     for (CoaAbility const& ability : found->second.abilities)
     {
         if (!wanted(ability.kind) || ability.requiredLevel > bot->GetLevel() || !bot->HasSpell(ability.spellId))
             continue;
 
-        // Merged grants include passives (e.g. 552011 Resilient Constitution).
+        // Class grants include passives (e.g. 552011 Resilient Constitution).
         SpellInfo const* info = sSpellMgr->GetSpellInfo(ability.spellId);
-        if (info && !info->IsPassive())
+        if (!info || info->IsPassive())
+            continue;
+
+        auto const [itr, inserted] = rankIndex.try_emplace(ability.firstSpellId, usable.size());
+        if (inserted)
             usable.push_back({ info, ability.kind, ability.dispelMask });
+        else
+            usable[itr->second] = { info, ability.kind, ability.dispelMask };
     }
 
     return usable;
@@ -587,12 +588,14 @@ void ReportUsage(time_t now)
     LOG_INFO("playerbots.coa", "coa usage since start (cast/tried): {}", line);
 
     std::lock_guard<std::mutex> guard(UsageSpellsLock);
-    for (UsageKind kind : { USAGE_DISPEL, USAGE_INTERRUPT })
+    // Attacks and heals list more spells: they show which rank of each spell the bots cast.
+    for (UsageKind kind : { USAGE_DISPEL, USAGE_INTERRUPT, USAGE_ATTACK, USAGE_HEAL })
     {
         std::vector<std::pair<uint32, uint32>> top(UsageSpells[kind].begin(), UsageSpells[kind].end());
         std::sort(top.begin(), top.end(), [](auto const& a, auto const& b) { return a.second > b.second; });
+        size_t const shown = kind == USAGE_ATTACK || kind == USAGE_HEAL ? 40 : 15;
         std::string spells;
-        for (size_t i = 0; i < top.size() && i < 15; ++i)
+        for (size_t i = 0; i < top.size() && i < shown; ++i)
         {
             SpellInfo const* info = sSpellMgr->GetSpellInfo(top[i].first);
             spells += Acore::StringFormat("{}{} ({}) x{}", i ? ", " : "", info ? info->SpellName[0] : "?",
@@ -637,7 +640,7 @@ SpellInfo const* RecordUsage(UsageKind kind, SpellInfo const* spell)
     if (spell)
     {
         ++Usage[kind].cast;
-        if (kind == USAGE_DISPEL || kind == USAGE_INTERRUPT)
+        if (kind == USAGE_DISPEL || kind == USAGE_INTERRUPT || kind == USAGE_ATTACK || kind == USAGE_HEAL)
         {
             std::lock_guard<std::mutex> guard(UsageSpellsLock);
             ++UsageSpells[kind][spell->Id];
