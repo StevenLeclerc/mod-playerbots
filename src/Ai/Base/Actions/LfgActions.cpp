@@ -13,6 +13,7 @@
 #include "RandomPlayerbotMgr.h"
 #include "World.h"
 #include "WorldPacket.h"
+#include "CoaSpecialization.h"
 
 using namespace lfg;
 
@@ -20,6 +21,17 @@ bool LfgJoinAction::Execute(Event /*event*/) { return JoinLFG(); }
 
 uint32 LfgJoinAction::GetRoles()
 {
+    // Conquest of Azeroth classes have no talent tabs: their role comes from the specialization.
+    if (bot->getClass() > CLASS_DRUID)
+    {
+        switch (GetCoaRole(bot))
+        {
+            case CoaRole::Tank: return PLAYER_ROLE_TANK;
+            case CoaRole::Heal: return PLAYER_ROLE_HEALER;
+            default:            return PLAYER_ROLE_DAMAGE;
+        }
+    }
+
     if (!RandomPlayerbotMgr::instance().IsRandomBot(bot))
     {
         if (botAI->IsTank(bot))

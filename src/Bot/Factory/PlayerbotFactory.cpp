@@ -1625,6 +1625,13 @@ void PlayerbotFactory::ClearEverything()
 
 void PlayerbotFactory::ClearSpells()
 {
+    // Conquest of Azeroth classes (12 and above) get their abilities from mod-ascension-compat,
+    // which grants them at login and reconciles them on every level change. Wiping them here
+    // leaves the bot with nothing to cast until its next login, since InitClassSpells only
+    // knows the vanilla classes.
+    if (bot->getClass() > CLASS_DRUID)
+        return;
+
     std::list<uint32> spells;
     for (PlayerSpellMap::iterator itr = bot->GetSpellMap().begin(); itr != bot->GetSpellMap().end(); ++itr)
     {

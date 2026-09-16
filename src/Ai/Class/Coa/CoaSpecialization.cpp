@@ -1,0 +1,414 @@
+/*
+ * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
+ * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
+ * or (at your option) any later version.
+ */
+
+#include "CoaSpecialization.h"
+#include "CoaLevelBuildData.h"
+
+#include "Group.h"
+#include "GroupMgr.h"
+#include "Log.h"
+#include "Player.h"
+#include "Playerbots.h"
+#include "Random.h"
+#include "RandomPlayerbotMgr.h"
+#include "SharedDefines.h"
+#include "mod-ascension-compat/src/AscensionCoATalentData.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
+
+#include <algorithm>
+#include <array>
+#include <set>
+#include <vector>
+
+namespace
+{
+
+constexpr uint8 SpecializationLevel = 10;
+
+// Nothing in the specialization data names a role. These come from the live tier lists,
+// matched to AscensionCoATalentData ids through the heals, taunts and mitigation each
+// specialization's spells carry.
+CoaRole RoleOf(uint32 specializationId)
+{
+    switch (specializationId)
+    {
+        case 6:   // Witch Doctor, Brewing
+        case 31:  // Chronomancer, Time
+        case 37:  // Pyromancer, Flameweaving
+        case 40:  // Cultist, Heretic
+        case 43:  // Starcaller, Moon Priest
+        case 51:  // Tinker, Invention
+        case 98:  // Sun Cleric, Blessings
+        case 101: // Venomancer, Vizier
+            return CoaRole::Heal;
+        case 9:   // Felsworn, Tyrant
+        case 17:  // Knight of Xoroth, Defiance
+        case 21:  // Guardian, Vanguard
+        case 22:  // Templar, Oathkeeper
+        case 48:  // Sun Cleric, Seraphim
+        case 52:  // Venomancer, Fortitude
+        case 57:  // Reaper, Domination
+        case 60:  // Primalist, Mountain King
+        case 96:  // Cultist, Dreadnought
+        case 97:  // Witch Hunter, Black Knight
+        case 99:  // Bloodmage, Eternal
+        case 100: // Starcaller, Moon Guard
+            return CoaRole::Tank;
+        default:
+            return CoaRole::Dps;
+    }
+}
+
+char const* RoleName(CoaRole role)
+{
+    switch (role)
+    {
+        case CoaRole::Tank: return "tank";
+        case CoaRole::Heal: return "heal";
+        default:            return "dps";
+    }
+}
+
+// Specializations bots never play. Venomancer Vizier (101) heals from a scarab form that blocks its
+// heals: in dungeons such a healer did nothing at all.
+bool IsExcludedSpecialization(uint32 specializationId)
+{
+    return specializationId == 101;
+}
+
+// Specializations of a class grouped by role, without those bots never play.
+std::array<std::vector<uint32>, 3> SpecializationsByRole(uint8 classId)
+{
+    std::set<uint32> specializations;
+    for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
+        if (entry.ClassId == classId && entry.SpecId && !IsExcludedSpecialization(entry.SpecId))
+            specializations.insert(entry.SpecId);
+
+    std::array<std::vector<uint32>, 3> byRole;
+    for (uint32 specializationId : specializations)
+        byRole[uint8(RoleOf(specializationId))].push_back(specializationId);
+
+    return byRole;
+}
+
+struct SpecializationProfile
+{
+    uint16 SpecId;
+    uint8 ClassId;
+    CoaStyle Style;
+    uint8 Stats;
+};
+
+constexpr uint8 STR = COA_STAT_STRENGTH;
+constexpr uint8 AGI = COA_STAT_AGILITY;
+constexpr uint8 INT = COA_STAT_INTELLECT;
+constexpr uint8 SPI = COA_STAT_SPIRIT;
+constexpr uint8 STA = COA_STAT_STAMINA;
+constexpr CoaStyle MELEE = CoaStyle::Melee;
+constexpr CoaStyle RANGED = CoaStyle::Ranged;
+constexpr CoaStyle CASTER = CoaStyle::Caster;
+
+// Roles and primary stats as ascensionsidekick.com lists them (coaSpecRoles). Healers cast from
+// range; tanks and "Melee DPS" fight in melee; "Ranged DPS" on agility shoot, the others cast.
+constexpr SpecializationProfile Profiles[] =
+{
+    { 1, 12, RANGED, AGI },       { 2, 12, MELEE, AGI },        { 3, 12, MELEE, AGI },         // Barbarian
+    { 4, 13, RANGED, AGI },       { 5, 13, CASTER, INT | SPI }, { 6, 13, CASTER, SPI },        // Witch Doctor
+    { 7, 14, CASTER, SPI | INT }, { 8, 14, MELEE, AGI },        { 9, 14, MELEE, AGI | STA },   // Felsworn
+    { 10, 15, RANGED, AGI | INT }, { 11, 15, RANGED, AGI | INT }, { 12, 15, MELEE, AGI | INT }, // Witch Hunter
+    { 97, 15, MELEE, AGI | STA },
+    { 13, 16, CASTER, INT },      { 14, 16, CASTER, INT },      { 15, 16, CASTER, INT },       // Stormbringer
+    { 16, 17, MELEE, STR | INT }, { 17, 17, MELEE, STR | STA }, { 18, 17, MELEE, STR },        // Knight of Xoroth
+    { 19, 18, MELEE, STR },       { 20, 18, MELEE, STR },       { 21, 18, MELEE, STR | STA },  // Guardian
+    { 22, 19, MELEE, AGI | STA }, { 23, 19, MELEE, AGI },       { 24, 19, MELEE, AGI },        // Templar
+    { 25, 20, CASTER, SPI },      { 26, 20, CASTER, SPI | STA }, { 27, 20, MELEE, AGI },       // Bloodmage
+    { 99, 20, MELEE, AGI | STA },
+    { 28, 21, RANGED, AGI },      { 29, 21, RANGED, AGI },      { 30, 21, MELEE, AGI },        // Ranger
+    { 31, 22, CASTER, SPI },      { 32, 22, CASTER, SPI },      { 33, 22, CASTER, SPI },       // Chronomancer
+    { 34, 23, CASTER, INT },      { 35, 23, CASTER, INT },      { 36, 23, CASTER, INT },       // Necromancer
+    { 37, 24, CASTER, SPI },      { 38, 24, CASTER, INT },      { 39, 24, CASTER, INT },       // Pyromancer
+    { 40, 25, CASTER, INT | STR }, { 41, 25, CASTER, INT },     { 42, 25, MELEE, STR },        // Cultist
+    { 96, 25, MELEE, STR | STA },
+    { 43, 26, CASTER, INT },      { 44, 26, CASTER, INT },      { 45, 26, MELEE, INT },        // Starcaller
+    { 100, 26, MELEE, INT | STA },
+    { 46, 27, CASTER, INT },      { 47, 27, MELEE, STR },       { 48, 27, MELEE, STR | STA },  // Sun Cleric
+    { 98, 27, CASTER, INT },
+    { 49, 28, RANGED, AGI | INT }, { 50, 28, RANGED, AGI | INT }, { 51, 28, CASTER, INT },     // Tinker
+    { 52, 29, MELEE, AGI | STA }, { 53, 29, MELEE, INT },       { 54, 29, CASTER, INT },       // Venomancer
+    { 101, 29, CASTER, INT },
+    { 55, 30, MELEE, STR },       { 56, 30, MELEE, STR },       { 57, 30, MELEE, STR | STA },  // Reaper
+    { 58, 31, CASTER, STR | INT }, { 59, 31, MELEE, STR },      { 60, 31, MELEE, STR | STA },  // Primalist
+    { 95, 31, CASTER, INT },
+    { 61, 32, MELEE, AGI },       { 62, 32, CASTER, INT | SPI }, { 63, 32, MELEE, AGI },       // Runemaster
+};
+
+SpecializationProfile const* FindProfile(uint32 specializationId)
+{
+    for (SpecializationProfile const& profile : Profiles)
+        if (profile.SpecId == specializationId)
+            return &profile;
+
+    return nullptr;
+}
+
+// The style most specializations of the class share (melee on a tie), with their stats.
+CoaStyle ClassStyle(uint8 classId, uint8& stats)
+{
+    std::array<uint8, 3> counts = { 0, 0, 0 };
+    for (SpecializationProfile const& profile : Profiles)
+        if (profile.ClassId == classId)
+            ++counts[uint8(profile.Style)];
+
+    uint8 best = 0;
+    for (uint8 style = 1; style < 3; ++style)
+        if (counts[style] > counts[best])
+            best = style;
+
+    stats = 0;
+    for (SpecializationProfile const& profile : Profiles)
+        if (profile.ClassId == classId && uint8(profile.Style) == best)
+            stats |= profile.Stats & ~STA;
+
+    return CoaStyle(best);
+}
+
+}  // namespace
+
+CoaRole GetCoaRole(Player const* player)
+{
+    if (!player || player->getClass() <= CLASS_DRUID)
+        return CoaRole::Dps;
+
+    return RoleOf(GetAscensionActiveSpecialization(player));
+}
+
+CoaStyle GetCoaStyle(Player const* player)
+{
+    if (!player || player->getClass() <= CLASS_DRUID)
+        return CoaStyle::Melee;
+
+    if (SpecializationProfile const* profile = FindProfile(GetAscensionActiveSpecialization(player)))
+        return profile->Style;
+
+    uint8 stats = 0;
+    return ClassStyle(player->getClass(), stats);
+}
+
+uint8 GetCoaPrimaryStats(Player const* player)
+{
+    if (!player || player->getClass() <= CLASS_DRUID)
+        return 0;
+
+    if (SpecializationProfile const* profile = FindProfile(GetAscensionActiveSpecialization(player)))
+        return profile->Stats;
+
+    uint8 stats = 0;
+    ClassStyle(player->getClass(), stats);
+    return stats;
+}
+
+bool EnsureCoaSpecialization(Player* bot)
+{
+    if (!bot || bot->getClass() <= CLASS_DRUID || bot->GetLevel() < SpecializationLevel)
+        return false;
+
+    // Characters of real players, even played through the bot AI, keep their own choice. A random
+    // bot keeps its specialization unless bots no longer play it: then it picks another one.
+    if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+        return false;
+
+    uint32 const current = GetAscensionActiveSpecialization(bot);
+    if (current && !IsExcludedSpecialization(current))
+        return false;
+
+    std::array<std::vector<uint32>, 3> const byRole = SpecializationsByRole(bot->getClass());
+
+    // Dungeon groups need a tank and a healer. Only 8 of the 21 classes can heal, so healing
+    // weighs more than tanking to reach about one healer in eight specialized bots overall.
+    // A role the class cannot fill gives its share to the others.
+    std::array<uint32, 3> const shares = { 50, 20, 30 };
+    uint32 total = 0;
+    for (uint8 role = 0; role < 3; ++role)
+        if (!byRole[role].empty())
+            total += shares[role];
+
+    if (!total)
+        return false;
+
+    uint32 roll = urand(1, total);
+    uint8 chosenRole = 0;
+    for (uint8 role = 0; role < 3; ++role)
+    {
+        if (byRole[role].empty())
+            continue;
+
+        if (roll <= shares[role])
+        {
+            chosenRole = role;
+            break;
+        }
+        roll -= shares[role];
+    }
+
+    std::vector<uint32> const& candidates = byRole[chosenRole];
+    uint32 const specializationId = candidates[urand(0, candidates.size() - 1)];
+
+    if (!SwitchAscensionSpecialization(bot, specializationId))
+        return false;
+
+    LOG_INFO("playerbots", "coa: {} (class {}, level {}) took specialization {} as {}",
+             bot->GetName(), bot->getClass(), bot->GetLevel(), specializationId, RoleName(CoaRole(chosenRole)));
+    return true;
+}
+
+uint32 ApplyCoaTalents(Player* bot)
+{
+    if (!bot || bot->getClass() <= CLASS_DRUID || bot->GetLevel() < SpecializationLevel ||
+        !sRandomPlayerbotMgr.IsRandomBot(bot))
+        return 0;
+
+    uint32 const specializationId = GetAscensionActiveSpecialization(bot);
+    if (!specializationId)
+        return 0;
+
+    // Rank each entry should hold at the bot's level: the build's picks up to that level.
+    std::vector<std::pair<uint32, uint8>> wanted;
+    for (CoaLevelBuildData::Pick const& pick : CoaLevelBuildData::Picks)
+    {
+        if (pick.ClassId != bot->getClass() || pick.SpecId != specializationId || pick.Level > bot->GetLevel())
+            continue;
+
+        auto itr = std::find_if(wanted.begin(), wanted.end(),
+            [&pick](std::pair<uint32, uint8> const& w) { return w.first == pick.EntryId; });
+        if (itr == wanted.end())
+            wanted.emplace_back(pick.EntryId, pick.Rank);
+        else if (itr->second < pick.Rank)
+            itr->second = pick.Rank;
+    }
+
+    uint32 raised = 0;
+    for (auto const& [entryId, rank] : wanted)
+        if (GetAscensionTalentRank(bot, entryId) < rank && SetAscensionTalentRank(bot, entryId, rank))
+            ++raised;
+
+    if (raised)
+        LOG_INFO("playerbots", "coa: {} (class {}, level {}, specialization {}) raised {} talent entries",
+                 bot->GetName(), bot->getClass(), bot->GetLevel(), specializationId, raised);
+    return raised;
+}
+
+bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
+{
+    Group* group = master->GetGroup();
+    if (group && group->IsFull())
+    {
+        message = "Your group is full.";
+        return false;
+    }
+
+    // A free random bot whose class can fill the role, preferably on the master's map (a
+    // dungeon instance has none, so any map will do), then one that already holds a
+    // specialization of the role, then the nearest.
+    Player* chosen = nullptr;
+    bool chosenSameMap = false;
+    bool chosenFits = false;
+    float chosenDistance = 0.0f;
+    for (auto const& [guid, bot] : sRandomPlayerbotMgr.GetAllBots())
+    {
+        if (!bot || bot == master || !bot->IsInWorld() || bot->IsBeingTeleported() ||
+            bot->getClass() <= CLASS_DRUID || !bot->IsAlive() || bot->IsInCombat() || bot->GetGroup() ||
+            bot->InBattleground() || bot->IsInFlight())
+            continue;
+
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI || botAI->GetMaster())
+            continue;
+
+        uint32 const specialization = GetAscensionActiveSpecialization(bot);
+        bool const fits = specialization && !IsExcludedSpecialization(specialization) && GetCoaRole(bot) == role;
+        if (!fits && SpecializationsByRole(bot->getClass())[uint8(role)].empty())
+            continue;
+
+        bool const sameMap = bot->GetMap() == master->GetMap();
+        float const distance = sameMap ? master->GetDistance(bot) : 0.0f;
+        bool better = !chosen;
+        if (!better && sameMap != chosenSameMap)
+            better = sameMap;
+        else if (!better && fits != chosenFits)
+            better = fits;
+        else if (!better)
+            better = sameMap && distance < chosenDistance;
+
+        if (better)
+        {
+            chosen = bot;
+            chosenSameMap = sameMap;
+            chosenFits = fits;
+            chosenDistance = distance;
+        }
+    }
+
+    if (!chosen)
+    {
+        message = std::string("No free bot able to play ") + RoleName(role) + ".";
+        return false;
+    }
+
+    if (chosen->GetLevel() < master->GetLevel())
+        chosen->GiveLevel(master->GetLevel());
+
+    if (!chosenFits)
+    {
+        // Keep the array alive: a reference into the temporary would dangle.
+        std::array<std::vector<uint32>, 3> const byRole = SpecializationsByRole(chosen->getClass());
+        std::vector<uint32> const& candidates = byRole[uint8(role)];
+        if (!SwitchAscensionSpecialization(chosen, candidates[urand(0, candidates.size() - 1)]))
+        {
+            message = "Could not give " + chosen->GetName() + " a specialization.";
+            return false;
+        }
+    }
+
+    // Points for every level it just skipped.
+    ApplyCoaTalents(chosen);
+
+    if (!group)
+    {
+        group = new Group();
+        if (!group->Create(master))
+        {
+            delete group;
+            message = "Could not create a group.";
+            return false;
+        }
+        sGroupMgr->AddGroup(group);
+    }
+
+    if (!group->AddMember(chosen))
+    {
+        message = "Could not add " + chosen->GetName() + " to the group.";
+        return false;
+    }
+
+    // After joining the group, so the bot may enter the master's dungeon instance.
+    chosen->TeleportTo(master->GetMapId(), master->GetPositionX(), master->GetPositionY(), master->GetPositionZ(),
+                       master->GetOrientation());
+
+    if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(chosen))
+    {
+        botAI->SetMaster(master);
+        botAI->ResetStrategies();
+    }
+
+    LOG_INFO("playerbots", "coa: {} recruited {} (class {}, level {}, specialization {}) as {}",
+             master->GetName(), chosen->GetName(), chosen->getClass(), chosen->GetLevel(),
+             GetAscensionActiveSpecialization(chosen), RoleName(role));
+
+    message = chosen->GetName() + " joins as " + RoleName(role) + " (specialization " +
+              std::to_string(GetAscensionActiveSpecialization(chosen)) + ", level " +
+              std::to_string(chosen->GetLevel()) + ").";
+    return true;
+}

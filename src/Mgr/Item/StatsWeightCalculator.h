@@ -43,6 +43,7 @@ public:
     void GenerateWeights(Player* player);
     void GenerateBasicWeights(Player* player);
     void GenerateAdditionalWeights(Player* player);
+    void GenerateCoaWeights(Player* player);
 
     void CalculateRandomProperty(int32 randomPropertyId, uint32 itemId);
     void CalculateItemSetMod(Player* player, ItemTemplate const* proto);

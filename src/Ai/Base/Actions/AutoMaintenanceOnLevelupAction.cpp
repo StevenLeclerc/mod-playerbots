@@ -5,6 +5,7 @@
  */
 
 #include "AutoMaintenanceOnLevelupAction.h"
+#include "CoaSpecialization.h"
 #include "BroadcastHelper.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotFactory.h"
@@ -14,6 +15,27 @@
 
 bool AutoMaintenanceOnLevelupAction::Execute(Event /*event*/)
 {
+    // A CoA bot reaching level 10 picks its specialization: switch its combat role now
+    // rather than at the next strategy reset.
+    if (EnsureCoaSpecialization(bot))
+    {
+        if (GetCoaRole(bot) == CoaRole::Tank)
+        {
+            botAI->ChangeStrategy("-coa,-coa ranged,-dps assist,+coa tank,+tank assist,+tank face", BOT_STATE_COMBAT);
+            botAI->ChangeStrategy("-dps assist,+tank assist", BOT_STATE_NON_COMBAT);
+        }
+        else if (GetCoaRole(bot) == CoaRole::Heal)
+            botAI->ChangeStrategy("-coa,-coa ranged,+coa heal", BOT_STATE_COMBAT);
+        // The specialization may fight at another range than the class default used until now.
+        else if (GetCoaStyle(bot) == CoaStyle::Melee)
+            botAI->ChangeStrategy("-coa ranged,+coa", BOT_STATE_COMBAT);
+        else
+            botAI->ChangeStrategy("-coa,+coa ranged", BOT_STATE_COMBAT);
+    }
+
+    // One Character Advancement point per level from 10.
+    ApplyCoaTalents(bot);
+
     AutoPickTalents();
     AutoLearnSpell();
     AutoTeleportForLevel();

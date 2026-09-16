@@ -5,6 +5,7 @@
  */
 
 #include "PlayerbotAI.h"
+#include "CoaSpecialization.h"
 #include "AiFactory.h"
 #include "BudgetValues.h"
 #include "ChannelMgr.h"
@@ -1912,6 +1913,9 @@ bool PlayerbotAI::IsRanged(Player* player, bool bySpec)
     if (!bySpec && botAi)
         return botAi->ContainsStrategy(STRATEGY_TYPE_RANGED);
 
+    if (player->getClass() > CLASS_DRUID)
+        return GetCoaStyle(player) != CoaStyle::Melee;
+
     int tab = AiFactory::GetPlayerSpecTab(player);
     switch (player->getClass())
     {
@@ -1947,6 +1951,10 @@ bool PlayerbotAI::IsMelee(Player* player, bool bySpec) { return !IsRanged(player
 
 bool PlayerbotAI::IsCaster(Player* player, bool bySpec)
 {
+    // CoA specializations that shoot on agility are ranged without being casters.
+    if (player->getClass() > CLASS_DRUID)
+        return IsRanged(player, bySpec) && GetCoaStyle(player) == CoaStyle::Caster;
+
     return IsRanged(player, bySpec) && player->getClass() != CLASS_HUNTER;
 }
 
@@ -2281,6 +2289,9 @@ bool PlayerbotAI::IsTank(Player* player, bool bySpec)
     if (!bySpec && botAi)
         return botAi->ContainsStrategy(STRATEGY_TYPE_TANK);
 
+    if (player->getClass() > CLASS_DRUID)
+        return GetCoaRole(player) == CoaRole::Tank;
+
     int tab = AiFactory::GetPlayerSpecTab(player);
     switch (player->getClass())
     {
@@ -2319,6 +2330,9 @@ bool PlayerbotAI::IsHeal(Player* player, bool bySpec)
     if (!bySpec && botAi)
         return botAi->ContainsStrategy(STRATEGY_TYPE_HEAL);
 
+    if (player->getClass() > CLASS_DRUID)
+        return GetCoaRole(player) == CoaRole::Heal;
+
     int tab = AiFactory::GetPlayerSpecTab(player);
     switch (player->getClass())
     {
@@ -2355,6 +2369,9 @@ bool PlayerbotAI::IsDps(Player* player, bool bySpec)
     PlayerbotAI* botAi = GET_PLAYERBOT_AI(player);
     if (!bySpec && botAi)
         return botAi->ContainsStrategy(STRATEGY_TYPE_DPS);
+
+    if (player->getClass() > CLASS_DRUID)
+        return GetCoaRole(player) == CoaRole::Dps;
 
     int tab = AiFactory::GetPlayerSpecTab(player);
     switch (player->getClass())

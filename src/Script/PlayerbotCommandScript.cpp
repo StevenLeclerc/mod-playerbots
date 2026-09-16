@@ -6,6 +6,7 @@
 
 #include "BattleGroundTactics.h"
 #include "Chat.h"
+#include "CoaSpecialization.h"
 #include "GuildTaskMgr.h"
 #include "PerfMonitor.h"
 #include "PlayerbotMgr.h"
@@ -37,6 +38,7 @@ public:
             {"gtask", HandleGuildTaskCommand, SEC_GAMEMASTER, Console::Yes},
             {"pmon", HandlePerfMonCommand, SEC_GAMEMASTER, Console::Yes},
             {"rndbot", HandleRandomPlayerbotCommand, SEC_GAMEMASTER, Console::Yes},
+            {"coa", HandleCoaRecruitCommand, SEC_GAMEMASTER, Console::No},
             {"debug", playerbotsDebugCommandTable},
             {"account", playerbotsAccountCommandTable},
         };
@@ -51,6 +53,35 @@ public:
     static bool HandlePlayerbotCommand(ChatHandler* handler, char const* args)
     {
         return PlayerbotMgr::HandlePlayerbotMgrCommand(handler, args);
+    }
+
+    // .playerbots coa tank|heal|dps : recruit a Conquest of Azeroth bot for that role.
+    static bool HandleCoaRecruitCommand(ChatHandler* handler, char const* args)
+    {
+        Player* master = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        std::string const wanted = args ? args : "";
+
+        CoaRole role;
+        if (wanted == "tank")
+            role = CoaRole::Tank;
+        else if (wanted == "heal" || wanted == "healer")
+            role = CoaRole::Heal;
+        else if (wanted == "dps")
+            role = CoaRole::Dps;
+        else
+        {
+            handler->SendSysMessage("Usage: .playerbots coa tank|heal|dps");
+            return true;
+        }
+
+        if (!master)
+            return false;
+
+        // Handled either way: returning false would add the generic usage text to our message.
+        std::string message;
+        RecruitCoaBot(master, role, message);
+        handler->SendSysMessage(message);
+        return true;
     }
 
     static bool HandleRandomPlayerbotCommand(ChatHandler* handler, char const* args)

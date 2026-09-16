@@ -408,6 +408,7 @@ public:
     bool deleteRandomBotArenaTeams;
 
     uint32 selfBotLevel;
+    int32 botTextLocale;  // -1: follow connected players' client locale, 0-8: force this locale
     bool downgradeMaxLevelBot;
     bool equipAndSpecPersistence;
     int32 equipAndSpecPersistenceLevel;

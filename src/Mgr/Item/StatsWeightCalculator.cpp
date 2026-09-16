@@ -6,6 +6,7 @@
 
 #include "StatsWeightCalculator.h"
 #include "AiFactory.h"
+#include "CoaSpecialization.h"
 #include "DBCStores.h"
 #include "ItemEnchantmentMgr.h"
 #include "ItemTemplate.h"
@@ -269,6 +270,14 @@ void StatsWeightCalculator::GenerateBasicWeights(Player* player)
     stats_weights_[STATS_TYPE_MELEE_DPS] += 0.01f;
     stats_weights_[STATS_TYPE_RANGED_DPS] += 0.01f;
 
+    // Conquest of Azeroth classes have no talent tabs: without this they all fell through to
+    // the bear tank weights below, casters included.
+    if (cls > CLASS_DRUID)
+    {
+        GenerateCoaWeights(player);
+        return;
+    }
+
     if (cls == CLASS_HUNTER && (tab == HUNTER_TAB_BEAST_MASTERY || tab == HUNTER_TAB_SURVIVAL))
     {
         stats_weights_[STATS_TYPE_AGILITY] += 2.5f;
@@ -518,6 +527,65 @@ void StatsWeightCalculator::GenerateBasicWeights(Player* player)
         stats_weights_[STATS_TYPE_HASTE] += 2.3f;
         stats_weights_[STATS_TYPE_EXPERTISE] += 3.7f;
         stats_weights_[STATS_TYPE_MELEE_DPS] += 3.0f;
+    }
+}
+
+// Weights for a CoA specialization, from its primary stats, fighting style and role.
+void StatsWeightCalculator::GenerateCoaWeights(Player* player)
+{
+    uint8 const stats = GetCoaPrimaryStats(player);
+    CoaStyle const style = GetCoaStyle(player);
+    bool const physical = stats & (COA_STAT_STRENGTH | COA_STAT_AGILITY);
+    bool const magical = stats & (COA_STAT_INTELLECT | COA_STAT_SPIRIT);
+
+    if (stats & COA_STAT_STRENGTH)
+        stats_weights_[STATS_TYPE_STRENGTH] += 2.5f;
+    if (stats & COA_STAT_AGILITY)
+        stats_weights_[STATS_TYPE_AGILITY] += 2.5f;
+    if (stats & COA_STAT_INTELLECT)
+        stats_weights_[STATS_TYPE_INTELLECT] += 1.2f;
+    if (stats & COA_STAT_SPIRIT)
+        stats_weights_[STATS_TYPE_SPIRIT] += 1.2f;
+
+    if (physical)
+    {
+        stats_weights_[STATS_TYPE_ATTACK_POWER] += 1.0f;
+        stats_weights_[STATS_TYPE_ARMOR_PENETRATION] += 1.0f;
+    }
+    else
+        stats_weights_[STATS_TYPE_ATTACK_POWER] -= 1.0f;
+
+    if (magical)
+        stats_weights_[STATS_TYPE_SPELL_POWER] += 1.0f;
+    else
+        stats_weights_[STATS_TYPE_SPELL_POWER] -= 1.0f;
+
+    stats_weights_[STATS_TYPE_HIT] += 1.5f;
+    stats_weights_[STATS_TYPE_CRIT] += 1.2f;
+    stats_weights_[STATS_TYPE_HASTE] += 1.2f;
+
+    if (style == CoaStyle::Melee)
+    {
+        stats_weights_[STATS_TYPE_EXPERTISE] += 1.5f;
+        stats_weights_[STATS_TYPE_MELEE_DPS] += physical ? 7.0f : 3.0f;
+    }
+    else if (style == CoaStyle::Ranged)
+        stats_weights_[STATS_TYPE_RANGED_DPS] += 7.0f;
+
+    if (PlayerbotAI::IsTank(player))
+    {
+        stats_weights_[STATS_TYPE_STAMINA] += 3.0f;
+        stats_weights_[STATS_TYPE_ARMOR] += 0.15f;
+        stats_weights_[STATS_TYPE_DEFENSE] += 2.5f;
+        stats_weights_[STATS_TYPE_DODGE] += 2.0f;
+        stats_weights_[STATS_TYPE_PARRY] += 2.0f;
+        stats_weights_[STATS_TYPE_BLOCK_RATING] += 1.0f;
+        stats_weights_[STATS_TYPE_BLOCK_VALUE] += 0.5f;
+    }
+    else if (PlayerbotAI::IsHeal(player))
+    {
+        stats_weights_[STATS_TYPE_HEAL_POWER] += 1.0f;
+        stats_weights_[STATS_TYPE_MANA_REGENERATION] += 0.9f;
     }
 }
 

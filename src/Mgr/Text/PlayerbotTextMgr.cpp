@@ -6,6 +6,7 @@
 
 #include "PlayerbotTextMgr.h"
 #include "DatabaseEnv.h"
+#include "PlayerbotAIConfig.h"
 #include "QueryResult.h"    // Required due to a poor implementation by AC
 #include "Random.h"
 #include "WorldSessionMgr.h"
@@ -203,6 +204,12 @@ void PlayerbotTextMgr::AddLocalePriority(uint32 locale)
 
 uint32 PlayerbotTextMgr::GetLocalePriority()
 {
+    // AiPlayerbot.BotTextLocale forces one language regardless of the clients connected,
+    // e.g. 2 (frFR) for a French server whose players run an enUS client.
+    int32 const forced = sPlayerbotAIConfig.botTextLocale;
+    if (forced >= 0 && forced < TOTAL_LOCALES)
+        return uint32(forced);
+
     // if no real players online, reset top locale
     uint32 const activeSessions = sWorldSessionMgr->GetActiveSessionCount();
     if (!activeSessions)

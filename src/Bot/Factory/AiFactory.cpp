@@ -5,6 +5,7 @@
  */
 
 #include "AiFactory.h"
+#include "CoaSpecialization.h"
 #include "BattlegroundMgr.h"
 #include "DKAiObjectContext.h"
 #include "DruidAiObjectContext.h"
@@ -22,6 +23,7 @@
 #include "ShamanAiObjectContext.h"
 #include "SharedDefines.h"
 #include "SpellInfo.h"
+#include "CoaAiObjectContext.h"
 #include "SpellMgr.h"
 #include "WarlockAiObjectContext.h"
 #include "WarriorAiObjectContext.h"
@@ -60,6 +62,12 @@ AiObjectContext* AiFactory::createAiObjectContext(Player* player, PlayerbotAI* b
         case CLASS_DEATH_KNIGHT:
             return new DKAiObjectContext(botAI);
     }
+
+    // Conquest of Azeroth custom classes (12 and above) have no hand written context.
+    // Without this they fall through to the plain context, which has no combat rotation:
+    // the bot follows and quests but never fights.
+    if (player->getClass() > CLASS_DRUID)
+        return new CoaAiObjectContext(botAI);
 
     return new AiObjectContext(botAI);
 }
@@ -396,6 +404,30 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
             break;
     }
 
+    // Conquest of Azeroth custom classes never appear in the switch above, so they
+    // would enter combat with no rotation strategy at all. "coa" chooses spells at
+    // runtime from what the bot actually knows; see CoaAiObjectContext.
+    if (player->getClass() > CLASS_DRUID)
+    {
+        // Random bots take a specialization from level 10; its role picks the rotation.
+        EnsureCoaSpecialization(player);
+        // Catch up on points earned before bots spent talents (or while this build was not live).
+        ApplyCoaTalents(player);
+        switch (GetCoaRole(player))
+        {
+            case CoaRole::Tank:
+                engine->addStrategiesNoInit("coa tank", "tank assist", nullptr);
+                break;
+            case CoaRole::Heal:
+                engine->addStrategiesNoInit("coa heal", "dps assist", nullptr);
+                break;
+            default:
+                engine->addStrategiesNoInit(GetCoaStyle(player) == CoaStyle::Melee ? "coa" : "coa ranged",
+                                            "dps assist", nullptr);
+                break;
+        }
+    }
+
     if (PlayerbotAI::IsTank(player, true))
         engine->addStrategy("tank face", false);
 
@@ -575,7 +607,12 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
                 nonCombatEngine->addStrategy("dps assist", false);
             break;
         default:
-            nonCombatEngine->addStrategy("dps assist", false);
+            // Conquest of Azeroth classes: party buffs, and tanks take the lead like the vanilla tanks.
+            if (player->getClass() > CLASS_DRUID)
+                nonCombatEngine->addStrategiesNoInit(GetCoaRole(player) == CoaRole::Tank ? "tank assist" : "dps assist",
+                                                     "coa buff", nullptr);
+            else
+                nonCombatEngine->addStrategy("dps assist", false);
             break;
     }
 

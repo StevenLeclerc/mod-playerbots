@@ -5,6 +5,7 @@
  */
 
 #include "AiObjectContext.h"
+#include "CoaAiObjectContext.h"
 #include "DKAiObjectContext.h"
 #include "DruidAiObjectContext.h"
 #include "Helpers.h"
@@ -44,6 +45,7 @@ void AiObjectContext::BuildAllSharedContexts()
     ShamanAiObjectContext::BuildSharedContexts();
     PaladinAiObjectContext::BuildSharedContexts();
     DruidAiObjectContext::BuildSharedContexts();
+    CoaAiObjectContext::BuildSharedContexts();
     HunterAiObjectContext::BuildSharedContexts();
     RogueAiObjectContext::BuildSharedContexts();
     DKAiObjectContext::BuildSharedContexts();
