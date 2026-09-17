@@ -209,18 +209,23 @@ uint8 GetCoaPrimaryStats(Player const* player)
     return stats;
 }
 
+// A stable number per bot and purpose, so the same bot keeps the same role and specialization
+// across logins and restarts (splitmix64's finaliser, cut to 32 bits).
+static uint32 Hash(uint32 value, uint32 salt)
+{
+    uint64 x = (uint64(value) << 32) ^ salt;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return uint32((x ^ (x >> 31)) & 0xFFFFFFFFu);
+}
+
 bool EnsureCoaSpecialization(Player* bot)
 {
     if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel)
         return false;
 
-    // Characters of real players, even played through the bot AI, keep their own choice. A random
-    // bot keeps its specialization unless bots no longer play it: then it picks another one.
+    // Characters of real players, even played through the bot AI, keep their own choice.
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
-        return false;
-
-    uint32 const current = GetAscensionActiveSpecialization(bot);
-    if (current && !IsExcludedSpecialization(current))
         return false;
 
     std::array<std::vector<uint32>, 3> const byRole = SpecializationsByRole(bot->getClass());
@@ -237,7 +242,10 @@ bool EnsureCoaSpecialization(Player* bot)
     if (!total)
         return false;
 
-    uint32 roll = urand(1, total);
+    // The role follows the bot's own guid, not a die: a character creation already gives every CoA
+    // character a specialization, so without this the shares below would almost never apply - and a
+    // die would hand the same bot a different role at every login, undoing its talents each time.
+    uint32 roll = 1 + Hash(bot->GetGUID().GetCounter(), 0x5350454Cu) % total;   // 'SPEC'
     uint8 chosenRole = 0;
     for (uint8 role = 0; role < 3; ++role)
     {
@@ -253,7 +261,14 @@ bool EnsureCoaSpecialization(Player* bot)
     }
 
     std::vector<uint32> const& candidates = byRole[chosenRole];
-    uint32 const specializationId = candidates[urand(0, candidates.size() - 1)];
+    uint32 const specializationId = candidates[Hash(bot->GetGUID().GetCounter(), 0x50494B4Bu) % candidates.size()];   // 'PIKK'
+
+    // The specialization a character is created with decides nothing about the group: keep it only
+    // when it already plays the role this bot was given.
+    uint32 const current = GetAscensionActiveSpecialization(bot);
+    if (current == specializationId ||
+        (current && !IsExcludedSpecialization(current) && uint8(RoleOf(current)) == chosenRole))
+        return false;
 
     if (!SwitchAscensionSpecialization(bot, specializationId))
         return false;
