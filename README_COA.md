@@ -110,11 +110,11 @@ trailing `?` shows instead of changes: `co ?` lists, `co +name` adds, `co -name`
 | Command | What it does |
 |---|---|
 | `.playerbots coa tank\|heal\|dps` | recruits the nearest free CoA bot of that role into your group, raised to your level |
-| `.playerbots add\|remove <name>` | takes control of a bot, or sends it away |
-| `.playerbots self` | drives your own character with the bot AI |
-| `.rndbot teleport` | sends every random bot to a place that fits its level, instead of waiting for the automatic move |
-| `.rndbot stats\|grind\|init\|levelup\|revive\|refresh` | state, send hunting, re-roll level/gear/talents, level up, revive, restore |
-| `.rndbot reload` | re-reads `playerbots.conf` without a restart |
+| `.playerbots bot add\|remove <name>` | takes control of a bot, or sends it away |
+| `.playerbots bot self` | drives your own character with the bot AI |
+| `.playerbots rndbot teleport` | sends every random bot to a place that fits its level, instead of waiting for the automatic move |
+| `.playerbots rndbot stats\|grind\|init\|levelup\|revive\|refresh` | state, send hunting, re-roll level/gear/talents, level up, revive, restore |
+| `.playerbots rndbot reload` | re-reads `playerbots.conf` without a restart |
 | `/w <bot> co ?` | its combat strategies: position (`close` / `ranged`), the CoA classifier, and its authored rotation |
 | `/w <bot> talents` / `talents spec list` / `talents spec <name>` | its specialization, the list with roles, or switch (`tank`, `heal`, `dps`, `random` work too) |
 | `/w <bot> stats\|spells\|equip\|autogear\|upgrade` | its state, spells and gear |

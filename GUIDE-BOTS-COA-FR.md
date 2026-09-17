@@ -17,7 +17,7 @@ Toutes les commandes ci-dessous se tapent **dans le chat du jeu**.
    ```
 3. **Le renvoyer** :
    ```
-   .playerbots remove NomDuBot
+   .playerbots bot remove NomDuBot
    ```
 
 ## Parler à un bot
@@ -43,27 +43,27 @@ Un `?` à la fin **affiche** au lieu de changer : `co ?` liste, `co +truc` ajout
 
 ## Commandes de maître de jeu
 
-`.playerbots` gère les bots, `.rndbot` gère les bots aléatoires du serveur.
+`.playerbots bot` gère tes bots, `.playerbots rndbot` gère les bots aléatoires du serveur.
 
 | Commande | Ce qu'elle fait |
 |---|---|
 | `.playerbots coa tank\|heal\|dps` | recrute le bot CoA le plus proche qui joue ce rôle, le met à ton niveau et le téléporte |
-| `.playerbots add <nom>` | prend le contrôle d'un bot précis |
-| `.playerbots addclass <classe>` | crée un bot d'une classe donnée |
-| `.playerbots remove <nom>` | le renvoie |
-| `.playerbots list` | tes bots |
-| `.playerbots self` | pilote **ton propre personnage** comme un bot |
-| `.rndbot stats` | l'état des bots aléatoires |
-| `.rndbot teleport` | **les envoie tous dans une zone adaptée à leur niveau**, sans attendre le téléport automatique |
-| `.rndbot grind` | les envoie chasser |
-| `.rndbot init` | refait leur niveau, leur équipement et leurs talents |
-| `.rndbot levelup` | leur donne un niveau |
-| `.rndbot revive` | ressuscite les morts |
-| `.rndbot refresh` | les soigne et les remet à neuf |
-| `.rndbot reload` | relit `playerbots.conf` sans redémarrer |
+| `.playerbots bot add <nom>` | prend le contrôle d'un bot précis |
+| `.playerbots bot addclass <classe>` | crée un bot d'une classe donnée |
+| `.playerbots bot remove <nom>` | le renvoie |
+| `.playerbots bot list` | tes bots |
+| `.playerbots bot self` | pilote **ton propre personnage** comme un bot |
+| `.playerbots rndbot stats` | l'état des bots aléatoires |
+| `.playerbots rndbot teleport` | **les envoie tous dans une zone adaptée à leur niveau**, sans attendre le téléport automatique |
+| `.playerbots rndbot grind` | les envoie chasser |
+| `.playerbots rndbot init` | refait leur niveau, leur équipement et leurs talents |
+| `.playerbots rndbot levelup` | leur donne un niveau |
+| `.playerbots rndbot revive` | ressuscite les morts |
+| `.playerbots rndbot refresh` | les soigne et les remet à neuf |
+| `.playerbots rndbot reload` | relit `playerbots.conf` sans redémarrer |
 
-Les commandes `.rndbot` s'appliquent à tous les bots connectés. Pour n'en viser qu'un :
-`.rndbot teleport Nomdubot`.
+Les commandes `.playerbots rndbot` s'appliquent à tous les bots connectés. Pour n'en viser qu'un :
+`.playerbots rndbot teleport Nomdubot`.
 
 ## Réglages utiles (`playerbots.conf`)
 
@@ -84,7 +84,7 @@ Les commandes `.rndbot` s'appliquent à tous les bots connectés. Pour n'en vise
 - **Hors groupe**, un bot ignore la plupart des commandes.
 - **Un bot inactif ne bouge pas** : hors groupe et loin des joueurs, seule une partie des bots est active (`BotActiveAlone`).
 - **Les bots ne montent pas du niveau 1** : ils reçoivent un niveau au hasard à leur première connexion, avec l'équipement et les talents qui vont avec.
-- **Ils ne se téléportent pas tout de suite** dans une zone de leur niveau : jusqu'à 5 heures d'attente, d'où l'intérêt de `.rndbot teleport`.
+- **Ils ne se téléportent pas tout de suite** dans une zone de leur niveau : jusqu'à 5 heures d'attente, d'où l'intérêt de `.playerbots rndbot teleport`.
 - **Le nombre total de bots dépasse le nombre de bots connectés** : le module garde une réserve et fait tourner les personnages.
 
 ## Quand ça ne va pas
