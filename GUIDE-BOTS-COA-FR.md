@@ -75,6 +75,10 @@ Les commandes `.playerbots rndbot` s'appliquent à tous les bots connectés. Pou
 | `AiPlayerbot.MinRandomBotTeleportInterval` / `Max...` | délai entre deux déplacements automatiques, en secondes (3600 à 18000 par défaut) |
 | `AiPlayerbot.GroupInvitationPermission` | à 2, tous les bots acceptent les invitations |
 | `AiPlayerbot.BotTextLocale` | langue du chat des bots : 2 pour le français, 0 pour l'anglais |
+| `AiPlayerbot.ZoneChannelId` | numéro du canal de zone, tel que le client le donne. **3 sur CoA** (le canal « Zone - … »), 1 sur un client standard. Mauvais numéro = les bots parlent dans le vide |
+| `AiPlayerbot.BroadcastWorldChannelName` | nom exact du canal global. `"Ascension"` sur CoA, `"World"` ailleurs |
+| `AiPlayerbot.BroadcastToWorldGlobalChance` | part des messages envoyés dans le canal global, sur 30 000. **0 = les bots n'y entrent même pas** |
+| `AiPlayerbot.BroadcastToGeneralGlobalChance` | part des messages envoyés dans le canal de zone, sur 30 000 |
 | `AiPlayerbot.CoaSpecRotations` | à 1, les bots suivent la rotation écrite de leur spécialisation en plus du choix automatique des sorts (0 par défaut) |
 | `AiPlayerbot.DeleteRandomBotAccounts` | à 1, supprime tous les bots au prochain démarrage, puis en recrée. **Le serveur s'arrête ensuite de lui-même** : remets 0 et redémarre |
 | `Appender.CoaBots=2,4,1,CoaBots.log,a` et `Logger.playerbots.coa=4,CoaBots` (dans `worldserver.conf`) | écrit toutes les 10 min quels sorts CoA les bots lancent et pourquoi certains échouent |
