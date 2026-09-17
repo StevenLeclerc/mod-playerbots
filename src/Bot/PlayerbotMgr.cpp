@@ -661,6 +661,27 @@ void PlayerbotHolder::JoinBotChannels(Player* const bot)
                 case ChatChannelId::GENERAL:
                 case ChatChannelId::LOCAL_DEFENSE:
                 {
+                    // A DBC set whose pattern strings sit outside the string block - the Conquest of
+                    // Azeroth client's do, and since the core reads the client set they load as empty -
+                    // leaves nothing to build a name from. Join the channel the players of this place
+                    // are actually in instead: same id, and its name carries the place.
+                    if (!channel->pattern[locale] || !*channel->pattern[locale])
+                    {
+                        for (auto const& [key, existing] : cMgr->GetChannels())
+                        {
+                            if (!existing || existing->GetChannelId() != channel->ChannelID || existing->GetName().empty())
+                                continue;
+
+                            for (std::string const& place : channel_places)
+                                if (!place.empty() && existing->GetName().find(place) != std::string::npos)
+                                {
+                                    existing->JoinChannel(bot, "");
+                                    break;
+                                }
+                        }
+                        break;
+                    }
+
                     for (std::string const& place : channel_places)
                     {
                         char new_channel_name_buf[100];
