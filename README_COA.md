@@ -38,8 +38,28 @@ jealous-sound's repository, use [Zyth45/azerothcore-wotlk-coa](https://github.co
 
 - tag `bots-issue-batch-20260915-v1.1` (branch `coa-bots`): the jealous-sound release, the core hooks, the
   specialization API and fixes for crashes that bots trigger often. **Use this one.**
-- branch `playerbots-support`: only the core hooks and the specialization API (the changes proposed to
-  jealous-sound).
+- branch `playerbots-support`: only the core hooks and the specialization API, on the latest jealous-sound `main`.
+  These are the changes proposed to jealous-sound in
+  [PR #3069](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3069).
+
+### Building on the latest jealous-sound `main`
+
+Use the `coa` branch of this module with the `playerbots-support` core branch (tested on `main` `67ce9cb305`, #1498):
+
+```bash
+git clone --branch playerbots-support https://github.com/Zyth45/azerothcore-wotlk-coa.git
+git clone --branch coa https://github.com/Zyth45/mod-playerbots.git azerothcore-wotlk-coa/modules/mod-playerbots
+```
+
+- Since #1498 the worldserver stops at startup unless `DataDir/dbc` holds the CoA client DBC set (download link in
+  the CoA Discord's information channel, or `apps/coa-dbc/client_dbc.py`). Players need the matching client patch.
+- Bots trigger some existing crashes and a server freeze much faster than players. The fixes are proposed separately
+  ([#3072](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3072),
+  [#3075](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3075),
+  [#3080](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3080),
+  [#3083](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3083),
+  [#3085](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3085)). Until they are merged, add them to your
+  build for a long-running server with many bots.
 
 ## Build
 
