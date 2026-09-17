@@ -673,6 +673,30 @@ std::vector<Player*> NearbyGroup(Player* bot)
     return members;
 }
 
+// Whether the unit already carries a buff of this spell category.
+//
+// Spell.dbc field 1 groups buffs that displace each other: the four Venomancer
+// combat venoms are all category 55, the three Primalist boons 2336. Casting a
+// second one silently drops the first, so a "cast what is missing" pass never
+// settles - one of them is always missing.
+bool HasBuffOfCategory(Unit* unit, uint32 category, uint32 exceptSpellId)
+{
+    if (!category)
+        return false;
+
+    for (auto const& [auraId, application] : unit->GetAppliedAuras())
+    {
+        if (auraId == exceptSpellId || !application->IsPositive())
+            continue;
+
+        SpellInfo const* auraInfo = application->GetBase()->GetSpellInfo();
+        if (auraInfo && auraInfo->GetCategory() == category)
+            return true;
+    }
+
+    return false;
+}
+
 // Whether the unit carries a harmful aura one of the dispel types in `mask` removes.
 bool HasDispellable(Unit* unit, uint32 mask)
 {
@@ -1020,6 +1044,11 @@ public:
                     continue;
 
                 if (member->HasAura(spell.info->Id))
+                    continue;
+
+                // One buff per category: several of a displacing group would
+                // chase each other forever. See HasBuffOfCategory.
+                if (HasBuffOfCategory(member, spell.info->GetCategory(), spell.info->Id))
                     continue;
 
                 // The aura may come from a triggered spell under another id: do not recast
