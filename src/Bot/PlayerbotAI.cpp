@@ -2949,8 +2949,13 @@ bool PlayerbotAI::SayToChannel(std::string const& msg, ChatChannelId const& chan
         }
     }
 
-    LOG_DEBUG("playerbots", "{}: no channel {} carrying \"{}\" to speak in", bot->GetName(), uint32(chanId),
-              current_str_zone);
+    std::string seen;
+    for (auto const& [key, channel] : cMgr->GetChannels())
+        if (channel && !channel->GetName().empty())
+            seen += (seen.empty() ? "" : ", ") + std::to_string(channel->GetChannelId()) + ":" + channel->GetName();
+
+    LOG_DEBUG("playerbots", "{}: no channel {} carrying \"{}\" or \"{}\" to speak in, channels are [{}]",
+              bot->GetName(), uint32(chanId), current_str_zone, current_str_area, seen);
     return false;
 }
 
