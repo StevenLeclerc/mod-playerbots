@@ -77,8 +77,17 @@ public:
         PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
         PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT,
         PLAYERHOOK_ON_GIVE_EXP,
+        PLAYERHOOK_ON_UPDATE_ZONE,
         PLAYERHOOK_ON_BEFORE_TELEPORT
     }) {}
+
+    // A client joins the channels of the zone it enters. A bot did it once, at login, and then
+    // talked into the channel of a zone it had left - or, more often, said nothing at all.
+    void OnPlayerUpdateZone(Player* player, uint32 /*newZone*/, uint32 /*newArea*/) override
+    {
+        if (player && GET_PLAYERBOT_AI(player))
+            PlayerbotHolder::JoinBotChannels(player);
+    }
 
     void OnPlayerLogin(Player* player) override
     {
