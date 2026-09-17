@@ -724,6 +724,7 @@ bool PlayerbotAIConfig::Initialize()
     autoLearnTrainerSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnTrainerSpells", true);
     autoLearnTradeskillSpells =
         sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnTradeskillSpells", true);
+    coaSpecRotations = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaSpecRotations", false);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
     autoTeleportForLevel = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoTeleportForLevel", false);
     autoDoQuests = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoDoQuests", true);
