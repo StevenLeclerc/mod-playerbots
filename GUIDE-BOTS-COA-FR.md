@@ -92,3 +92,11 @@ Les commandes `.rndbot` s'appliquent à tous les bots connectés. Pour n'en vise
 - **Un bot ne lance pas ses sorts** : vérifie sa spé avec `talents`, ses stratégies avec `co ?`, et active le journal `CoaBots.log` ci-dessus.
 - **Le royaume est « hors ligne »** alors que le serveur tourne : le drapeau est resté à 2 dans `acore_auth.realmlist`, mets-le à 0.
 - **Un plantage** : le rapport est dans `Core\Crashes`, garde le `.txt` et le `.dmp`, ils permettent de retrouver la cause.
+
+## Crédits
+
+- [jealous-sound](https://github.com/jealous-sound/azerothcore-wotlk-coa) pour le serveur Conquest of Azeroth
+- [mod-playerbots](https://github.com/mod-playerbots/mod-playerbots) pour les bots
+- [ascensionsidekick.com](https://ascensionsidekick.com) pour les rôles des spécialisations et les builds de talents
+- [steviecraycray](https://github.com/steviecraycray) pour les rotations écrites par spécialisation, les poids
+  d'équipement et plusieurs correctifs

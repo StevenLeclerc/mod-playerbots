@@ -140,5 +140,7 @@ revision (`targetSourceRevision` in the release `UPDATE.json`), rebuild, and tag
 - [AzerothCore](https://github.com/azerothcore/azerothcore-wotlk) and
   [mod-playerbots](https://github.com/mod-playerbots/mod-playerbots)
 - [ascensionsidekick.com](https://ascensionsidekick.com) for the CoA specialization roles and talent builds
+- [steviecraycray](https://github.com/steviecraycray) for the authored per-specialization rotations, the gear
+  weights and weapon shapes, and several fixes the nine base classes benefit from as well
 
 Same license as mod-playerbots (GPL-2.0).
