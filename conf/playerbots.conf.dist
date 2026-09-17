@@ -2622,6 +2622,12 @@ AiPlayerbot.RandomBotSayWithoutMaster = 0
 # Default: 1 (enabled)
 AiPlayerbot.EnableBroadcasts = 1
 
+# Name of the realm-wide channel bots talk in, exactly as the client shows it.
+# A realm that renames it - Conquest of Azeroth calls it "Ascension" - drops every
+# broadcast meant for that channel until this matches.
+# Default: World
+AiPlayerbot.BroadcastWorldChannelName = "World"
+
 # All broadcast chances should be in range 0-30000
 # Value of 0 will disable this particular broadcast
 # Setting value to 30000 does not guarantee the broadcast, as there are some internal randoms as well

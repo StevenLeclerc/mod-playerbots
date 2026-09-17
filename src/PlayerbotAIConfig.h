@@ -189,6 +189,7 @@ public:
     bool randomBotSayWithoutMaster;
 
     uint32 broadcastChanceMaxValue;
+    std::string broadcastWorldChannelName;
 
     uint32 broadcastToGuildGlobalChance;
     uint32 broadcastToWorldGlobalChance;

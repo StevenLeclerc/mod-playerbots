@@ -2879,8 +2879,11 @@ bool PlayerbotAI::SayToWorld(std::string const& msg)
     if (!cMgr)
         return false;
 
+    // The channel every player of the realm is in. Its name is not "World" everywhere: Conquest of
+    // Azeroth calls it "Ascension", and with the wrong name every broadcast meant for it is dropped
+    // in silence, which is most of what a bot would have said.
     // no zone
-    if (Channel* worldChannel = cMgr->GetChannel("World", bot))
+    if (Channel* worldChannel = cMgr->GetChannel(sPlayerbotAIConfig.broadcastWorldChannelName, bot))
     {
         worldChannel->Say(bot->GetGUID(), msg.c_str(), LANG_UNIVERSAL);
         return true;

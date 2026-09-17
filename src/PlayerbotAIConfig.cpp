@@ -303,6 +303,7 @@ bool PlayerbotAIConfig::Initialize()
     // lowering it will increase the chance, setting it to 0 will disable broadcasts
     // for internal use, not intended to be change by the user
     broadcastChanceMaxValue = enableBroadcasts ? 30000 : 0;
+    broadcastWorldChannelName = sConfigMgr->GetOption<std::string>("AiPlayerbot.BroadcastWorldChannelName", "World");
 
     // all broadcast chances should be in range 1-broadcastChanceMaxValue, value of 0 will disable this particular
     // broadcast setting value to max does not guarantee the broadcast, as there are some internal randoms as well
