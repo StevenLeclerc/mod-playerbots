@@ -439,7 +439,13 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
         // The rows are generated from mod-playerbots-coa out of
         // ascensionsidekick's spec guides; without the Ai/Coa triggers and
         // actions the engine rejects every one of them.
-        if (CoaSpecStrategy const* coa = GetCoaSpecStrategyFor(player))
+        //
+        // Off by default: the classifier on its own already plays every CoA
+        // class, and the authored rotations are only confirmed in play up to
+        // level 40. Switching them off leaves the classifier untouched.
+        CoaSpecStrategy const* coa =
+            sPlayerbotAIConfig.coaSpecRotations ? GetCoaSpecStrategyFor(player) : nullptr;
+        if (coa)
         {
             engine->addStrategy(coa->position, false);
             engine->addStrategy(coa->combat, false);

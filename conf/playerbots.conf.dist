@@ -1366,6 +1366,17 @@ AiPlayerbot.AutoLearnTrainerSpells = 1
 # Default: 1 (enabled, upstream behaviour)
 AiPlayerbot.AutoLearnTradeskillSpells = 1
 
+# Authored combat rotations for the Conquest of Azeroth specializations.
+# Off: CoA bots are driven by the runtime classifier alone, which picks a spell
+# every tick from what the bot knows.
+# On: each spec additionally gets the ordered rotation and the position
+# generated from its guide, applied through playerbots_custom_strategy.
+# The classifier stays active either way, so interrupts, defensive cooldowns
+# and the fallback attack are never lost.
+# Confirmed in play up to level 40; beyond that the ordering is untested.
+# Default: 0 (disabled)
+AiPlayerbot.CoaSpecRotations = 0
+
 # Randombots automatically spend talent points on levelup
 # Default: 1 (enabled)
 AiPlayerbot.AutoPickTalents = 1

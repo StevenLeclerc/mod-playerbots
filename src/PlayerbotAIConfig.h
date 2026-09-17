@@ -390,6 +390,7 @@ public:
     int32 petChatCommandDebug;
     bool autoLearnTrainerSpells;
     bool autoLearnTradeskillSpells;
+    bool coaSpecRotations;
     bool autoDoQuests;
     bool enableNewRpgStrategy;
     std::unordered_map<NewRpgStatus, uint32> RpgStatusProbWeight;
