@@ -605,8 +605,10 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
         factory.Randomize(false);
     }
 
-    // bots join World chat if not solo oriented
+    // bots join World chat if not solo oriented, and only when they may speak there: a realm that
+    // turned those broadcasts off gets the join announcements and nothing else.
     if (bot->GetLevel() >= 10 && sRandomPlayerbotMgr.IsRandomBot(bot) && GET_PLAYERBOT_AI(bot) &&
+        sPlayerbotAIConfig.enableBroadcasts && sPlayerbotAIConfig.broadcastToWorldGlobalChance > 0 &&
         GET_PLAYERBOT_AI(bot)->GetGrouperType() != GrouperType::SOLO)
     {
         // The realm-wide channel, whatever it is called here: joining a channel no player is in
