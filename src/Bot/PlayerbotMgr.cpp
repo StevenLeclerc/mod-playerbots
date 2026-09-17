@@ -608,11 +608,12 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
     if (bot->GetLevel() >= 10 && sRandomPlayerbotMgr.IsRandomBot(bot) && GET_PLAYERBOT_AI(bot) &&
         GET_PLAYERBOT_AI(bot)->GetGrouperType() != GrouperType::SOLO)
     {
-        // TODO make action/config
-        // Make the bot join the world channel for chat
+        // The realm-wide channel, whatever it is called here: joining a channel no player is in
+        // means every broadcast meant for it is said to nobody. Conquest of Azeroth's is
+        // "Ascension".
         WorldPacket pkt(CMSG_JOIN_CHANNEL);
         pkt << uint32(0) << uint8(0) << uint8(0);
-        pkt << std::string("World");
+        pkt << sPlayerbotAIConfig.broadcastWorldChannelName;
         pkt << "";  // Pass
         bot->GetSession()->HandleJoinChannel(pkt);
     }
