@@ -10,6 +10,8 @@
 #include "AiObjectContext.h"
 #include "ArenaTeam.h"
 #include "ArenaTeamMgr.h"
+#include "CoaSpecLookup.h"
+#include "CoaSpecStatWeights.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
 #include "GuildMgr.h"
@@ -1336,6 +1338,12 @@ void PlayerbotFactory::InitPetTalents()
             continue;
 
         TalentTabEntry const* talentTabInfo = sTalentTabStore.LookupEntry(talentInfo->TalentTab);
+        // Talent.dbc can reference a TalentTab id that TalentTab.dbc does not
+        // define; LookupEntry then returns null and the dereference below
+        // crashes the server. Observed with Ascension's DBC set. Other call
+        // sites in this file already guard this, these four did not.
+        if (!talentTabInfo)
+            continue;
 
         // prevent learn talent for different family (cheating)
         if (!((1 << pet_family->petTalentType) & talentTabInfo->petTalentMask))
@@ -1463,7 +1471,26 @@ void PlayerbotFactory::InitPet()
 
     if (!pet)
     {
-        if (bot->getClass() != CLASS_HUNTER || bot->GetLevel() < 10)
+        // NOT ONLY HUNTERS.
+        //
+        // The Primalist is a pet class: its abilities read "You and your pet
+        // rush towards an enemy" (Rylak's Bite), "Command your pet to shred"
+        // (Primal Shred), "Enrage you and your pet" (Savage Frenzy). Without a
+        // pet half the rotation cannot be cast and the bot only swings its
+        // weapon. Observed on Aesera on 15 Sep 2026; character_pet held no row
+        // for ANY of the CoA bots.
+        //
+        // Access comes from the level 10 passive 92148 "Spirit Beast Master":
+        // "You may now tame beasts in Azeroth to aid you as a companion." It is
+        // the only taming passive across all CoA classes - counted through the
+        // class lists and talent plans of classes 12 to 32.
+        //
+        // So we ask for the passive rather than for the class number. If a
+        // second pet class arrives later, the rule carries it by itself.
+        uint32 constexpr SPIRIT_BEAST_MASTER = 92148;
+        bool const mayTame =
+            bot->getClass() == CLASS_HUNTER || bot->HasSpell(SPIRIT_BEAST_MASTER);
+        if (!mayTame || bot->GetLevel() < 10)
             return;
 
         Map* map = bot->GetMap();
@@ -1804,6 +1831,8 @@ void PlayerbotFactory::InitTalentsBySpecNo(Player* bot, int specNo, bool reset)
                     continue;
                 }
                 TalentTabEntry const* talentTabInfo = sTalentTabStore.LookupEntry(talentInfo->TalentTab);
+                if (!talentTabInfo)  // can be null, see InitPetTalents
+                    continue;
                 if (talentTabInfo->tabpage != tab)
                 {
                     continue;
@@ -1878,6 +1907,8 @@ void PlayerbotFactory::InitTalentsByParsedSpecLink(Player* bot, std::vector<std:
                 continue;
             }
             TalentTabEntry const* talentTabInfo = sTalentTabStore.LookupEntry(talentInfo->TalentTab);
+            if (!talentTabInfo)  // can be null, see InitPetTalents
+                continue;
             if (talentTabInfo->tabpage != tab)
             {
                 continue;
@@ -3466,6 +3497,17 @@ void PlayerbotFactory::InitAvailableSpells()
                 trainer->GetTrainerType() != Trainer::Type::Class)
                 continue;
 
+            // Tradeskill trainers teach every recipe the bot is allowed to
+            // learn - unlike class trainers, which are checked against the bot
+            // below. Measured on a level 20 bot: 464 spells remained after
+            // clearing the collection, of which 204 were glyph recipes and 213
+            // other profession recipes. Only 47 belonged to the class. That
+            // makes the in-game `spell` output unreadable and hides what a bot
+            // can actually cast. Default keeps the upstream behaviour.
+            if (trainer->GetTrainerType() == Trainer::Type::Tradeskill &&
+                !sPlayerbotAIConfig.autoLearnTradeskillSpells)
+                continue;
+
             if (trainer->GetTrainerType() == Trainer::Type::Class &&
                 !trainer->IsTrainerValidForPlayer(bot))
                 continue;
@@ -3499,14 +3541,18 @@ void PlayerbotFactory::InitAvailableSpells()
     }
 }
 
+// NOTE: the second parameter of Player::learnSpell is 'temporary', not
+// 'dependent'. Passing true stores the spell as PLAYERSPELL_TEMPORARY, and
+// Player::_SaveSpells deliberately skips that state - so a bot lost exactly
+// its class combat abilities on every relog.
 void PlayerbotFactory::InitClassSpells()
 {
     int32_t level = bot->GetLevel();
     switch (bot->getClass())
     {
         case CLASS_WARRIOR:
-            bot->learnSpell(78, true);
-            bot->learnSpell(2457, true);
+            bot->learnSpell(78, false);
+            bot->learnSpell(2457, false);
             if (level >= 10)
             {
                 bot->learnSpell(71, false);    // Defensive Stance
@@ -3517,22 +3563,22 @@ void PlayerbotFactory::InitClassSpells()
                 bot->learnSpell(2458, false);  // Berserker Stance
             break;
         case CLASS_PALADIN:
-            bot->learnSpell(21084, true);
-            bot->learnSpell(635, true);
+            bot->learnSpell(21084, false);
+            bot->learnSpell(635, false);
             if (level >= 12)
                 bot->learnSpell(7328, false);  // Redemption
             if (level >= 20)
                 bot->learnSpell(5502, false); // Sense Undead
             break;
         case CLASS_ROGUE:
-            bot->learnSpell(1752, true);
-            bot->learnSpell(2098, true);
+            bot->learnSpell(1752, false);
+            bot->learnSpell(2098, false);
             break;
         case CLASS_DEATH_KNIGHT:
-            bot->learnSpell(45477, true);
-            bot->learnSpell(47541, true);
-            bot->learnSpell(45462, true);
-            bot->learnSpell(45902, true);
+            bot->learnSpell(45477, false);
+            bot->learnSpell(47541, false);
+            bot->learnSpell(45462, false);
+            bot->learnSpell(45902, false);
             // to leave DK starting area
             bot->learnSpell(53428, false);
             bot->learnSpell(50977, false);
@@ -3540,8 +3586,8 @@ void PlayerbotFactory::InitClassSpells()
             bot->learnSpell(48778, false);
             break;
         case CLASS_HUNTER:
-            bot->learnSpell(2973, true);
-            bot->learnSpell(75, true);
+            bot->learnSpell(2973, false);
+            bot->learnSpell(75, false);
             if (level >= 10)
             {
                 bot->learnSpell(883, false);   // call pet
@@ -3552,16 +3598,16 @@ void PlayerbotFactory::InitClassSpells()
             }
             break;
         case CLASS_PRIEST:
-            bot->learnSpell(585, true);
-            bot->learnSpell(2050, true);
+            bot->learnSpell(585, false);
+            bot->learnSpell(2050, false);
             break;
         case CLASS_MAGE:
-            bot->learnSpell(133, true);
-            bot->learnSpell(168, true);
+            bot->learnSpell(133, false);
+            bot->learnSpell(168, false);
             break;
         case CLASS_WARLOCK:
-            bot->learnSpell(687, true);
-            bot->learnSpell(686, true);
+            bot->learnSpell(687, false);
+            bot->learnSpell(686, false);
             bot->learnSpell(688, false);  // summon imp
             if (level >= 10)
                 bot->learnSpell(697, false);  // summon voidwalker
@@ -3571,8 +3617,8 @@ void PlayerbotFactory::InitClassSpells()
                 bot->learnSpell(691, false);  // summon felhunter
             break;
         case CLASS_DRUID:
-            bot->learnSpell(5176, true);
-            bot->learnSpell(5185, true);
+            bot->learnSpell(5176, false);
+            bot->learnSpell(5185, false);
             if (level >= 10)
             {
                 bot->learnSpell(5487, false);  // bear form
@@ -3581,9 +3627,9 @@ void PlayerbotFactory::InitClassSpells()
             }
             break;
         case CLASS_SHAMAN:
-            bot->learnSpell(403, true);
-            bot->learnSpell(331, true);
-            // bot->learnSpell(66747, true); // Totem of the Earthen Ring
+            bot->learnSpell(403, false);
+            bot->learnSpell(331, false);
+            // bot->learnSpell(66747, false); // Totem of the Earthen Ring
             if (level >= 4)
                 bot->learnSpell(8071, false);  // stoneskin totem
             if (level >= 10)
@@ -3728,6 +3774,8 @@ void PlayerbotFactory::InitTalentsByTemplate(uint32 specTab)
                     continue;
                 }
                 TalentTabEntry const* talentTabInfo = sTalentTabStore.LookupEntry(talentInfo->TalentTab);
+                if (!talentTabInfo)  // can be null, see InitPetTalents
+                    continue;
                 if (talentTabInfo->tabpage != tab)
                 {
                     continue;
@@ -3875,15 +3923,32 @@ void PlayerbotFactory::ClearAllItems()
 void PlayerbotFactory::InitAmmo()
 {
     uint8 const botClass = bot->getClass();
-    if (botClass != CLASS_HUNTER && botClass != CLASS_ROGUE && botClass != CLASS_WARRIOR)
-        return;
 
+    // NO CLASS LIST ANY MORE.
+    //
+    // This used to list Hunter, Rogue and Warrior only. A Shadowhunting Witch
+    // Doctor (class 13) carries a bow in the ranged slot, the bow skill (264)
+    // and the Shadowhunter passive (92086, "Allows you to auto shoot with a
+    // ranged weapon") - and never got any ammo. SetAmmo() never ran and the bow
+    // was dead weight. Shown on Aellotraa on 15 Sep 2026: Malgen's Long Bow
+    // equipped, zero arrows in the bags.
+    //
+    // The question is not the class anyway, it is the weapon: anyone with an
+    // empty ranged slot drops out two lines below, and everything except bow,
+    // gun and crossbow drops out in the switch. That holds for every CoA class
+    // from 12 to 32 just as much as for the original eleven.
     Item const* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
     if (!item)
         return;
 
     ItemTemplate const* proto = item->GetTemplate();
     if (!proto)
+        return;
+
+    // The ranged slot also holds relics, idols and librams. Their armour
+    // subclasses can collide numerically with weapon subclasses, so check the
+    // item class first.
+    if (proto->Class != ITEM_CLASS_WEAPON)
         return;
 
     uint32 subClass = 0;
@@ -3943,6 +4008,18 @@ void PlayerbotFactory::AutoGear(Player* bot, uint32 itemQuality, uint32 ilvl, bo
         return;
 
     factory.InitAmmo();
+
+    // A PET IS PART OF THE GEAR.
+    //
+    // InitPet used to hang off Randomize and Refresh only. A bot added by hand
+    // goes through neither, so it never got a pet, not even after autogear.
+    // Observed on Aesera (Primalist) on 15 Sep 2026: passive 92148 present,
+    // character_pet empty, no error in the log because the function never ran.
+    //
+    // For a pet class that is the same as a bow without arrows: half the
+    // rotation stays uncastable. Hunters are affected just the same.
+    factory.InitPet();
+
     if (bot->GetLevel() >= sPlayerbotAIConfig.minEnchantingBotLevel)
         factory.ApplyEnchantAndGemsNew();
     bot->DurabilityRepairAll(false, 1.0f, false);
@@ -5363,6 +5440,22 @@ std::vector<InventoryType> PlayerbotFactory::GetPossibleInventoryTypeListBySlot(
             ret.push_back(INVTYPE_RANGED);
             ret.push_back(INVTYPE_RANGEDRIGHT);
             ret.push_back(INVTYPE_RELIC);
+            // CoA: a thrown weapon is never offered here, so a spec whose only
+            // ranged ability throws something runs with an empty belt and the
+            // spell is simply uncastable. The Barbarian has no bow or gun skill
+            // at all - Throw is its whole ranged game, and Headhunting builds
+            // half its rotation on Impaling Spear, Barbed Spear and Gutspiller.
+            // Only specs that actually need it get the extra type, so a Ranger
+            // is not talked out of its bow.
+            if (CoaSpecStrategy const* coa = GetCoaSpecStrategyFor(bot))
+            {
+                CoaSpecStats const* stats = GetCoaSpecStats(coa->classId, coa->specId);
+                if (!stats)
+                    stats = GetCoaDefaultSpecStats(coa->classId);
+
+                if (stats && stats->needsThrown)
+                    ret.push_back(INVTYPE_THROWN);
+            }
             break;
         default:
             break;

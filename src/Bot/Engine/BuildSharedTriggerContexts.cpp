@@ -29,6 +29,7 @@
 #include "WorldPacketTriggerContext.h"
 #include "WotlkDungeonTriggerContext.h"
 #include "ZATriggerContext.h"
+#include "CoaGenericContext.h"
 
 void AiObjectContext::BuildSharedTriggerContexts(SharedNamedObjectContextList<Trigger>& triggerContexts)
 {
@@ -74,4 +75,8 @@ void AiObjectContext::BuildSharedTriggerContexts(SharedNamedObjectContextList<Tr
     triggerContexts.Add(new WotlkDungeonFoSTriggerContext());
     triggerContexts.Add(new WotlkDungeonPoSTriggerContext());
     triggerContexts.Add(new WotlkDungeonToCTriggerContext());
+
+    // CoA: generische, parametrisierbare Bausteine (GenericTrigger)
+    // machen Kampfverhalten zu Daten - siehe Ai/Coa/CoaGenericContext.h
+    triggerContexts.Add(new CoaGenericTriggerContext());
 }

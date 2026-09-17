@@ -5,6 +5,9 @@
  */
 
 #include "AiFactory.h"
+#include "CoaSpecLookup.h"
+
+#include <string_view>
 #include "CoaSpecialization.h"
 #include "BattlegroundMgr.h"
 #include "DKAiObjectContext.h"
@@ -426,6 +429,25 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
                 engine->addStrategiesNoInit(GetCoaStyle(player) == CoaStyle::Melee ? "coa" : "coa ranged",
                                             "dps assist", nullptr);
                 break;
+        }
+
+        // On top of the runtime classifier above: the authored rotation for
+        // this specialization, from playerbots_custom_strategy. The classifier
+        // keeps what it alone can do - interrupts, defensive cooldowns, and a
+        // fallback attack for any spec that has no rotation row.
+        //
+        // The rows are generated from mod-playerbots-coa out of
+        // ascensionsidekick's spec guides; without the Ai/Coa triggers and
+        // actions the engine rejects every one of them.
+        if (CoaSpecStrategy const* coa = GetCoaSpecStrategyFor(player))
+        {
+            engine->addStrategy(coa->position, false);
+            engine->addStrategy(coa->combat, false);
+
+            // The plain swing. Every class strategy brings its own
+            // NextAction("melee", ACTION_DEFAULT); `close` does not.
+            if (std::string_view(coa->position) == "close")
+                engine->addStrategy("coa basic attack", false);
         }
     }
 

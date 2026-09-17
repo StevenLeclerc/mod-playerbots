@@ -221,6 +221,9 @@ PlayerbotAI::PlayerbotAI(Player* bot)
     // quest packet
     masterIncomingPacketHandlers.AddHandler(CMSG_QUESTGIVER_COMPLETE_QUEST, "complete quest");
     masterIncomingPacketHandlers.AddHandler(CMSG_QUESTGIVER_ACCEPT_QUEST, "accept quest");
+    // Auto-accept quests never send the accept opcode - the core takes them
+    // inside the query handler. See AcceptAutoQuestAction.
+    masterIncomingPacketHandlers.AddHandler(CMSG_QUESTGIVER_QUERY_QUEST, "accept auto quest");
     masterIncomingPacketHandlers.AddHandler(CMSG_QUEST_CONFIRM_ACCEPT, "confirm quest");
     masterIncomingPacketHandlers.AddHandler(CMSG_PUSHQUESTTOPARTY, "quest share");
     botOutgoingPacketHandlers.AddHandler(SMSG_QUESTUPDATE_COMPLETE, "quest update complete");
@@ -3324,6 +3327,21 @@ bool PlayerbotAI::CanCastSpell(uint32 spellid, Unit* target, bool checkHasSpell,
         return false;
     }
 
+    // ASCENSION SWAPS SPELLS AT RUNTIME - THE BOT HAS TO FOLLOW THE SWAP.
+    //
+    // Malefic Wrath becomes Malefic Arrow, Reclamation becomes Spirit Volley,
+    // Hex of Malice becomes Umbral Glaive. The core resolves this in
+    // WorldSession::HandleCastSpellOpcode - so ONLY for casts that arrive as a
+    // client packet. A bot calls Player::CastSpell directly and never passes
+    // through there.
+    //
+    // Without this, two routes remain and both are wrong: cast the base spell
+    // and the replacement never reaches the bot, or cast the replacement
+    // directly and the proc is never consumed. Umbral Glaive has no global
+    // cooldown and could then be repeated without end.
+    if (uint32 const replacement = bot->GetTemporarySpellReplacement(spellid); replacement && replacement != spellid)
+        spellid = replacement;
+
     if (bot->HasUnitState(UNIT_STATE_LOST_CONTROL))
     {
         if (!sPlayerbotAIConfig.logInGroupOnly || (bot->GetGroup() && HasGameClientMaster()))
@@ -3597,6 +3615,21 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget)
 {
     if (!spellId)
         return false;
+
+    // ASCENSION SWAPS SPELLS AT RUNTIME - THE BOT HAS TO FOLLOW THE SWAP.
+    //
+    // Malefic Wrath becomes Malefic Arrow, Reclamation becomes Spirit Volley,
+    // Hex of Malice becomes Umbral Glaive. The core resolves this in
+    // WorldSession::HandleCastSpellOpcode - so ONLY for casts that arrive as a
+    // client packet. A bot calls Player::CastSpell directly and never passes
+    // through there.
+    //
+    // Without this, two routes remain and both are wrong: cast the base spell
+    // and the replacement never reaches the bot, or cast the replacement
+    // directly and the proc is never consumed. Umbral Glaive has no global
+    // cooldown and could then be repeated without end.
+    if (uint32 const replacement = bot->GetTemporarySpellReplacement(spellId); replacement && replacement != spellId)
+        spellId = replacement;
 
     if (!target)
         target = bot;

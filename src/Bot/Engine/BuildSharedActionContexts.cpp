@@ -29,6 +29,7 @@
 #include "WorldPacketActionContext.h"
 #include "WotlkDungeonActionContext.h"
 #include "ZAActionContext.h"
+#include "CoaGenericContext.h"
 
 void AiObjectContext::BuildSharedActionContexts(SharedNamedObjectContextList<Action>& actionContexts)
 {
@@ -74,4 +75,8 @@ void AiObjectContext::BuildSharedActionContexts(SharedNamedObjectContextList<Act
     actionContexts.Add(new WotlkDungeonFoSActionContext());
     actionContexts.Add(new WotlkDungeonPoSActionContext());
     actionContexts.Add(new WotlkDungeonToCActionContext());
+
+    // CoA: generische, parametrisierbare Bausteine (GenericAction)
+    // machen Kampfverhalten zu Daten - siehe Ai/Coa/CoaGenericContext.h
+    actionContexts.Add(new CoaGenericActionContext());
 }

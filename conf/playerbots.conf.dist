@@ -1358,6 +1358,14 @@ AiPlayerbot.AutoLearnQuestSpells = 1
 # Default: 1 (enabled)
 AiPlayerbot.AutoLearnTrainerSpells = 1
 
+# Bots learn every recipe available from tradeskill trainers when the factory
+# initialises them. Class trainers are checked against the bot; tradeskill
+# trainers are not, so this is where the bulk of a bot's spellbook comes from.
+# Turn it off to keep the spellbook - and the in-game `spell` output - limited
+# to what the bot can actually cast in combat. Bots then no longer craft.
+# Default: 1 (enabled, upstream behaviour)
+AiPlayerbot.AutoLearnTradeskillSpells = 1
+
 # Randombots automatically spend talent points on levelup
 # Default: 1 (enabled)
 AiPlayerbot.AutoPickTalents = 1
