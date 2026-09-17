@@ -102,6 +102,33 @@ git clone --branch coa https://github.com/Zyth45/mod-playerbots.git azerothcore-
 Known issue: `mod-aoe-loot` crashes the CoA release at the first bot login (its module string is missing from the
 release database). Leave it out or import its SQL.
 
+## Commands
+
+Everything below is typed in the game chat. A bot has to be **in your group** to answer most whispers, and a
+trailing `?` shows instead of changes: `co ?` lists, `co +name` adds, `co -name` removes.
+
+| Command | What it does |
+|---|---|
+| `.playerbots coa tank\|heal\|dps` | recruits the nearest free CoA bot of that role into your group, raised to your level |
+| `.playerbots add\|remove <name>` | takes control of a bot, or sends it away |
+| `.playerbots self` | drives your own character with the bot AI |
+| `.rndbot teleport` | sends every random bot to a place that fits its level, instead of waiting for the automatic move |
+| `.rndbot stats\|grind\|init\|levelup\|revive\|refresh` | state, send hunting, re-roll level/gear/talents, level up, revive, restore |
+| `.rndbot reload` | re-reads `playerbots.conf` without a restart |
+| `/w <bot> co ?` | its combat strategies: position (`close` / `ranged`), the CoA classifier, and its authored rotation |
+| `/w <bot> talents` / `talents spec list` / `talents spec <name>` | its specialization, the list with roles, or switch (`tank`, `heal`, `dps`, `random` work too) |
+| `/w <bot> stats\|spells\|equip\|autogear\|upgrade` | its state, spells and gear |
+| `/w <bot> follow\|stay\|flee\|attack\|formation\|rti` | movement and group position |
+| `/w <bot> help` | the full list |
+
+Things that surprise people:
+
+- `co` alone answers nothing, it needs `co ?`.
+- Out of a group, a bot ignores most commands.
+- Bots do not level from 1: each one is given a random level on its first login, with the gear and talents that go
+  with it, and only moves to a zone of its level on the next automatic teleport (up to five hours).
+- The bot pool is larger than the number online: the module rotates characters.
+
 ## Updating to a new jealous-sound release
 
 The bot work is a few commits on top of the release in each repository. Cherry-pick them onto the new release
