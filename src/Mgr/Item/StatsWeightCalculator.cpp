@@ -6,6 +6,8 @@
 
 #include "StatsWeightCalculator.h"
 #include "AiFactory.h"
+#include "CoaSpecLookup.h"
+#include "CoaSpecStatWeights.h"
 #include "CoaSpecialization.h"
 #include "DBCStores.h"
 #include "ItemEnchantmentMgr.h"
@@ -15,6 +17,8 @@
 #include "PlayerbotFactory.h"
 #include "RandomItemMgr.h"
 #include "SharedDefines.h"
+
+#include <string_view>
 #include "SpellAuraDefines.h"
 #include "SpellMgr.h"
 #include "StatsCollector.h"
@@ -113,7 +117,7 @@ float StatsWeightCalculator::CalculateItem(uint32 itemId, int32 randomPropertyId
         weight_ += stats_weights_[i] * collector_->stats[i];
     }
 
-    CalculateItemTypePenalty(proto);
+    CalculateItemTypePenalty(proto, slot);
 
     if (enable_item_set_bonus_)
         CalculateItemSetMod(player_, proto);
@@ -275,6 +279,29 @@ void StatsWeightCalculator::GenerateBasicWeights(Player* player)
     // the bear tank weights below, casters included.
     if (IsAscensionCustomClassId(cls))
     {
+        // Per-specialization weights first, from ascensionsidekick's stat
+        // priority. They carry what the four primary stats cannot: Barbarian
+        // scales on Agility rather than Strength, Voodoo on Spirit,
+        // Shadowhunting on ranged attack power. The table is generated; see its
+        // file header for what is sourced (the order) and what is an assumption
+        // (the magnitudes).
+        if (CoaSpecStrategy const* coa = GetCoaSpecStrategyFor(player))
+        {
+            CoaSpecStats const* stats = GetCoaSpecStats(coa->classId, coa->specId);
+            if (!stats)
+                stats = GetCoaDefaultSpecStats(coa->classId);
+
+            if (stats)
+            {
+                for (uint8 i = 0; i < stats->count; ++i)
+                    stats_weights_[stats->weights[i].stat] += stats->weights[i].weight;
+
+                return;
+            }
+        }
+
+        // No row for this specialization: the generic CoA weights still beat
+        // falling through to a talent tab that does not exist.
         GenerateCoaWeights(player);
         return;
     }
@@ -696,7 +723,22 @@ void StatsWeightCalculator::CalculateSocketBonus(Player* /*player*/, ItemTemplat
     weight_ *= multiplier;
 }
 
-void StatsWeightCalculator::CalculateItemTypePenalty(ItemTemplate const* proto)
+// The weapon shape of the player's CoA specialization, or an empty view when
+// the player is not a CoA class or the spec carries no shape.
+static std::string_view CoaWeaponShape(Player* player)
+{
+    CoaSpecStrategy const* coa = GetCoaSpecStrategyFor(player);
+    if (!coa)
+        return {};
+
+    CoaSpecStats const* stats = GetCoaSpecStats(coa->classId, coa->specId);
+    if (!stats)
+        stats = GetCoaDefaultSpecStats(coa->classId);
+
+    return stats ? std::string_view(stats->weapon) : std::string_view{};
+}
+
+void StatsWeightCalculator::CalculateItemTypePenalty(ItemTemplate const* proto, int32 slot)
 {
     // // penalty for different type armor
     // if (proto->Class == ITEM_CLASS_ARMOR && proto->SubClass >= ITEM_SUBCLASS_ARMOR_CLOTH &&
@@ -704,12 +746,51 @@ void StatsWeightCalculator::CalculateItemTypePenalty(ItemTemplate const* proto)
     // {
     //     weight_ *= 1.0;
     // }
+    // CoA: the off-hand is a choice between a second weapon and a shield, and
+    // the weights alone always answer "weapon" - a shield carries no damage, so
+    // a melee spec that must hold one (Barbarian/Ancestry: "Thane's Guard grants
+    // shield proficiency ... that's the intended 1H+Shield setup") ends up dual
+    // wielding instead. The shape decides the slot, not the stat total.
+    if (slot == EQUIPMENT_SLOT_OFFHAND)
+    {
+        std::string_view const shape = CoaWeaponShape(player_);
+        bool const isShield =
+            proto->Class == ITEM_CLASS_ARMOR && proto->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD;
+
+        if (shape == "shield")
+            weight_ *= isShield ? 5.0f : 0.02f;
+        else if (isShield && !shape.empty() && shape != "any")
+            weight_ *= 0.1f;
+    }
+
     if (proto->Class == ITEM_CLASS_WEAPON)
     {
         // double hand
         bool isDoubleHand = proto->Class == ITEM_CLASS_WEAPON &&
                             !(ITEM_SUBCLASS_MASK_SINGLE_HAND & (1 << proto->SubClass)) &&
                             !(ITEM_SUBCLASS_MASK_WEAPON_RANGED & (1 << proto->SubClass));
+
+        // CoA: the spec says which shape it needs, and that is derived from
+        // the weapons its own rotation spells require - Shield Slam wants a
+        // shield, Crow's Harvest wants a two-hander. Without this a CoA spec
+        // keeps the blanket 0.5 penalty on two-handers below and gets no push
+        // towards the weapon its abilities cannot be cast without.
+        std::string_view const shape = CoaWeaponShape(player_);
+        if (!shape.empty())
+        {
+            bool const wantsTwoHand = shape == "twoHand" || shape == "caster";
+            bool const wantsOneHand =
+                shape == "oneHand" || shape == "dualWield" || shape == "shield";
+
+            if (isDoubleHand && wantsOneHand)
+                weight_ *= 0.1f;
+            else if (!isDoubleHand && shape == "twoHand")
+                weight_ *= 0.1f;
+            else if (isDoubleHand && !wantsTwoHand)
+                weight_ *= 0.5f;   // "any" and "ranged": as before
+
+            return;
+        }
 
         if (isDoubleHand)
         {

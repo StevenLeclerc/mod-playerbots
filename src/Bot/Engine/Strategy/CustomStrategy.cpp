@@ -13,20 +13,33 @@ std::map<std::string, std::string> CustomStrategy::actionLinesCache;
 
 NextAction toNextAction(std::string const action)
 {
-    std::vector<std::string> tokens = split(action, '!');
-
-    if (tokens[0].empty())
+    // The relevance is what follows the LAST '!', and only when that is a
+    // number. Splitting on every '!' assumed no action name contains one.
+    //
+    // Conquest of Azeroth has several that do: "Tavern Brawl!" (Barbarian),
+    // "Zap!" and "My Greatest Invention!" (Tinker), "Cheers!" (Barbarian).
+    // "cast melee::Tavern Brawl!!88" split into three tokens, which failed the
+    // size checks below and threw the whole line away.
+    //
+    // For every line without a '!' in the name this behaves exactly as before.
+    if (action.empty())
         throw std::invalid_argument("Invalid action");
 
-    if (tokens.size() == 2)
-        return NextAction(tokens[0], atof(tokens[1].c_str()));
+    size_t const separator = action.rfind('!');
+    if (separator != std::string::npos && separator + 1 < action.size())
+    {
+        std::string const relevance = action.substr(separator + 1);
+        if (relevance.find_first_not_of("0123456789.+-") == std::string::npos)
+        {
+            std::string const name = action.substr(0, separator);
+            if (name.empty())
+                throw std::invalid_argument("Invalid action");
 
-    if (tokens.size() == 1)
-        return NextAction(tokens[0], ACTION_NORMAL);
+            return NextAction(name, atof(relevance.c_str()));
+        }
+    }
 
-    LOG_ERROR("playerbots", "Invalid action {}", action.c_str());
-
-    throw std::invalid_argument("Invalid action");
+    return NextAction(action, ACTION_NORMAL);
 }
 
 std::vector<NextAction> toNextActionArray(const std::string actions)

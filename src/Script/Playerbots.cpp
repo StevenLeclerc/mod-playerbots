@@ -4,6 +4,7 @@
  * or (at your option) any later version.
  */
 
+#include "CoaTalentApply.h"
 #include "Playerbots.h"
 #include "BattleGroundTactics.h"
 #include "BattlefieldScript.h"
@@ -77,8 +78,21 @@ public:
         PLAYERHOOK_CAN_PLAYER_USE_GUILD_CHAT,
         PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT,
         PLAYERHOOK_ON_GIVE_EXP,
+        PLAYERHOOK_ON_LEVEL_CHANGED,
         PLAYERHOOK_ON_BEFORE_TELEPORT
     }) {}
+
+    // Levelling up adds one talent point per level. Bots catch up here so they
+    // do not sit on an old plan until their next login.
+    //
+    // The test is the botAI, NOT the session. A self-bot (`.playerbots bot
+    // self`) keeps its real player session, where IsBot() is false - which is
+    // why it came away empty-handed until 15 Sep 2026.
+    void OnPlayerLevelChanged(Player* player, uint8 /*oldLevel*/) override
+    {
+        if (player && GET_PLAYERBOT_AI(player))
+            ApplyCoaTalentPlan(player);
+    }
 
     void OnPlayerLogin(Player* player) override
     {

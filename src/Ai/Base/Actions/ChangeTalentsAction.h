@@ -29,6 +29,10 @@ private:
     // TalentSpec* GetBestPremadeSpec(uint32 spec);
     std::string TalentsHelp();
     std::string SpecList();
+    // The same two for CoA classes, whose specialization lives in
+    // mod-ascension-compat instead of in Blizzard talent tabs.
+    std::string CoaSpecList();
+    std::string CoaSpecPick(std::string const& wanted);
     std::string SpecPick(std::string param);
     std::string SpecApply(std::string param);
 };

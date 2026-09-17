@@ -6,12 +6,18 @@
 
 #include "ChangeTalentsAction.h"
 #include "AiFactory.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
 #include "AiObjectContext.h"
 #include "ChatHelper.h"
+#include "CoaSpecLookup.h"
+#include "CoaTalentApply.h"
+#include "CoaTalentPlan.h"
 #include "Event.h"
 #include "Log.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotFactory.h"
+
+#include <algorithm>
 #include "RandomPlayerbotMgr.h"
 
 bool ChangeTalentsAction::Execute(Event event)
@@ -62,12 +68,16 @@ bool ChangeTalentsAction::Execute(Event event)
         }
         else if (param.find("spec list") != std::string::npos)
         {
-            out << SpecList();
+            out << (IsCoaClass(bot) ? CoaSpecList() : SpecList());
         }
         else if (param.find("spec ") != std::string::npos)
         {
             param = param.substr(5);
-            out << SpecPick(param);
+            // CoA classes have no Blizzard talent tabs, so the premade spec
+            // lists below are empty for them. Their specialization lives in
+            // mod-ascension-compat and is what decides role, position and
+            // rotation - see CoaSpecStrategies.h.
+            out << (IsCoaClass(bot) ? CoaSpecPick(param) : SpecPick(param));
             botAI->ResetStrategies();
         }
         else if (param.find("apply ") != std::string::npos)
@@ -83,10 +93,39 @@ bool ChangeTalentsAction::Execute(Event event)
     }
     else
     {
-        uint32 tab = AiFactory::GetPlayerSpecTab(bot);
         out << "My current talent spec is: "
             << "|h|cffffffff";
-        out << chat->FormatClass(bot, tab) << "\n";
+
+        // CoA classes have no Blizzard talent tabs. FormatClass counts those
+        // though and therefore always reports "(0/0/0)". For them the plan
+        // applies: spec name and the points a character of that level can have
+        // spent - class tree first, then spec tree.
+        uint32 const coaSpec = GetAscensionActiveSpecialization(bot);
+        CoaTalentPlan const* coaPlan =
+            coaSpec ? GetCoaTalentPlanForSpec(bot->getClass(), coaSpec) : nullptr;
+        if (!coaPlan)
+            coaPlan = GetCoaTalentPlan(bot->getClass());
+
+        if (coaPlan)
+        {
+            uint8 const level = bot->GetLevel();
+            out << coaPlan->specName << " ("
+                << uint32(std::min<uint16>(CoaClassTreePoints(level),
+                                           coaPlan->classTreeCount))
+                << "/"
+                << uint32(std::min<uint16>(CoaSpecTreePoints(level),
+                                           coaPlan->specTreeCount))
+                << ")";
+            if (!coaSpec)
+                out << " (no specialization set, class default)";
+            out << "\n";
+        }
+        else
+        {
+            uint32 tab = AiFactory::GetPlayerSpecTab(bot);
+            out << chat->FormatClass(bot, tab) << "\n";
+        }
+
         out << TalentsHelp();
     }
 
@@ -100,6 +139,99 @@ std::string ChangeTalentsAction::TalentsHelp()
     std::ostringstream out;
     out << "Talents usage: talents switch <1/2>, talents autopick, talents spec list, "
            "talents spec <specName>, talents apply <link>.";
+    return out.str();
+}
+
+namespace
+{
+// "vanguard" and "Vanguard" mean the same thing to a player typing a command.
+std::string Lowered(std::string const& text)
+{
+    std::string out = text;
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return out;
+}
+
+char const* RoleWord(CoaSpecRole role)
+{
+    switch (role)
+    {
+        case CoaSpecRole::Tank: return "tank";
+        case CoaSpecRole::Heal: return "healer";
+        default:                return "damage";
+    }
+}
+} // namespace
+
+std::string ChangeTalentsAction::CoaSpecList()
+{
+    std::ostringstream out;
+    uint32 const active = GetAscensionActiveSpecialization(bot);
+
+    for (CoaSpecStrategy const& spec : CoaSpecStrategies)
+    {
+        if (spec.classId != bot->getClass())
+            continue;
+
+        out << (spec.specId == active ? "\n> " : "\n  ") << spec.specName
+            << " - " << RoleWord(spec.role) << ", " << spec.position;
+        if (spec.support)
+            out << ", support";
+    }
+
+    return out.str();
+}
+
+// `talents spec <name>` for a CoA class, and `talents spec tank|heal|dps` for
+// any spec of that role.
+//
+// The specialization is what decides role, position, talent plan and rotation,
+// so switching it has to do all four: hand the new id to the compat module,
+// which removes the spells of the old spec and grants the new ones, apply the
+// talent plan of the new spec, and let the caller reset the strategies so
+// AiFactory reads the new row.
+std::string ChangeTalentsAction::CoaSpecPick(std::string const& wanted)
+{
+    std::string const asked = Lowered(wanted);
+    std::vector<CoaSpecStrategy const*> matches;
+
+    for (CoaSpecStrategy const& spec : CoaSpecStrategies)
+    {
+        if (spec.classId != bot->getClass())
+            continue;
+
+        bool const byName = Lowered(spec.specName) == asked;
+        bool const byRole =
+            (asked == "tank" && spec.role == CoaSpecRole::Tank) ||
+            (asked == "heal" && spec.role == CoaSpecRole::Heal) ||
+            (asked == "dps" && spec.role == CoaSpecRole::Dps) ||
+            (asked == "support" && spec.support) ||
+            (asked == "random");
+
+        if (byName)
+        {
+            matches.assign(1, &spec);
+            break;
+        }
+        if (byRole)
+            matches.push_back(&spec);
+    }
+
+    if (matches.empty())
+        return "I have no specialization called '" + wanted + "'. Try 'talents spec list'.";
+
+    CoaSpecStrategy const* pick =
+        matches.size() == 1 ? matches[0] : matches[urand(0, matches.size() - 1)];
+
+    if (!SwitchAscensionSpecialization(bot, pick->specId))
+        return std::string("I cannot switch to ") + pick->specName + ".";
+
+    ApplyCoaTalentPlan(bot);
+
+    std::ostringstream out;
+    out << "Now " << pick->specName << " - " << RoleWord(pick->role) << ", "
+        << pick->position << ", running " << pick->combat << ".";
     return out.str();
 }
 

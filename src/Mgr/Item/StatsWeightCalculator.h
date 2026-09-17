@@ -49,7 +49,7 @@ public:
     void CalculateItemSetMod(Player* player, ItemTemplate const* proto);
     void CalculateSocketBonus(Player* player, ItemTemplate const* proto);
 
-    void CalculateItemTypePenalty(ItemTemplate const* proto);
+    void CalculateItemTypePenalty(ItemTemplate const* proto, int32 slot = -1);
     float ApplyPreferredSpecWeapons(ItemTemplate const* proto, int32 slot);
 
     bool NotBestArmorType(uint32 item_subclass_armor);
