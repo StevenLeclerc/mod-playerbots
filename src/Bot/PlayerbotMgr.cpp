@@ -618,7 +618,17 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
         bot->GetSession()->HandleJoinChannel(pkt);
     }
 
-    // join standard channels
+    JoinBotChannels(bot);
+}
+
+// The channels a client joins for the zone it stands in. A bot only did this at login, so after a
+// teleport it kept talking into the channel of the zone it left - where nobody hears it, and where
+// SayToChannel refuses to speak anyway, since the channel name no longer carries its zone name.
+void PlayerbotHolder::JoinBotChannels(Player* const bot)
+{
+    if (!GET_PLAYERBOT_AI(bot))
+        return;
+
     uint8 locale = BroadcastHelper::GetLocale();
     AreaTableEntry const* current_zone = GET_PLAYERBOT_AI(bot)->GetCurrentZone();
     ChannelMgr* cMgr = ChannelMgr::forTeam(bot->GetTeamId());

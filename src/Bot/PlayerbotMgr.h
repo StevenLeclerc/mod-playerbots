@@ -43,6 +43,7 @@ public:
 
     void LogoutAllBots();
     void OnBotLogin(Player* const bot);
+    static void JoinBotChannels(Player* const bot);
 
     std::vector<std::string> HandlePlayerbotCommand(char const* args, Player* master = nullptr);
     std::string const ProcessBotCommand(std::string const cmd, ObjectGuid guid, ObjectGuid masterguid, bool admin,

@@ -2944,6 +2944,8 @@ bool PlayerbotAI::SayToChannel(std::string const& msg, ChatChannelId const& chan
         }
     }
 
+    LOG_DEBUG("playerbots", "{}: no channel {} carrying \"{}\" to speak in", bot->GetName(), uint32(chanId),
+              current_str_zone);
     return false;
 }
 
