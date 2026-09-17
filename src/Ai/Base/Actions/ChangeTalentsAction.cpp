@@ -10,8 +10,7 @@
 #include "AiObjectContext.h"
 #include "ChatHelper.h"
 #include "CoaSpecLookup.h"
-#include "CoaTalentApply.h"
-#include "CoaTalentPlan.h"
+#include "CoaSpecialization.h"
 #include "Event.h"
 #include "Log.h"
 #include "PlayerbotAIConfig.h"
@@ -96,27 +95,12 @@ bool ChangeTalentsAction::Execute(Event event)
         out << "My current talent spec is: "
             << "|h|cffffffff";
 
-        // CoA classes have no Blizzard talent tabs. FormatClass counts those
-        // though and therefore always reports "(0/0/0)". For them the plan
-        // applies: spec name and the points a character of that level can have
-        // spent - class tree first, then spec tree.
-        uint32 const coaSpec = GetAscensionActiveSpecialization(bot);
-        CoaTalentPlan const* coaPlan =
-            coaSpec ? GetCoaTalentPlanForSpec(bot->getClass(), coaSpec) : nullptr;
-        if (!coaPlan)
-            coaPlan = GetCoaTalentPlan(bot->getClass());
-
-        if (coaPlan)
+        // CoA classes have no Blizzard talent tabs: FormatClass counts those and always reports
+        // "(0/0/0)". For them, the specialization mod-ascension-compat holds.
+        if (CoaSpecStrategy const* coaSpec = GetCoaSpecStrategyFor(bot))
         {
-            uint8 const level = bot->GetLevel();
-            out << coaPlan->specName << " ("
-                << uint32(std::min<uint16>(CoaClassTreePoints(level),
-                                           coaPlan->classTreeCount))
-                << "/"
-                << uint32(std::min<uint16>(CoaSpecTreePoints(level),
-                                           coaPlan->specTreeCount))
-                << ")";
-            if (!coaSpec)
+            out << coaSpec->specName;
+            if (!GetAscensionActiveSpecialization(bot))
                 out << " (no specialization set, class default)";
             out << "\n";
         }
@@ -188,8 +172,8 @@ std::string ChangeTalentsAction::CoaSpecList()
 //
 // The specialization is what decides role, position, talent plan and rotation,
 // so switching it has to do all four: hand the new id to the compat module,
-// which removes the spells of the old spec and grants the new ones, apply the
-// talent plan of the new spec, and let the caller reset the strategies so
+// which removes the spells of the old spec and grants the new ones, spend the
+// talents of the new spec, and let the caller reset the strategies so
 // AiFactory reads the new row.
 std::string ChangeTalentsAction::CoaSpecPick(std::string const& wanted)
 {
@@ -227,7 +211,9 @@ std::string ChangeTalentsAction::CoaSpecPick(std::string const& wanted)
     if (!SwitchAscensionSpecialization(bot, pick->specId))
         return std::string("I cannot switch to ") + pick->specName + ".";
 
-    ApplyCoaTalentPlan(bot);
+    // Talents follow the coa talent path: the new specialization's level build, recorded through
+    // SetAscensionTalentRank like a player's purchase (random bots only, as for every other pick).
+    ApplyCoaTalents(bot);
 
     std::ostringstream out;
     out << "Now " << pick->specName << " - " << RoleWord(pick->role) << ", "

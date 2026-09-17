@@ -4,7 +4,6 @@
  * or (at your option) any later version.
  */
 
-#include "CoaTalentApply.h"
 #include "PlayerbotMgr.h"
 #include "BroadcastHelper.h"
 #include "ChannelMgr.h"
@@ -605,11 +604,6 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
         factory.Randomize(false);
     }
 
-    // CoA classes never get a specialization through the character advancement
-    // path - that runs through the client, and bots have none. Without one they
-    // lack the core abilities of their spec. Idempotent.
-    ApplyCoaTalentPlan(bot);
-
     // bots join World chat if not solo oriented
     if (bot->GetLevel() >= 10 && sRandomPlayerbotMgr.IsRandomBot(bot) && GET_PLAYERBOT_AI(bot) &&
         GET_PLAYERBOT_AI(bot)->GetGrouperType() != GrouperType::SOLO)
@@ -1071,12 +1065,6 @@ std::vector<std::string> PlayerbotHolder::HandlePlayerbotCommand(char const* arg
             PlayerbotsMgr::instance().AddPlayerbotData(master, true);
             GET_PLAYERBOT_AI(master)->SetMaster(master);
             PlayerbotRepository::instance().Load(GET_PLAYERBOT_AI(master));
-
-            // The self-bot gets its talent plan as well. Anyone switching botAI
-            // on for their own character wants to drive it like a bot, and
-            // without the spec abilities that is not a meaningful trial. Only
-            // missing spells are learned, none are ever removed.
-            ApplyCoaTalentPlan(master);
         }
 
         return messages;
