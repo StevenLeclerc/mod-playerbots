@@ -669,9 +669,11 @@ void PlayerbotHolder::JoinBotChannels(Player* const bot)
                     // are actually in instead: same id, and its name carries the place.
                     if (!channel->pattern[locale] || !*channel->pattern[locale])
                     {
+                        uint32 const wanted = channel->ChannelID == ChatChannelId::GENERAL
+                            ? sPlayerbotAIConfig.zoneChannelId : channel->ChannelID;
                         for (auto const& [key, existing] : cMgr->GetChannels())
                         {
-                            if (!existing || existing->GetChannelId() != channel->ChannelID || existing->GetName().empty())
+                            if (!existing || existing->GetChannelId() != wanted || existing->GetName().empty())
                                 continue;
 
                             for (std::string const& place : channel_places)

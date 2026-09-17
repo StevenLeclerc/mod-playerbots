@@ -2922,7 +2922,8 @@ bool PlayerbotAI::SayToChannel(std::string const& msg, ChatChannelId const& chan
             continue;
 
         // Checks if the channel matches the specified ChatChannelId
-        if (channel->GetChannelId() == chanId)
+        uint32 const wanted = chanId == ChatChannelId::GENERAL ? sPlayerbotAIConfig.zoneChannelId : uint32(chanId);
+        if (channel->GetChannelId() == wanted)
         {
             // If the channel name is empty, skip it to avoid access problems
             if (channel->GetName().empty())

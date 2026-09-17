@@ -2622,6 +2622,12 @@ AiPlayerbot.RandomBotSayWithoutMaster = 0
 # Default: 1 (enabled)
 AiPlayerbot.EnableBroadcasts = 1
 
+# Id of the per-zone channel, as the client's ChatChannels.dbc numbers it. It is 1 (General)
+# on a stock client; Conquest of Azeroth numbers its "Zone - <place>" channel 3 and keeps 1 for
+# the realm-wide one, and a bot then speaks to a channel nobody reads.
+# Default: 1
+AiPlayerbot.ZoneChannelId = 1
+
 # Name of the realm-wide channel bots talk in, exactly as the client shows it.
 # A realm that renames it - Conquest of Azeroth calls it "Ascension" - drops every
 # broadcast meant for that channel until this matches.
