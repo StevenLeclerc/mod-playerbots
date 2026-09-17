@@ -36,6 +36,7 @@
 #include <iomanip>
 #include <openssl/sha.h>
 #include <string>
+#include <vector>
 #include <unordered_set>
 
 class BotInitGuard
@@ -631,8 +632,20 @@ void PlayerbotHolder::JoinBotChannels(Player* const bot)
 
     uint8 locale = BroadcastHelper::GetLocale();
     AreaTableEntry const* current_zone = GET_PLAYERBOT_AI(bot)->GetCurrentZone();
+    AreaTableEntry const* current_area = GET_PLAYERBOT_AI(bot)->GetCurrentArea();
     ChannelMgr* cMgr = ChannelMgr::forTeam(bot->GetTeamId());
     std::string current_zone_name = current_zone ? GET_PLAYERBOT_AI(bot)->GetLocalizedAreaName(current_zone) : "";
+
+    // The client names the zone channel after what its own map calls the place, which is the area
+    // rather than the zone wherever the two differ - "Zone - Northshire Valley" while the server
+    // reads Elwynn Forest. Join both, or a bot standing next to a player is in another channel.
+    std::vector<std::string> channel_places = { current_zone_name };
+    if (current_area && current_area != current_zone)
+    {
+        std::string const area_name = GET_PLAYERBOT_AI(bot)->GetLocalizedAreaName(current_area);
+        if (!area_name.empty() && area_name != current_zone_name)
+            channel_places.push_back(area_name);
+    }
 
     if (current_zone && cMgr)
     {
@@ -648,9 +661,13 @@ void PlayerbotHolder::JoinBotChannels(Player* const bot)
                 case ChatChannelId::GENERAL:
                 case ChatChannelId::LOCAL_DEFENSE:
                 {
-                    char new_channel_name_buf[100];
-                    snprintf(new_channel_name_buf, 100, channel->pattern[locale], current_zone_name.c_str());
-                    new_channel = cMgr->GetJoinChannel(new_channel_name_buf, channel->ChannelID);
+                    for (std::string const& place : channel_places)
+                    {
+                        char new_channel_name_buf[100];
+                        snprintf(new_channel_name_buf, 100, channel->pattern[locale], place.c_str());
+                        if (Channel* place_channel = cMgr->GetJoinChannel(new_channel_name_buf, channel->ChannelID))
+                            place_channel->JoinChannel(bot, "");
+                    }
                     break;
                 }
                 case ChatChannelId::TRADE:

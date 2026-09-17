@@ -2907,6 +2907,10 @@ bool PlayerbotAI::SayToChannel(std::string const& msg, ChatChannelId const& chan
         return false;
 
     const auto current_str_zone = GetLocalizedAreaName(current_zone);
+    // The client's own channel carries the area name where it differs from the zone ("Northshire
+    // Valley" inside Elwynn Forest), so either name makes this the right channel to speak in.
+    AreaTableEntry const* current_area = GetCurrentArea();
+    std::string const current_str_area = current_area ? GetLocalizedAreaName(current_area) : "";
 
     std::mutex socialMutex;
     std::lock_guard<std::mutex> lock(socialMutex);  // Blocking for thread safety when accessing SocialMgr
@@ -2925,7 +2929,8 @@ bool PlayerbotAI::SayToChannel(std::string const& msg, ChatChannelId const& chan
                 continue;
 
             // Checks if the channel name contains the current zone
-            const auto does_contains = channel->GetName().find(current_str_zone) != std::string::npos;
+            const auto does_contains = channel->GetName().find(current_str_zone) != std::string::npos ||
+                (!current_str_area.empty() && channel->GetName().find(current_str_area) != std::string::npos);
             if (chanId != ChatChannelId::LOOKING_FOR_GROUP && chanId != ChatChannelId::WORLD_DEFENSE && !does_contains)
             {
                 continue;
