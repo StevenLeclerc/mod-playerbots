@@ -5,6 +5,9 @@
  */
 
 #include "ChatHelper.h"
+
+#include "CoaSpecLookup.h"
+#include "DBCStores.h"
 #include "AiFactory.h"
 #include "Common.h"
 #include "ItemTemplate.h"
@@ -640,8 +643,29 @@ std::string const ChatHelper::FormatClass(Player* player, int8 spec)
 {
     uint8 cls = player->getClass();
 
+    // A CoA class has no Blizzard talent tabs and no entry in the tables below: this used to say
+    // " (0/0/0) " - empty spec, empty class - straight into the zone channel ("Anyone is looking
+    // for (0/0/0)?"). Its specialization is held by mod-ascension-compat, its name by the client's
+    // ChrClasses.
+    if (IsCoaClass(player))
+    {
+        std::ostringstream out;
+        if (CoaSpecStrategy const* coaSpec = GetCoaSpecStrategyFor(player))
+            out << coaSpec->specName << " ";
+        out << FormatClass(cls);
+        return out.str();
+    }
+
+    // Look the tables up with find, never operator[]: a missing key would be inserted into a
+    // static map from whichever map thread the bot happens to talk on.
+    auto const specsOfClass = specs.find(cls);
+    std::string specName;
+    if (specsOfClass != specs.end())
+        if (auto const named = specsOfClass->second.find(spec); named != specsOfClass->second.end())
+            specName = named->second;
+
     std::ostringstream out;
-    out << specs[cls][spec] << " (";
+    out << specName << " (";
 
     std::map<uint8, uint32> tabs = AiFactory::GetPlayerSpecTabs(player);
     uint32 c0 = tabs[0];
@@ -652,11 +676,22 @@ std::string const ChatHelper::FormatClass(Player* player, int8 spec)
     out << (c1 ? "|h|cff00ff00" : "") << c1 << "|h|cffffffff/";
     out << (c2 ? "|h|cff00ff00" : "") << c2 << "|h|cffffffff";
 
-    out << ")|r " << classes[cls];
+    out << ")|r " << FormatClass(cls);
     return out.str();
 }
 
-std::string const ChatHelper::FormatClass(uint8 cls) { return classes[cls]; }
+std::string const ChatHelper::FormatClass(uint8 cls)
+{
+    auto const known = classes.find(cls);
+    if (known != classes.end())
+        return known->second;
+
+    // The CoA classes: named by the client's own table.
+    if (ChrClassesEntry const* entry = sChrClassesStore.LookupEntry(cls))
+        if (entry->name[0] && *entry->name[0])
+            return entry->name[0];
+    return "";
+}
 
 std::string const ChatHelper::FormatRace(uint8 race) { return races[race]; }
 
