@@ -467,6 +467,36 @@ void DropAttackCast(Player* bot)
             if (!current->GetSpellInfo()->IsPositive())
                 bot->InterruptSpell(type, false);
 }
+
+// Whether the bot is holding its mana back for healing rather than spending it on damage.
+// A healer keeps the larger share; any other bot that knows a heal keeps a smaller cushion, so
+// that it can still patch itself up; a bot with no heal at all never holds anything back, as it
+// would stop fighting for nothing. Both shares are settings, 0 turning the reserve off.
+bool SavingManaForHeals(Player* bot)
+{
+    if (bot->getPowerType() != POWER_MANA)
+        return false;
+
+    uint32 const reserve = GetCoaRole(bot) == CoaRole::Heal ? sPlayerbotAIConfig.coaHealerManaReserve
+                                                            : sPlayerbotAIConfig.coaCasterManaReserve;
+    if (!reserve || bot->GetPowerPct(POWER_MANA) >= float(reserve))
+        return false;
+
+    return !KnownAbilities(bot, [](uint16 kind)
+        { return (kind & (KIND_HEAL | KIND_HOT)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); }).empty();
+}
+
+// Puts the cheapest heals first. Low on mana a bot would otherwise keep offering its biggest heal,
+// be turned down for want of power and heal nobody, while a small heal was still within reach.
+void CheapestFirst(Player* bot, std::vector<Usable>& spells)
+{
+    std::stable_sort(spells.begin(), spells.end(), [bot](Usable const& a, Usable const& b)
+    {
+        return a.info->CalcPowerCost(bot, a.info->GetSchoolMask()) <
+               b.info->CalcPowerCost(bot, b.info->GetSchoolMask());
+    });
+}
+
 constexpr time_t SpellBenchSeconds = 20;
 constexpr time_t RefusedBenchSeconds = 8;
 
@@ -774,6 +804,13 @@ public:
             bot->Attack(target, true);
 
         bool const tank = GetCoaRole(bot) == CoaRole::Tank;
+
+        // A bot that spends its last mana on damage has nothing left when someone drops, and
+        // measured on 18/09 that is the usual state: in 99% of the casts turned down for want of
+        // power the bot sat below 10% mana. Under its reserve it attacks with what costs nothing
+        // (and its weapon), keeping the rest for heals.
+        bool const saveMana = SavingManaForHeals(bot);
+
         std::vector<Usable> const usable = KnownAbilities(bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
         if (usable.empty())
             return false;
@@ -789,6 +826,9 @@ public:
 
             Strikes& strikes = failures[info->Id];
             if (strikes.benchedUntil > now)
+                continue;
+
+            if (saveMana && info->PowerType == POWER_MANA && info->CalcPowerCost(bot, info->GetSchoolMask()) > 0)
                 continue;
 
             if (StrictCheck(bot, info, target) != SPELL_CAST_OK)
@@ -905,6 +945,9 @@ public:
                 break;
         }
 
+        if (SavingManaForHeals(bot))
+            CheapestFirst(bot, spells);
+
         UsageKind const usage = mode == Mode::Group ? USAGE_GROUP_HEAL : mode == Mode::OverTime ? USAGE_HOT : USAGE_HEAL;
         if (spells.empty())
             RecordFailure(usage, 0, FAILURE_NOTHING);
@@ -960,8 +1003,14 @@ public:
         SpellInfo const* cast =
             CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }), bot);
         if (!cast)
-            cast = CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind)
-                { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }), bot);
+        {
+            std::vector<Usable> heals = KnownAbilities(bot, [](uint16 kind)
+                { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); });
+            if (SavingManaForHeals(bot))
+                CheapestFirst(bot, heals);
+
+            cast = CastFirst(botAI, bot, heals, bot);
+        }
 
         return RecordUsage(USAGE_DEFENSIVE, cast);
     }

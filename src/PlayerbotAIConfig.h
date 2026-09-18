@@ -393,6 +393,8 @@ public:
     bool autoLearnTrainerSpells;
     bool autoLearnTradeskillSpells;
     bool coaSpecRotations;
+    uint32 coaHealerManaReserve;
+    uint32 coaCasterManaReserve;
     bool autoDoQuests;
     bool enableNewRpgStrategy;
     std::unordered_map<NewRpgStatus, uint32> RpgStatusProbWeight;

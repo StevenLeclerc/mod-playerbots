@@ -98,6 +98,7 @@ git clone --branch coa https://github.com/Zyth45/mod-playerbots.git azerothcore-
 | `AiPlayerbot.GroupInvitationPermission = 2` | playerbots.conf | every bot accepts group invites |
 | `AiPlayerbot.BotTextLocale = 2` | playerbots.conf | bot chat in French (-1 client locale, 0 English, 3 German, 6 Spanish, 8 Russian) |
 | `AiPlayerbot.CoaSpecRotations = 1` | playerbots.conf | bots follow the authored rotation of their specialization on top of the automatic spell choice (default: 0) |
+| `AiPlayerbot.CoaHealerManaReserve = 35` / `CoaCasterManaReserve = 15` | playerbots.conf | share of its mana a bot keeps for healing instead of spending it on damage: the larger share for healers, the smaller one for anything else that knows a heal; a bot with no heal is never held back, 0 disables it |
 | `AiPlayerbot.ZoneChannelId = 3` | playerbots.conf | the per-zone channel is numbered 3 on CoA ("Zone - <place>"), 1 on a stock client; with the wrong number bots talk where nobody reads |
 | `AiPlayerbot.BroadcastWorldChannelName = "Ascension"` | playerbots.conf | the realm-wide channel's name; set `BroadcastToWorldGlobalChance = 0` to keep bots out of it entirely |
 | `Appender.CoaBots=2,4,1,CoaBots.log,a` and `Logger.playerbots.coa=4,CoaBots` | worldserver.conf | optional: every 10 minutes, which CoA spells bots cast and why casts fail |

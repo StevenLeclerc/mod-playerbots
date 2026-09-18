@@ -75,6 +75,7 @@ Les commandes `.playerbots rndbot` s'appliquent à tous les bots connectés. Pou
 | `AiPlayerbot.MinRandomBotTeleportInterval` / `Max...` | délai entre deux déplacements automatiques, en secondes (3600 à 18000 par défaut) |
 | `AiPlayerbot.GroupInvitationPermission` | à 2, tous les bots acceptent les invitations |
 | `AiPlayerbot.BotTextLocale` | langue du chat des bots : 2 pour le français, 0 pour l'anglais |
+| `AiPlayerbot.CoaHealerManaReserve` / `CoaCasterManaReserve` | part de mana gardée pour les soins au lieu d'être dépensée en dégâts, en pour cent : 35 pour les soigneurs, 15 pour les autres bots qui connaissent un soin. En dessous, le bot attaque avec ce qui ne coûte rien et son arme. Un bot sans aucun soin n'est jamais bridé, 0 désactive |
 | `AiPlayerbot.ZoneChannelId` | numéro du canal de zone, tel que le client le donne. **3 sur CoA** (le canal « Zone - … »), 1 sur un client standard. Mauvais numéro = les bots parlent dans le vide |
 | `AiPlayerbot.BroadcastWorldChannelName` | nom exact du canal global. `"Ascension"` sur CoA, `"World"` ailleurs |
 | `AiPlayerbot.BroadcastToWorldGlobalChance` | part des messages envoyés dans le canal global, sur 30 000. **0 = les bots n'y entrent même pas** |
