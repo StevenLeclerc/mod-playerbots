@@ -78,8 +78,27 @@ public:
         PLAYERHOOK_CAN_PLAYER_USE_CHANNEL_CHAT,
         PLAYERHOOK_ON_GIVE_EXP,
         PLAYERHOOK_ON_UPDATE_ZONE,
+        PLAYERHOOK_ON_LOOT_ITEM,
         PLAYERHOOK_ON_BEFORE_TELEPORT
     }) {}
+
+    // What the bots bring back. Only the finds worth a line, and only from bots: a server watching
+    // its bots wants to know what dropped, not to read every piece of linen cloth. The bar is
+    // AiPlayerbot.LootLogMinQuality (3, rare, by default; 4 for epics only).
+    // Off unless worldserver.conf points "playerbots.loot" at an appender.
+    void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid /*lootguid*/) override
+    {
+        if (!player || !item || !GET_PLAYERBOT_AI(player))
+            return;
+
+        ItemTemplate const* proto = item->GetTemplate();
+        if (!proto || proto->Quality < sPlayerbotAIConfig.lootLogMinQuality)
+            return;
+
+        LOG_INFO("playerbots.loot", "{} (class {} level {}) looted {} ({}) quality {} ilvl {} x{}",
+                 player->GetName(), uint32(player->getClass()), uint32(player->GetLevel()), proto->Name1,
+                 proto->ItemId, uint32(proto->Quality), uint32(proto->ItemLevel), count);
+    }
 
     // A client joins the channels of the zone it enters. A bot did it once, at login, and then
     // talked into the channel of a zone it had left - or, more often, said nothing at all.

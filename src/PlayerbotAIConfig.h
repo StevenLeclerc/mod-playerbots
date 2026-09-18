@@ -395,6 +395,7 @@ public:
     bool coaSpecRotations;
     uint32 coaHealerManaReserve;
     uint32 coaCasterManaReserve;
+    uint32 lootLogMinQuality;
     bool autoDoQuests;
     bool enableNewRpgStrategy;
     std::unordered_map<NewRpgStatus, uint32> RpgStatusProbWeight;
