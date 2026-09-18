@@ -824,6 +824,8 @@ void PlayerbotAIConfig::LoadRandomBotLevelConfig()
         sConfigMgr->GetOption<float>("AiPlayerbot.LevelBrackets.Dynamic.RealPlayerWeight", 1.0f);
     levelBracketsSyncFactions = sConfigMgr->GetOption<bool>("AiPlayerbot.LevelBrackets.Dynamic.SyncFactions", false);
     levelBracketsFreshStart = sConfigMgr->GetOption<bool>("AiPlayerbot.LevelBrackets.FreshStart", false);
+    levelBracketsFreshStartSpread =
+        sConfigMgr->GetOption<bool>("AiPlayerbot.LevelBrackets.FreshStartSpread", false);
     levelBracketsIgnoreFriendListed = sConfigMgr->GetOption<bool>("AiPlayerbot.LevelBrackets.IgnoreFriendListed", true);
     levelBracketsFlaggedProcessLimit =
         sConfigMgr->GetOption<uint32>("AiPlayerbot.LevelBrackets.FlaggedProcessLimit", 5);

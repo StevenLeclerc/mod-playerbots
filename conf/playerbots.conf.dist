@@ -911,6 +911,11 @@ AiPlayerbot.LevelBrackets.ExcludeNames =
 # Default: 1 on the CoA branch (0 upstream)
 AiPlayerbot.LevelBrackets.FreshStart = 1
 
+# With FreshStart, send the newcomers to the starting areas of their faction in turn rather than
+# to their own race's, so every starting valley gets as many (humans have one to themselves).
+# Default: 1 on the CoA branch (0 upstream)
+AiPlayerbot.LevelBrackets.FreshStartSpread = 1
+
 # The number of level brackets used for bot distribution. Both Alliance and Horde should have the
 # same number of brackets defined below.
 # Default: 9

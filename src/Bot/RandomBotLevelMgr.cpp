@@ -29,6 +29,32 @@
 #include <string>
 #include <vector>
 
+// One race per starting area of each faction: gnomes share Coldridge Valley with dwarves, trolls
+// the Valley of Trials with orcs.
+static uint8 const AllianceStartRaces[] = {RACE_HUMAN, RACE_DWARF, RACE_NIGHTELF, RACE_DRAENEI};
+static uint8 const HordeStartRaces[] = {RACE_ORC, RACE_UNDEAD_PLAYER, RACE_TAUREN, RACE_BLOODELF};
+
+// FreshStartSpread: the starting areas of the bot's faction in turn, so that each sees as many
+// newcomers whatever the races of the bots (a race of its own, like humans, otherwise fills one
+// valley where two races sharing one fill it twice). Only called from the world update.
+static PlayerInfo const* NextStartingArea(Player* bot)
+{
+    static uint32 turn[2] = {0, 0};
+    bool const alliance = bot->GetTeamId() == TEAM_ALLIANCE;
+    uint8 const* races = alliance ? AllianceStartRaces : HordeStartRaces;
+    uint32& next = turn[alliance ? 0 : 1];
+    for (uint8 tries = 0; tries < 4; ++tries)
+    {
+        uint8 const race = races[next++ % 4];
+        if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race, bot->getClass()))
+            return info;
+        for (uint8 cls = CLASS_WARRIOR; cls < MAX_CLASSES; ++cls)
+            if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race, cls))
+                return info;
+    }
+    return nullptr;
+}
+
 // True if bot's name is present in excludeList.
 static bool IsNameInExcludeList(Player* bot, std::vector<std::string> const& excludeList)
 {
@@ -355,7 +381,11 @@ void RandomBotLevelMgr::AdjustBotToRange(Player* bot, int targetRangeIndex, Team
     PlayerbotFactory newFactory(bot, newLevel);
     newFactory.Randomize(false);
 
-    PlayerInfo const* start = freshStart ? sObjectMgr->GetPlayerInfo(bot->getRace(), bot->getClass()) : nullptr;
+    PlayerInfo const* start = nullptr;
+    if (freshStart && sPlayerbotAIConfig.levelBracketsFreshStartSpread)
+        start = NextStartingArea(bot);
+    if (freshStart && !start)
+        start = sObjectMgr->GetPlayerInfo(bot->getRace(), bot->getClass());
     if (start)
         bot->TeleportTo(start->mapId, start->positionX, start->positionY, start->positionZ, start->orientation);
     else if (newLevel != botOriginalLevel && sPlayerbotAIConfig.levelBracketsFreshStart)
