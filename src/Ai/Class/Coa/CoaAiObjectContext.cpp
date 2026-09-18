@@ -486,6 +486,14 @@ bool SavingManaForHeals(Player* bot)
         { return (kind & (KIND_HEAL | KIND_HOT)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); }).empty();
 }
 
+// Removes what costs mana, for a bot that is keeping the rest of its mana for healing.
+void DropManaSpells(Player* bot, std::vector<Usable>& spells)
+{
+    spells.erase(std::remove_if(spells.begin(), spells.end(), [bot](Usable const& spell)
+        { return spell.info->PowerType == POWER_MANA && spell.info->CalcPowerCost(bot, spell.info->GetSchoolMask()) > 0; }),
+        spells.end());
+}
+
 // Puts the cheapest heals first. Low on mana a bot would otherwise keep offering its biggest heal,
 // be turned down for want of power and heal nobody, while a small heal was still within reach.
 void CheapestFirst(Player* bot, std::vector<Usable>& spells)
@@ -499,6 +507,7 @@ void CheapestFirst(Player* bot, std::vector<Usable>& spells)
 
 constexpr time_t SpellBenchSeconds = 20;
 constexpr time_t RefusedBenchSeconds = 8;
+constexpr time_t NoPowerBenchSeconds = 5;
 
 // Failures that will not clear up on the next tick: wrong target or state for this spell.
 bool IsLastingFailure(SpellCastResult result)
@@ -574,6 +583,11 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         }
         else if (IsLastingFailure(check))
             benched[spell.info->Id] = now + SpellBenchSeconds;
+        // Out of mana, energy or rage: asking again on the very next tick changes nothing, and
+        // with the spell set aside the action reports itself useless, so the bot does something
+        // it can afford instead of spending its ticks being turned down.
+        else if (check == SPELL_FAILED_NO_POWER)
+            benched[spell.info->Id] = now + NoPowerBenchSeconds;
 
         if (usage != 255)
             RecordFailure(usage, spell.info->Id, uint16(check));
@@ -887,8 +901,12 @@ public:
         if (!target || !target->IsAlive())
             return false;
 
-        return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind)
-            { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); }), target));
+        std::vector<Usable> spells = KnownAbilities(bot, [](uint16 kind)
+            { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
+        if (SavingManaForHeals(bot))
+            DropManaSpells(bot, spells);
+
+        return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, spells, target));
     }
 
     bool isUseful() override
