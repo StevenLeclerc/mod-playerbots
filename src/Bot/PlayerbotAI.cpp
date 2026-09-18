@@ -1128,6 +1128,12 @@ void PlayerbotAI::HandleBotOutgoingPacket(WorldPacket const& packet)
     if (!bot || !bot->IsInWorld() || bot->IsDuringRemoveFromWorld())
         return;
 
+    // An invitation is answered on the bot's next AI update, and a bot eating or drinking after a
+    // fight puts that update off for as long as 18 seconds: the player who invited it waited that
+    // long for an answer. Take it now; the meal can wait.
+    if (packet.GetOpcode() == SMSG_GROUP_INVITE)
+        SetNextCheckDelay(0);
+
     switch (packet.GetOpcode())
     {
         case SMSG_SPELL_FAILURE:
