@@ -738,7 +738,7 @@ AiPlayerbot.RandomBotRandomPassword = 0
 
 # Minimum and maximum levels for randombots
 AiPlayerbot.RandomBotMinLevel = 1
-AiPlayerbot.RandomBotMaxLevel = 80
+AiPlayerbot.RandomBotMaxLevel = 60
 
 # Sync max randombot level with max level of online players
 # Default: 0 (disabled)
@@ -814,7 +814,7 @@ AiPlayerbot.RandomBotMinLevelChance = 0.1
 
 # Chance randombot has max level on first randomize
 # Default 0.1 (10%)
-AiPlayerbot.RandomBotMaxLevelChance = 0.1
+AiPlayerbot.RandomBotMaxLevelChance = 0
 
 # Fix the level of randombots (they won't level up)
 # Default: 0 (disabled)
@@ -862,8 +862,11 @@ AiPlayerbot.RandomBotXPRate = 1.0
 ##############################################
 
 # Enables the level brackets feature.
-# Default: 0 (disabled)
-AiPlayerbot.LevelBrackets.Enabled = 0
+# CoA: on by default, with narrow 5-level brackets up to 30 so starting and levelling zones stay
+# populated - under dynamic distribution every bracket weighs the same, so narrower brackets
+# at low level mean more bots there (6 of 9 brackets = about two thirds of the bots in 1-30).
+# Default: 1 on the CoA branch (0 upstream)
+AiPlayerbot.LevelBrackets.Enabled = 1
 
 # The frequency (in seconds) at which the bot level distribution check is performed.
 # Default: 300
@@ -914,7 +917,7 @@ AiPlayerbot.LevelBrackets.NumRanges = 9
 # Enables dynamic recalculation of bot distribution percentages based on the number of non-bot
 # players present in each level bracket. This overrides any custom brackets in the conf.
 # Default: 0 (disabled)
-AiPlayerbot.LevelBrackets.Dynamic.UseDynamicDistribution = 0
+AiPlayerbot.LevelBrackets.Dynamic.UseDynamicDistribution = 1
 
 # Controls how much extra weight is given to brackets (level ranges) that contain real (non-bot)
 # players, when dynamic distribution is enabled. The higher this value, the more bots move to the
@@ -938,7 +941,7 @@ AiPlayerbot.LevelBrackets.Dynamic.UseDynamicDistribution = 0
 #   bracket_weight = 1.0 + (RealPlayerWeight x (1 / TotalRealPlayers) x log(1 + RealPlayersInBracket))
 #   All bracket weights are normalized to total 100%.
 # Default: 1.0
-AiPlayerbot.LevelBrackets.Dynamic.RealPlayerWeight = 1.0
+AiPlayerbot.LevelBrackets.Dynamic.RealPlayerWeight = 3.0
 
 # If enabled, both Alliance and Horde must have identical bracket definitions (same number, same
 # level bounds). All real players (regardless of faction) influence the dynamic distribution for
@@ -977,39 +980,39 @@ AiPlayerbot.LevelBrackets.Dynamic.SyncFactions = 0
 # NOTE: The sum of all Pct values for the Alliance brackets must equal 100.
 #
 AiPlayerbot.LevelBrackets.Alliance.Range1.Lower = 1
-AiPlayerbot.LevelBrackets.Alliance.Range1.Upper = 9
-AiPlayerbot.LevelBrackets.Alliance.Range1.Pct   = 12
+AiPlayerbot.LevelBrackets.Alliance.Range1.Upper = 5
+AiPlayerbot.LevelBrackets.Alliance.Range1.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Alliance.Range2.Lower = 10
-AiPlayerbot.LevelBrackets.Alliance.Range2.Upper = 19
+AiPlayerbot.LevelBrackets.Alliance.Range2.Lower = 6
+AiPlayerbot.LevelBrackets.Alliance.Range2.Upper = 10
 AiPlayerbot.LevelBrackets.Alliance.Range2.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Alliance.Range3.Lower = 20
-AiPlayerbot.LevelBrackets.Alliance.Range3.Upper = 29
+AiPlayerbot.LevelBrackets.Alliance.Range3.Lower = 11
+AiPlayerbot.LevelBrackets.Alliance.Range3.Upper = 15
 AiPlayerbot.LevelBrackets.Alliance.Range3.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Alliance.Range4.Lower = 30
-AiPlayerbot.LevelBrackets.Alliance.Range4.Upper = 39
+AiPlayerbot.LevelBrackets.Alliance.Range4.Lower = 16
+AiPlayerbot.LevelBrackets.Alliance.Range4.Upper = 20
 AiPlayerbot.LevelBrackets.Alliance.Range4.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Alliance.Range5.Lower = 40
-AiPlayerbot.LevelBrackets.Alliance.Range5.Upper = 49
+AiPlayerbot.LevelBrackets.Alliance.Range5.Lower = 21
+AiPlayerbot.LevelBrackets.Alliance.Range5.Upper = 25
 AiPlayerbot.LevelBrackets.Alliance.Range5.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Alliance.Range6.Lower = 50
-AiPlayerbot.LevelBrackets.Alliance.Range6.Upper = 59
+AiPlayerbot.LevelBrackets.Alliance.Range6.Lower = 26
+AiPlayerbot.LevelBrackets.Alliance.Range6.Upper = 30
 AiPlayerbot.LevelBrackets.Alliance.Range6.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Alliance.Range7.Lower = 60
-AiPlayerbot.LevelBrackets.Alliance.Range7.Upper = 69
-AiPlayerbot.LevelBrackets.Alliance.Range7.Pct   = 11
+AiPlayerbot.LevelBrackets.Alliance.Range7.Lower = 31
+AiPlayerbot.LevelBrackets.Alliance.Range7.Upper = 40
+AiPlayerbot.LevelBrackets.Alliance.Range7.Pct   = 12
 
-AiPlayerbot.LevelBrackets.Alliance.Range8.Lower = 70
-AiPlayerbot.LevelBrackets.Alliance.Range8.Upper = 79
+AiPlayerbot.LevelBrackets.Alliance.Range8.Lower = 41
+AiPlayerbot.LevelBrackets.Alliance.Range8.Upper = 50
 AiPlayerbot.LevelBrackets.Alliance.Range8.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Alliance.Range9.Lower = 80
-AiPlayerbot.LevelBrackets.Alliance.Range9.Upper = 80
+AiPlayerbot.LevelBrackets.Alliance.Range9.Lower = 51
+AiPlayerbot.LevelBrackets.Alliance.Range9.Upper = 60
 AiPlayerbot.LevelBrackets.Alliance.Range9.Pct   = 11
 
 ##############################################
@@ -1037,39 +1040,39 @@ AiPlayerbot.LevelBrackets.Alliance.Range9.Pct   = 11
 # NOTE: The sum of all Pct values for the Horde brackets must equal 100.
 #
 AiPlayerbot.LevelBrackets.Horde.Range1.Lower = 1
-AiPlayerbot.LevelBrackets.Horde.Range1.Upper = 9
-AiPlayerbot.LevelBrackets.Horde.Range1.Pct   = 12
+AiPlayerbot.LevelBrackets.Horde.Range1.Upper = 5
+AiPlayerbot.LevelBrackets.Horde.Range1.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Horde.Range2.Lower = 10
-AiPlayerbot.LevelBrackets.Horde.Range2.Upper = 19
+AiPlayerbot.LevelBrackets.Horde.Range2.Lower = 6
+AiPlayerbot.LevelBrackets.Horde.Range2.Upper = 10
 AiPlayerbot.LevelBrackets.Horde.Range2.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Horde.Range3.Lower = 20
-AiPlayerbot.LevelBrackets.Horde.Range3.Upper = 29
+AiPlayerbot.LevelBrackets.Horde.Range3.Lower = 11
+AiPlayerbot.LevelBrackets.Horde.Range3.Upper = 15
 AiPlayerbot.LevelBrackets.Horde.Range3.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Horde.Range4.Lower = 30
-AiPlayerbot.LevelBrackets.Horde.Range4.Upper = 39
+AiPlayerbot.LevelBrackets.Horde.Range4.Lower = 16
+AiPlayerbot.LevelBrackets.Horde.Range4.Upper = 20
 AiPlayerbot.LevelBrackets.Horde.Range4.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Horde.Range5.Lower = 40
-AiPlayerbot.LevelBrackets.Horde.Range5.Upper = 49
+AiPlayerbot.LevelBrackets.Horde.Range5.Lower = 21
+AiPlayerbot.LevelBrackets.Horde.Range5.Upper = 25
 AiPlayerbot.LevelBrackets.Horde.Range5.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Horde.Range6.Lower = 50
-AiPlayerbot.LevelBrackets.Horde.Range6.Upper = 59
+AiPlayerbot.LevelBrackets.Horde.Range6.Lower = 26
+AiPlayerbot.LevelBrackets.Horde.Range6.Upper = 30
 AiPlayerbot.LevelBrackets.Horde.Range6.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Horde.Range7.Lower = 60
-AiPlayerbot.LevelBrackets.Horde.Range7.Upper = 69
-AiPlayerbot.LevelBrackets.Horde.Range7.Pct   = 11
+AiPlayerbot.LevelBrackets.Horde.Range7.Lower = 31
+AiPlayerbot.LevelBrackets.Horde.Range7.Upper = 40
+AiPlayerbot.LevelBrackets.Horde.Range7.Pct   = 12
 
-AiPlayerbot.LevelBrackets.Horde.Range8.Lower = 70
-AiPlayerbot.LevelBrackets.Horde.Range8.Upper = 79
+AiPlayerbot.LevelBrackets.Horde.Range8.Lower = 41
+AiPlayerbot.LevelBrackets.Horde.Range8.Upper = 50
 AiPlayerbot.LevelBrackets.Horde.Range8.Pct   = 11
 
-AiPlayerbot.LevelBrackets.Horde.Range9.Lower = 80
-AiPlayerbot.LevelBrackets.Horde.Range9.Upper = 80
+AiPlayerbot.LevelBrackets.Horde.Range9.Lower = 51
+AiPlayerbot.LevelBrackets.Horde.Range9.Upper = 60
 AiPlayerbot.LevelBrackets.Horde.Range9.Pct   = 11
 
 ##############################################
