@@ -469,6 +469,8 @@ public:
     bool TellMasterNoFacing(std::string const text,
                             PlayerbotSecurityLevel securityLevel = PLAYERBOT_SECURITY_ALLOW_ALL);
     bool TellError(std::string const text, PlayerbotSecurityLevel securityLevel = PLAYERBOT_SECURITY_ALLOW_ALL);
+    // Writes what the bot said to the "playerbots.chat" logger; see the definition for why.
+    void LogChat(std::string_view how, std::string const& msg) const;
     bool SayToGuild(std::string const& msg);
     bool SayToWorld(std::string const& msg);
     bool SayToChannel(std::string const& msg, ChatChannelId const& chanId);

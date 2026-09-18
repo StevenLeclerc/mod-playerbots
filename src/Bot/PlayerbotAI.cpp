@@ -2845,6 +2845,15 @@ std::vector<Player*> PlayerbotAI::GetAllPlayersInGroup()
     return members;
 }
 
+// AzerothCore's own chat log hangs off the packet the client sends, and a bot never sends one:
+// whatever the bots say would never be written anywhere. So write it here instead, in the shape
+// that log uses, on the "playerbots.chat" logger. Nothing is written unless worldserver.conf
+// gives that logger an appender.
+void PlayerbotAI::LogChat(std::string_view how, std::string const& msg) const
+{
+    LOG_INFO("playerbots.chat", "Player {} {}: {}", bot->GetName(), how, msg);
+}
+
 bool PlayerbotAI::SayToGuild(std::string const& msg)
 {
     if (msg.empty())
@@ -2861,6 +2870,7 @@ bool PlayerbotAI::SayToGuild(std::string const& msg)
                 return false;
             }
             guild->BroadcastToGuild(bot->GetSession(), false, msg.c_str(), LANG_UNIVERSAL);
+            LogChat("says in guild", msg);
             return true;
         }
     }
@@ -2886,6 +2896,7 @@ bool PlayerbotAI::SayToWorld(std::string const& msg)
     if (Channel* worldChannel = cMgr->GetChannel(sPlayerbotAIConfig.broadcastWorldChannelName, bot))
     {
         worldChannel->Say(bot->GetGUID(), msg.c_str(), LANG_UNIVERSAL);
+        LogChat("tells channel " + worldChannel->GetName(), msg);
         return true;
     }
 
@@ -2945,6 +2956,7 @@ bool PlayerbotAI::SayToChannel(std::string const& msg, ChatChannelId const& chan
             if (channel)
             {
                 channel->Say(bot->GetGUID(), msg.c_str(), LANG_UNIVERSAL);
+                LogChat("tells channel " + channel->GetName(), msg);
                 return true;
             }
         }
@@ -2974,6 +2986,7 @@ bool PlayerbotAI::SayToParty(std::string const& msg)
         ServerFacade::instance().SendPacket(receiver, &data);
     }
 
+    LogChat("says in party", msg);
     return true;
 }
 
@@ -2991,6 +3004,7 @@ bool PlayerbotAI::SayToRaid(std::string const& msg)
         ServerFacade::instance().SendPacket(receiver, &data);
     }
 
+    LogChat("says in raid", msg);
     return true;
 }
 
@@ -3005,6 +3019,7 @@ bool PlayerbotAI::Yell(std::string const& msg)
         bot->Yell(msg, LANG_ORCISH);
     }
 
+    LogChat("yells", msg);
     return true;
 }
 
@@ -3019,6 +3034,7 @@ bool PlayerbotAI::Say(std::string const& msg)
         bot->Say(msg, LANG_ORCISH);
     }
 
+    LogChat("says", msg);
     return true;
 }
 
