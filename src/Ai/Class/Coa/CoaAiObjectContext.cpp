@@ -429,6 +429,17 @@ SpellCastResult StrictCheck(Player* bot, SpellInfo const* info, Unit* target)
 {
     ObjectGuid const oldSel = bot->GetTarget();
 
+    // Spell::CheckCast reads m_powerCost, and that is only worked out in Spell::prepare: a check run
+    // on its own therefore sees a spell that costs nothing and lets every spell through, however
+    // empty the bot's mana or custom resource is. The cast then fails with SPELL_FAILED_NO_POWER -
+    // 186 of the 210 refusals measured on 18/09. So pay for it here, before asking.
+    if (info->PowerType < MAX_POWERS && info->PowerType != POWER_HEALTH)
+    {
+        int32 const cost = info->CalcPowerCost(bot, info->GetSchoolMask());
+        if (cost > 0 && bot->GetPower(Powers(info->PowerType)) < cost)
+            return SPELL_FAILED_NO_POWER;
+    }
+
     Spell* spell = new Spell(bot, info, TRIGGERED_NONE);
     spell->m_targets.SetUnitTarget(target);
     // Ground-targeted spells: CastSpell aims them at the target's position.
