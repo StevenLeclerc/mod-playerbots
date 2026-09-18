@@ -14,6 +14,7 @@
 #include "LFGMgr.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "PlayerbotFactory.h"
 #include "Playerbots.h"
@@ -343,8 +344,22 @@ void RandomBotLevelMgr::AdjustBotToRange(Player* bot, int targetRangeIndex, Team
         newLevel = urand(range.lower, range.upper);
     }
 
+    // FreshStart: a bot sent to the lowest bracket comes back as a new character would - at the
+    // bracket's first level, at its race's starting point - so starting zones keep seeing
+    // newcomers instead of only bots that happened to roll a low level wherever they stood.
+    bool const freshStart = sPlayerbotAIConfig.levelBracketsFreshStart && bot->getClass() != CLASS_DEATH_KNIGHT &&
+                            factionRanges[targetRangeIndex].lower <= _randomBotMinLevel;
+    if (freshStart)
+        newLevel = factionRanges[targetRangeIndex].lower;
+
     PlayerbotFactory newFactory(bot, newLevel);
     newFactory.Randomize(false);
+
+    PlayerInfo const* start = freshStart ? sObjectMgr->GetPlayerInfo(bot->getRace(), bot->getClass()) : nullptr;
+    if (start)
+        bot->TeleportTo(start->mapId, start->positionX, start->positionY, start->positionZ, start->orientation);
+    else if (newLevel != botOriginalLevel && sPlayerbotAIConfig.levelBracketsFreshStart)
+        sRandomPlayerbotMgr.RandomTeleportForLevel(bot); // a level 45 bot has no business in Elwynn
 
     // Force reset talents if equipment and spec persistence is enabled and the bot rolled to max
     // level. This works around an issue with how randomization interacts with equipment/spec

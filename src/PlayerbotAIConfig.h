@@ -507,6 +507,7 @@ public:
     bool levelBracketsDynamicDistribution;
     float levelBracketsRealPlayerWeight;
     bool levelBracketsSyncFactions;
+    bool levelBracketsFreshStart;
 
     // Random bot level reset (reset random bots reaching max level). See RandomBotLevelMgr.
     bool resetBotLevelEnabled;

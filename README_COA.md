@@ -94,7 +94,8 @@ git clone --branch coa https://github.com/Zyth45/mod-playerbots.git azerothcore-
 | `MapUpdate.Threads = 8` (half your CPU threads) | worldserver.conf | hundreds of bots need several map threads |
 | `AiPlayerbot.MinRandomBots = 200` / `MaxRandomBots = 200` | playerbots.conf | about 7 GB RAM for 200 bots |
 | `AiPlayerbot.RandomBotMaxLevel = 60` | playerbots.conf | the CoA default: random bots spread over levels 1-60 (80 upstream); set 1 instead to have every bot start at level 1 and level up while playing, which also leaves the level brackets below with nothing to balance |
-| `AiPlayerbot.LevelBrackets.Enabled = 1` with `Dynamic.UseDynamicDistribution = 1` | playerbots.conf | the CoA default: bots are rebalanced across 9 level brackets every 5 minutes, 5 levels wide up to 30, so about two thirds of them are in 1-30 and the starting zones stay populated; brackets holding a real player draw more bots (`Dynamic.RealPlayerWeight = 3.0`) |
+| `AiPlayerbot.LevelBrackets.Enabled = 1` with `Dynamic.UseDynamicDistribution = 1` | playerbots.conf | the CoA default: bots are rebalanced across 9 level brackets every 5 minutes, narrow up to 30 (1-3 on its own), so about two thirds of them are in 1-30; brackets holding a real player draw more bots (`Dynamic.RealPlayerWeight = 3.0`) |
+| `AiPlayerbot.LevelBrackets.FreshStart = 1` | playerbots.conf | the CoA default: a bot moved into the 1-3 bracket comes back at level 1 at its race's starting point, like a new player, and a bot moved to any other level is sent somewhere fitting that level |
 | `AiPlayerbot.BotActiveAlone = 60` | playerbots.conf | more bots stay active away from players |
 | `AiPlayerbot.GroupInvitationPermission = 2` | playerbots.conf | every bot accepts group invites |
 | `AiPlayerbot.BotTextLocale = 2` | playerbots.conf | bot chat in French (-1 client locale, 0 English, 3 German, 6 Spanish, 8 Russian) |
