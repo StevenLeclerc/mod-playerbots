@@ -12,12 +12,14 @@
 #include "Log.h"
 #include "Player.h"
 #include "Playerbots.h"
+#include "PlayerbotFactory.h"
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "SharedDefines.h"
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <set>
 #include <vector>
@@ -329,6 +331,7 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
     Player* chosen = nullptr;
     bool chosenSameMap = false;
     bool chosenFits = false;
+    uint32 chosenLevelGap = 0;
     float chosenDistance = 0.0f;
     for (auto const& [guid, bot] : sRandomPlayerbotMgr.GetAllBots())
     {
@@ -348,11 +351,15 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
 
         bool const sameMap = bot->GetMap() == master->GetMap();
         float const distance = sameMap ? master->GetDistance(bot) : 0.0f;
+        // A bot close to the master's level needs no rebuild below, and keeps its own gear.
+        uint32 const levelGap = uint32(std::abs(int32(bot->GetLevel()) - int32(master->GetLevel())));
         bool better = !chosen;
         if (!better && sameMap != chosenSameMap)
             better = sameMap;
         else if (!better && fits != chosenFits)
             better = fits;
+        else if (!better && levelGap != chosenLevelGap)
+            better = levelGap < chosenLevelGap;
         else if (!better)
             better = sameMap && distance < chosenDistance;
 
@@ -361,6 +368,7 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
             chosen = bot;
             chosenSameMap = sameMap;
             chosenFits = fits;
+            chosenLevelGap = levelGap;
             chosenDistance = distance;
         }
     }
@@ -371,8 +379,21 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
         return false;
     }
 
-    if (chosen->GetLevel() < master->GetLevel())
-        chosen->GiveLevel(master->GetLevel());
+    // At the master's level, down as well as up. CoA scales every creature to the highest level
+    // player in its sight, so a level 42 tank beside a level 22 player turns every pull into a
+    // skull. The bot is rebuilt the way a random bot is - gear, talents and spells of that level -
+    // rather than merely relabelled, which would leave it in gear it could no longer wear.
+    if (chosen->GetLevel() != master->GetLevel())
+    {
+        uint32 const level = master->GetLevel();
+        sRandomPlayerbotMgr.SetValue(chosen, "level", level);
+        PlayerbotFactory factory(chosen, level);
+        factory.Randomize(false);
+        // The rebuild picks a specialization of its own: whether it still plays the role is
+        // decided below, on what it holds now.
+        uint32 const rebuilt = GetAscensionActiveSpecialization(chosen);
+        chosenFits = rebuilt && !IsExcludedSpecialization(rebuilt) && GetCoaRole(chosen) == role;
+    }
 
     if (!chosenFits)
     {

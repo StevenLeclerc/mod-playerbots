@@ -47,7 +47,7 @@ Un `?` à la fin **affiche** au lieu de changer : `co ?` liste, `co +truc` ajout
 
 | Commande | Ce qu'elle fait |
 |---|---|
-| `.playerbots coa tank\|heal\|dps` | recrute le bot CoA le plus proche qui joue ce rôle, le met à ton niveau et le téléporte |
+| `.playerbots coa tank\|heal\|dps` | recrute un bot CoA qui joue ce rôle, de préférence proche de ton niveau, le reconstruit exactement à ton niveau (équipement et talents compris, vers le haut comme vers le bas) et le téléporte |
 | `.playerbots bot add <nom>` | prend le contrôle d'un bot précis |
 | `.playerbots bot addclass <classe>` | crée un bot d'une classe donnée |
 | `.playerbots bot remove <nom>` | le renvoie |
