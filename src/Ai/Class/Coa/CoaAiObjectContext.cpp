@@ -51,7 +51,8 @@ enum AbilityKind : uint16
     KIND_DISPEL     = 0x0400,  // removes harmful auras from allies
     KIND_INTERRUPT  = 0x0800,
     KIND_CONTROL    = 0x1000,  // stuns, fears, polymorphs... never aimed at a group member
-    KIND_STANCE     = 0x2000   // a form or stance on the caster that never expires
+    KIND_STANCE     = 0x2000,  // a form or stance on the caster that never expires
+    KIND_STEALTH    = 0x4000   // hides the caster: hunted, not worn
 };
 
 /*
@@ -270,6 +271,13 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
 
         if (aura && self && IsDefensiveAura(effect) && duration > 0 && duration < LongAura)
             ability.kind |= KIND_DEFENSIVE;
+
+        // La furtivite se reconnait a son aura. Elle ressemble a une posture — aucune duree,
+        // sur le lanceur seul — mais elle ne doit surtout pas etre portee en permanence :
+        // Underwalk (800797) ralentit celui qui la porte, et neuf bots la gardaient en
+        // continu, se trainant toute la journee pour rien. C'est une arme de chasse.
+        if (aura && self && effect.ApplyAuraName == SPELL_AURA_MOD_STEALTH)
+            ability.kind |= KIND_STEALTH;
 
         // Stances and forms (no duration) are left out: two of them would take turns forever.
         if (aura && (self || ally) && !heal && info->IsPositive() && duration >= LongAura &&
@@ -651,12 +659,13 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
 enum UsageKind : uint8
 {
     USAGE_ATTACK, USAGE_AOE, USAGE_HEAL, USAGE_GROUP_HEAL, USAGE_HOT, USAGE_TAUNT,
-    USAGE_DEFENSIVE, USAGE_DISPEL, USAGE_INTERRUPT, USAGE_BUFF, USAGE_MAX
+    USAGE_DEFENSIVE, USAGE_DISPEL, USAGE_INTERRUPT, USAGE_BUFF, USAGE_STEALTH, USAGE_MAX
 };
 
 constexpr char const* UsageNames[USAGE_MAX] =
 {
-    "attack", "aoe", "heal", "group heal", "hot", "taunt", "defensive", "dispel", "interrupt", "buff"
+    "attack", "aoe", "heal", "group heal", "hot", "taunt", "defensive", "dispel", "interrupt", "buff",
+    "stealth"
 };
 
 struct UsageCounter
@@ -1153,7 +1162,7 @@ public:
             return false;
 
         std::vector<Usable> const spells = KnownAbilities(bot, [](uint16 kind)
-            { return (kind & (KIND_BUFF | KIND_STANCE)) &&
+            { return (kind & (KIND_BUFF | KIND_STANCE)) && !(kind & KIND_STEALTH) &&
                      !(kind & (KIND_HOSTILE | KIND_DAMAGE | KIND_TAUNT | KIND_HEAL | KIND_CONTROL)); });
         if (spells.empty())
             return false;
@@ -1208,6 +1217,62 @@ public:
 
 private:
     std::map<std::pair<ObjectGuid, uint32>, time_t> recent;
+};
+
+/*
+ * Embuscade. Un mercenaire qui reperе une proie se fond dans le decor AVANT d'etre vu,
+ * s'approche, et frappe. Sans cela il charge a decouvert et n'est qu'un monstre de plus.
+ *
+ * La furtivite n'est PAS portee en permanence : elle ralentit (Underwalk) et n'a de sens
+ * qu'a l'approche. Le bot la prend quand une cible valable est en vue, et la perd
+ * naturellement en attaquant.
+ */
+class CoaStealthAction : public Action
+{
+public:
+    CoaStealthAction(PlayerbotAI* botAI) : Action(botAI, "coa stealth") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        if (bot->IsInCombat() || bot->IsMounted() || bot->IsInFlight() || !bot->IsAlive())
+            return false;
+        if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+            return false;
+
+        std::vector<Usable> const spells = KnownAbilities(bot, [](uint16 kind)
+            { return (kind & KIND_STEALTH) && !(kind & (KIND_HOSTILE | KIND_DAMAGE)); });
+
+        for (Usable const& spell : spells)
+            if (StrictCheck(bot, spell.info, bot) == SPELL_CAST_OK && botAI->CastSpell(spell.info->Id, bot))
+                return RecordUsage(USAGE_STEALTH, spell.info);
+
+        return false;
+    }
+
+    bool isUseful() override { return ClassHas(bot, KIND_STEALTH); }
+};
+
+// Un mercenaire, hors combat, a decouvert, avec une proie en vue.
+class CoaAmbushTrigger : public Trigger
+{
+public:
+    CoaAmbushTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa ambush") {}
+
+    bool IsActive() override
+    {
+        if (!sPlayerbotAIConfig.wildPvpStealthAmbush || !ClassHas(bot, KIND_STEALTH))
+            return false;
+        if (!sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
+            return false;
+        if (bot->IsInCombat() || !bot->IsAlive() || bot->IsMounted() || bot->IsInFlight())
+            return false;
+        if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+            return false;
+
+        // « enemy player » porte deja toutes les regles de cible : camp, zones interdites,
+        // detection. Ne pas en ecrire une seconde.
+        return AI_VALUE(Unit*, "enemy player") != nullptr;
+    }
 };
 
 // A group member, the bot included, carries something the bot knows how to dispel.
@@ -1360,6 +1425,7 @@ public:
     void InitTriggers(std::vector<TriggerNode*>& triggers) override
     {
         triggers.push_back(new TriggerNode("often", { NextAction("coa buff", ACTION_NORMAL + 5) }));
+        triggers.push_back(new TriggerNode("coa ambush", { NextAction("coa stealth", ACTION_NORMAL + 6) }));
     }
 };
 
@@ -1398,6 +1464,7 @@ public:
         creators["coa dispel"] = &CoaActionFactoryInternal::coa_dispel;
         creators["coa interrupt"] = &CoaActionFactoryInternal::coa_interrupt;
         creators["coa buff"] = &CoaActionFactoryInternal::coa_buff;
+        creators["coa stealth"] = &CoaActionFactoryInternal::coa_stealth;
     }
 
 private:
@@ -1417,6 +1484,7 @@ private:
     static Action* coa_dispel(PlayerbotAI* botAI) { return new CoaDispelAction(botAI); }
     static Action* coa_interrupt(PlayerbotAI* botAI) { return new CoaInterruptAction(botAI); }
     static Action* coa_buff(PlayerbotAI* botAI) { return new CoaBuffAction(botAI); }
+    static Action* coa_stealth(PlayerbotAI* botAI) { return new CoaStealthAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -1426,11 +1494,13 @@ public:
     {
         creators["coa dispel"] = &CoaTriggerFactoryInternal::coa_dispel;
         creators["coa enemy casting"] = &CoaTriggerFactoryInternal::coa_enemy_casting;
+        creators["coa ambush"] = &CoaTriggerFactoryInternal::coa_ambush;
     }
 
 private:
     static Trigger* coa_dispel(PlayerbotAI* botAI) { return new CoaDispelTrigger(botAI); }
     static Trigger* coa_enemy_casting(PlayerbotAI* botAI) { return new CoaEnemyCastingTrigger(botAI); }
+    static Trigger* coa_ambush(PlayerbotAI* botAI) { return new CoaAmbushTrigger(botAI); }
 };
 
 }  // namespace

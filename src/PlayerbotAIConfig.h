@@ -307,6 +307,7 @@ public:
     // faction habituel. A 0, comportement d'origine strictement inchange.
     bool wildPvpEnabled;
     uint32 wildPvpMercenaryPercent;
+    bool wildPvpStealthAmbush;
     uint32 wildPvpMinLevel;
     bool wildPvpBotsFightBots;
 

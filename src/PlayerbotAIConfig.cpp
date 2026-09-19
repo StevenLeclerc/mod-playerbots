@@ -684,6 +684,7 @@ bool PlayerbotAIConfig::Initialize()
     // --- PvP mercenaire (CoA) ---------------------------------------------
     wildPvpEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.Enabled", false);
     wildPvpMercenaryPercent = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MercenaryPercent", 20);
+    wildPvpStealthAmbush = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.StealthAmbush", true);
     wildPvpMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MinLevel", 10);
     wildPvpBotsFightBots = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.BotsFightBots", true);
     if (wildPvpMercenaryPercent > 100)

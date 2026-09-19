@@ -2840,3 +2840,15 @@ AiPlayerbot.WildPvp.MinLevel = 10
 #        Default:     1 - (enabled)
 
 AiPlayerbot.WildPvp.BotsFightBots = 1
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.StealthAmbush
+#        Un mercenaire d'une classe qui sait se cacher se fond dans le decor des qu'une proie
+#        est en vue, s'approche, et frappe. Sans cela il charge a decouvert et n'est qu'un
+#        monstre de plus.
+#
+#        La furtivite n'est jamais portee en permanence : elle ralentit celui qui la porte
+#        (Underwalk) et n'a de sens qu'a l'approche.
+#        Default: 1 - active
+#                 0 - les mercenaires attaquent toujours a decouvert
+AiPlayerbot.WildPvp.StealthAmbush = 1
