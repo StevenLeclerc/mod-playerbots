@@ -17,6 +17,9 @@
 #include "ServerFacade.h"
 #include "StatsWeightCalculator.h"
 
+#include <algorithm>
+#include <vector>
+
 ItemUsage ItemUsageValue::Calculate()
 {
     ParsedItemUsage const parsed = GetItemIdFromQualifier();
@@ -670,6 +673,19 @@ bool ItemUsageValue::IsItemUsefulForSkill(ItemTemplate const* proto)
 
 bool ItemUsageValue::IsItemNeededForUsefullSpell(ItemTemplate const* proto, bool checkAllReagents)
 {
+    // Asking what an item is good for asks about what its spells make, which can lead back to the item itself
+    // (a lesser essence makes a greater one, which makes lesser ones again): the recursion then only ends when
+    // the thread's stack runs out. An item already being asked about further up is not needed for its own sake.
+    thread_local std::vector<uint32> asking;
+    if (std::find(asking.begin(), asking.end(), proto->ItemId) != asking.end())
+        return false;
+    asking.push_back(proto->ItemId);
+    struct Unask
+    {
+        std::vector<uint32>& items;
+        ~Unask() { items.pop_back(); }
+    } unask{asking};
+
     for (auto spellId : SpellsUsingItem(proto->ItemId, bot))
     {
         SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
