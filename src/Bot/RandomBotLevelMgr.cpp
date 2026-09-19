@@ -26,7 +26,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // One race per starting area of each faction: gnomes share Coldridge Valley with dwarves, trolls
@@ -53,6 +55,25 @@ static PlayerInfo const* NextStartingArea(Player* bot)
                 return info;
     }
     return nullptr;
+}
+
+static std::mutex AssignedStartsLock;
+static std::unordered_map<ObjectGuid::LowType, PlayerInfo const*> AssignedStarts;
+
+PlayerInfo const* RandomBotLevelMgr::AssignedStart(ObjectGuid::LowType guid)
+{
+    std::lock_guard<std::mutex> lock(AssignedStartsLock);
+    auto itr = AssignedStarts.find(guid);
+    return itr == AssignedStarts.end() ? nullptr : itr->second;
+}
+
+static void SetAssignedStart(ObjectGuid::LowType guid, PlayerInfo const* start)
+{
+    std::lock_guard<std::mutex> lock(AssignedStartsLock);
+    if (start)
+        AssignedStarts[guid] = start;
+    else
+        AssignedStarts.erase(guid);
 }
 
 // True if bot's name is present in excludeList.
@@ -384,6 +405,7 @@ void RandomBotLevelMgr::AdjustBotToRange(Player* bot, int targetRangeIndex, Team
     PlayerInfo const* start = nullptr;
     if (freshStart && sPlayerbotAIConfig.levelBracketsFreshStartSpread)
         start = NextStartingArea(bot);
+    SetAssignedStart(bot->GetGUID().GetCounter(), start);
     if (freshStart && !start)
         start = sObjectMgr->GetPlayerInfo(bot->getRace(), bot->getClass());
     if (start)

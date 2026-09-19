@@ -17,6 +17,7 @@
 #include <vector>
 
 class Player;
+struct PlayerInfo;
 
 // Owns two ported sub-features: periodic redistribution of random bots across per-faction level
 // brackets, and resetting random bots that reach max level. Config lives in PlayerbotAIConfig;
@@ -37,6 +38,10 @@ public:
     void OnBotLogin(Player* player);
     void OnBotLevelChanged(Player* player, uint8 oldLevel);
     void OnPlayerLogout(Player* player);
+
+    // The starting area FreshStartSpread gave this bot, or null: a starter-level bot's random
+    // teleports stay around it instead of around its own race's start, or it would walk home.
+    static PlayerInfo const* AssignedStart(ObjectGuid::LowType guid);
 
 private:
     RandomBotLevelMgr() = default;

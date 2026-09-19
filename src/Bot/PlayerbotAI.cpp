@@ -42,6 +42,7 @@
 #include "Playerbots.h"
 #include "PositionValue.h"
 #include "RBAC.h"
+#include "RandomBotLevelMgr.h"
 #include "RandomPlayerbotMgr.h"
 #include "SayAction.h"
 #include "ScriptMgr.h"
@@ -6586,7 +6587,11 @@ bool PlayerbotAI::StarterLevelDistanceCheck(Player* player, WorldLocation const&
     float dis = 0.0f;
     if (fromStartUp)
     {
-        PlayerInfo const* pInfo = sObjectMgr->GetPlayerInfo(player->getRace(true), player->getClass());
+        PlayerInfo const* pInfo = RandomBotLevelMgr::AssignedStart(player->GetGUID().GetCounter());
+        if (!pInfo)
+            pInfo = sObjectMgr->GetPlayerInfo(player->getRace(true), player->getClass());
+        if (!pInfo)
+            return true;
         if (loc.GetMapId() != pInfo->mapId)
             return false;
         dis = loc.GetExactDist(pInfo->positionX, pInfo->positionY, pInfo->positionZ);
