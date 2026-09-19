@@ -12,14 +12,11 @@ This `coa` branch of mod-playerbots adds bots for the **Conquest of Azeroth cust
 
 ## Current status
 
-> [!WARNING]
-> **Bots are tested on levels 1 to 25.** Levels 30 and above are **not supported yet**: many higher-level CoA
-> spells have never been cast by bots, and some of them can crash the server. Keep
-> `AiPlayerbot.RandomBotMaxLevel = 1` so bots start at level 1 and level up naturally.
-
-My own server runs 24/7 and my bots level up naturally, so I can watch them and fix problems as they reach higher
-levels. If too many different spells crash at once, I will let the bots level up (for example to level 40) and fix
-a whole level range in one go.
+> [!NOTE]
+> **Bots run over the whole 1-60 range.** On 19 September 2026 a test realm ran 1000 bots spread over every level,
+> the level brackets moving them all night; its one crash, bots recursing over items crafted from each other, is
+> fixed. Higher-level CoA spells have been cast by bots
+> far less than low-level ones, so a crash is still possible there: please report it (below).
 
 **Found a crash?** Open an issue with the newest `.txt` file from the `Crashes` folder next to `worldserver.exe`,
 and tell what the bots were doing (class, level, dungeon or open world) if you know.

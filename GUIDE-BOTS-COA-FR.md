@@ -65,11 +65,23 @@ Un `?` à la fin **affiche** au lieu de changer : `co ?` liste, `co +truc` ajout
 Les commandes `.playerbots rndbot` s'appliquent à tous les bots connectés. Pour n'en viser qu'un :
 `.playerbots rndbot teleport Nomdubot`.
 
+## Comment le monde se remplit
+
+- Les bots sont répartis en **neuf tranches de niveau** (1-3, 4-7, 8-12, 13-17, 18-23, 24-30, 31-40, 41-50, 51-60),
+  rééquilibrées toutes les 5 minutes : environ deux tiers sont sous le niveau 30.
+- **Les tranches où jouent de vrais joueurs attirent plus de bots** : avec un perso niveau 15, tu croises plus de bots
+  autour du 15.
+- **De nouveaux bots niveau 1 apparaissent en continu dans les vallées de départ** (Northshire, Coldridge, Shadowglen,
+  Ammen Vale, Valley of Trials, Deathknell, Red Cloud Mesa, Sunstrider), à parts égales entre les vallées de chaque
+  faction. Quand ils montent de niveau et partent, d'autres les remplacent.
+
 ## Réglages utiles (`playerbots.conf`)
 
 | Réglage | Effet |
 |---|---|
-| `AiPlayerbot.MinRandomBots` / `MaxRandomBots` | combien de bots jouent en même temps (environ 7 Go de RAM pour 200) |
+| `AiPlayerbot.MinRandomBots` / `MaxRandomBots` | combien de bots jouent en même temps (environ 10 Go de RAM pour 1000) |
+| `AiPlayerbot.LevelBrackets.*` | les tranches ci-dessus ; `Dynamic.RealPlayerWeight` règle l'attraction des joueurs |
+| `AiPlayerbot.LevelBrackets.FreshStart` / `FreshStartSpread` | les débutants niveau 1 dans les vallées de départ / répartis entre les vallées |
 | `AiPlayerbot.RandomBotMinLevel` / `RandomBotMaxLevel` | la plage de niveaux tirée au sort à la première connexion d'un bot |
 | `AiPlayerbot.BotActiveAlone` | part des bots actifs quand aucun joueur n'est près d'eux (60 conseillé, 10 par défaut : presque rien ne bouge) |
 | `AiPlayerbot.MinRandomBotTeleportInterval` / `Max...` | délai entre deux déplacements automatiques, en secondes (3600 à 18000 par défaut) |
@@ -89,8 +101,8 @@ Les commandes `.playerbots rndbot` s'appliquent à tous les bots connectés. Pou
 - **`co` tout seul ne répond pas**, il faut `co ?`. Pareil pour `nc`.
 - **Hors groupe**, un bot ignore la plupart des commandes.
 - **Un bot inactif ne bouge pas** : hors groupe et loin des joueurs, seule une partie des bots est active (`BotActiveAlone`).
-- **Les bots ne montent pas du niveau 1** : ils reçoivent un niveau au hasard à leur première connexion, avec l'équipement et les talents qui vont avec.
-- **Ils ne se téléportent pas tout de suite** dans une zone de leur niveau : jusqu'à 5 heures d'attente, d'où l'intérêt de `.playerbots rndbot teleport`.
+- **Un bot peut changer de niveau d'un coup** : c'est le rééquilibrage des tranches. Il est alors envoyé dans une zone
+  de son nouveau niveau.
 - **Le nombre total de bots dépasse le nombre de bots connectés** : le module garde une réserve et fait tourner les personnages.
 
 ## Quand ça ne va pas
