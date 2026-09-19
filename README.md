@@ -1,7 +1,6 @@
 > [!IMPORTANT]
 > **This is the Conquest of Azeroth fork of mod-playerbots.** Build instructions, recommended settings and the current
 > status of the CoA bots are in **[README_COA.md](README_COA.md)**.
-> Bots are tested on levels 1 to 25 only: higher levels are not supported yet and can crash the server.
 
 <p align="center">
     <a href="https://github.com/mod-playerbots/mod-playerbots/blob/master/README.md">English</a>
