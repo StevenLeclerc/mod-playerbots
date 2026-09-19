@@ -10,6 +10,7 @@
 #include "AiObjectContext.h"
 #include "ArenaTeam.h"
 #include "ArenaTeamMgr.h"
+#include "CoaSpecialization.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
 #include "GuildMgr.h"
@@ -725,6 +726,12 @@ void PlayerbotFactory::BuildCcBreakTrinketCache()
 
 uint8 PlayerbotFactory::GetPreferredArmorType(uint8 cls)
 {
+    // A CoA class wears the armor its own proficiencies allow, not the one of the WotLK class it
+    // was modeled on. Without this the 21 CoA classes returned 0 and never got the preference
+    // bonus, leaving them scored as if no armor type suited them.
+    if (CoaArmorProficiency const* coaArmor = GetCoaArmorProficiency(cls))
+        return coaArmor->heaviestArmor;
+
     switch (cls)
     {
         case CLASS_WARRIOR:
