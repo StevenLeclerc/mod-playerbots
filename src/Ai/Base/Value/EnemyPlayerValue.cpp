@@ -18,14 +18,31 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
 
     bool inCannon = botAI->IsInVehicle(false, true);
     Player* enemy = dynamic_cast<Player*>(unit);
-    if (enemy && botAI->IsOpposing(enemy) && enemy->IsPvP() &&
+
+    // --- PvP mercenaire (CoA) ---------------------------------------------
+    // Regle normale : faction opposee ET cible marquee PvP. Un bot mercenaire
+    // s'en affranchit et s'en prend a toute cible FFA, y compris de sa propre
+    // faction et y compris un autre bot : c'est ce qui fait vivre la guerre
+    // sans le joueur, au lieu de la concentrer sur lui.
+    // Le coeur reste seul juge de la legalite du coup ; on ne fait ici que
+    // decider de la convoitise.
+    bool mercenaire = enemy && sPlayerbotAIConfig.wildPvpEnabled &&
+                      bot->IsFFAPvP() && enemy->IsFFAPvP() &&
+                      sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()) &&
+                      (sPlayerbotAIConfig.wildPvpBotsFightBots ||
+                       !GET_PLAYERBOT_AI(enemy));
+
+    if (enemy && (mercenaire || (botAI->IsOpposing(enemy) && enemy->IsPvP())) &&
         !sPlayerbotAIConfig.IsPvpProhibited(enemy->GetZoneId(), enemy->GetAreaId()) &&
         !enemy->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NON_ATTACKABLE_2) &&
         ((inCannon || !enemy->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NOT_SELECTABLE))) &&
         /*!enemy->HasStealthAura() && !enemy->HasInvisibilityAura()*/ enemy->CanSeeOrDetect(bot) &&
         !(enemy->HasSpiritOfRedemptionAura()))
     {
-        // If with master, only attack if master is PvP flagged
+        // If with master, only attack if master is PvP flagged.
+        // Un mercenaire libre (sans maitre) n'est pas concerne ; un mercenaire
+        // recrute dans un groupe reste tenu par cette regle, sinon il
+        // declencherait des combats que son maitre n'a pas choisis.
         Player* master = botAI->GetMaster();
         if (master && !master->IsPvP() && !master->IsFFAPvP())
             return false;

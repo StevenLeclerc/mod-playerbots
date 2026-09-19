@@ -2797,3 +2797,46 @@ AiPlayerbot.TargetPosRecalcDistance = 0.1
 
 # Allow bots to be summoned near innkeepers
 AiPlayerbot.SummonAtInnkeepersEnabled = 1
+
+#
+#    AiPlayerbot.WildPvp.Enabled
+#        Description: Wild PvP. A share of the random bots become mercenaries:
+#                     they carry the FFA flag permanently and attack anyone who
+#                     also carries it, regardless of faction, including other
+#                     bots. The rest of the server keeps ordinary faction-versus
+#                     -faction PvP.
+#                     Capital cities and sanctuaries are spared by the core
+#                     itself: UpdateFFAPvPState refuses the flag where
+#                     IsInNoPvPArea is set.
+#        Default:     0 - (disabled, behaviour strictly unchanged)
+#                     1 - (enabled)
+
+AiPlayerbot.WildPvp.Enabled = 0
+
+#
+#    AiPlayerbot.WildPvp.MercenaryPercent
+#        Description: Share of bots that are mercenaries, in percent. This is
+#                     the dial that sets how violent the world is: 0 leaves the
+#                     server exactly as it is, 100 makes every bot hostile to
+#                     everything. Whether a given bot is a mercenary is derived
+#                     from its GUID, so it never changes side over its life.
+#        Default:     20
+
+AiPlayerbot.WildPvp.MercenaryPercent = 20
+
+#
+#    AiPlayerbot.WildPvp.MinLevel
+#        Description: Bots below this level are never mercenaries, so starting
+#                     zones stay quiet and questing remains possible.
+#        Default:     10
+
+AiPlayerbot.WildPvp.MinLevel = 10
+
+#
+#    AiPlayerbot.WildPvp.BotsFightBots
+#        Description: Mercenaries also attack other mercenaries. Keeping this
+#                     enabled is what makes the war exist without the player,
+#                     instead of every mercenary converging on the only human.
+#        Default:     1 - (enabled)
+
+AiPlayerbot.WildPvp.BotsFightBots = 1

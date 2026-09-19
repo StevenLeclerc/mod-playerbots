@@ -680,6 +680,15 @@ bool PlayerbotAIConfig::Initialize()
     disableDeathKnightLogin = sConfigMgr->GetOption<bool>("AiPlayerbot.DisableDeathKnightLogin", 0);
     limitTalentsExpansion = sConfigMgr->GetOption<bool>("AiPlayerbot.LimitTalentsExpansion", 0);
     botActiveAlone = sConfigMgr->GetOption<int32>("AiPlayerbot.BotActiveAlone", 10);
+
+    // --- PvP mercenaire (CoA) ---------------------------------------------
+    wildPvpEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.Enabled", false);
+    wildPvpMercenaryPercent = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MercenaryPercent", 20);
+    wildPvpMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MinLevel", 10);
+    wildPvpBotsFightBots = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.BotsFightBots", true);
+    if (wildPvpMercenaryPercent > 100)
+        wildPvpMercenaryPercent = 100;
+
     BotActiveAloneDurationSeconds = sConfigMgr->GetOption<int32>("AiPlayerbot.BotActiveAloneDurationSeconds", 30);
     BotActiveAloneForceWhenInRadius = sConfigMgr->GetOption<uint32>("AiPlayerbot.BotActiveAloneForceWhenInRadius", 150);
     BotActiveAloneForceWhenInZone = sConfigMgr->GetOption<bool>("AiPlayerbot.BotActiveAloneForceWhenInZone", 1);
@@ -961,6 +970,23 @@ bool PlayerbotAIConfig::IsInRandomAccountList(uint32 id)
 bool PlayerbotAIConfig::IsInRandomQuestItemList(uint32 id)
 {
     return find(randomBotQuestItems.begin(), randomBotQuestItems.end(), id) != randomBotQuestItems.end();
+}
+
+bool PlayerbotAIConfig::IsMercenary(uint64 botGuid) const
+{
+    if (!wildPvpEnabled || !wildPvpMercenaryPercent)
+        return false;
+    if (wildPvpMercenaryPercent >= 100)
+        return true;
+
+    // FNV-1a sur le GUID seul : la reponse ne depend ni du temps ni de la
+    // cible, donc un bot reste du meme camp pour toute sa vie. On reprend la
+    // technique deja employee par PossibleTargetsValue plutot que d'en
+    // inventer une seconde.
+    uint64 hash = 14695981039346656037ULL;
+    hash ^= botGuid;
+    hash *= 1099511628211ULL;
+    return (hash % 100) < wildPvpMercenaryPercent;
 }
 
 bool PlayerbotAIConfig::IsPvpProhibited(uint32 zoneId, uint32 areaId)

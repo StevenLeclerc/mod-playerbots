@@ -301,6 +301,20 @@ public:
     bool deleteRandomBotAccounts;
     uint32 randomBotGuildCount, randomBotGuildSizeMax;
     bool deleteRandomBotGuilds;
+    // --- PvP mercenaire (CoA) ---------------------------------------------
+    // Une fraction des bots sont marques FFA et attaquent n'importe qui, y
+    // compris les autres bots. Le reste du serveur garde le PvP faction contre
+    // faction habituel. A 0, comportement d'origine strictement inchange.
+    bool wildPvpEnabled;
+    uint32 wildPvpMercenaryPercent;
+    uint32 wildPvpMinLevel;
+    bool wildPvpBotsFightBots;
+
+    // Un bot est mercenaire ou non de facon STABLE dans le temps : la decision
+    // derive de son GUID, pas d'un tirage. Sans cela un bot changerait de camp
+    // a chaque appel, ce qui rendrait le monde illisible.
+    bool IsMercenary(uint64 botGuid) const;
+
     std::vector<uint32> pvpProhibitedZoneIds;
     std::vector<uint32> pvpProhibitedAreaIds;
     bool fastReactInBG;

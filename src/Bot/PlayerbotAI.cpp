@@ -262,6 +262,42 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         bot->GetSession()->isLogingOut() || bot->IsDuringRemoveFromWorld())
         return;
 
+    // --- PvP mercenaire (CoA) ---------------------------------------------
+    // Un bot mercenaire porte en permanence le drapeau FFA : c'est la seule
+    // facon, cote coeur, qu'une entite controlee par un joueur puisse en
+    // attaquer une autre sans qu'elle soit marquee PvP
+    // (Unit::_IsValidAttackTarget : `IsFFAPvP() && target->IsFFAPvP()`).
+    //
+    // On le repose a chaque tick plutot qu'une fois pour toutes, parce que
+    // Player::UpdateArea le recalcule a chaque changement de zone depuis les
+    // seuls drapeaux de la zone. Le hook OnPlayerUpdateArea ne sert a rien
+    // ici : il est appele AVANT ce recalcul.
+    //
+    // LIMITE ASSUMEE : au franchissement d'une frontiere de zone, le drapeau
+    // tombe puis revient au tick suivant. Un combat en cours peut donc se
+    // rompre a cet instant precis. Corriger cela demanderait un hook appele
+    // APRES UpdateArea, c'est-a-dire une modification du coeur — ce qu'on
+    // refuse ici, le but etant de n'avoir aucune dette a reappliquer.
+    //
+    // Detourner IsInFFAPvPArea est sans effet de bord : verifie, le coeur ne
+    // le lit que dans UpdateFFAPvPState et SetFFAPvPTimer, nulle part ailleurs.
+    // Le maintenir a vrai empeche aussi le minuteur de retrait de 30 s de
+    // demarrer, ce qui est exactement voulu pour un mercenaire permanent.
+    //
+    // Les capitales et les sanctuaires sont epargnes sans rien coder :
+    // UpdateFFAPvPState refuse de poser le drapeau quand IsInNoPvPArea est
+    // vrai, et le coeur le positionne deja pour ces zones.
+    if (sPlayerbotAIConfig.wildPvpEnabled && bot->IsAlive() &&
+        bot->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
+        sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
+    {
+        if (!bot->pvpInfo.IsInFFAPvPArea)
+        {
+            bot->pvpInfo.IsInFFAPvPArea = true;
+            bot->UpdateFFAPvPState(false);
+        }
+    }
+
     // Handle cheat options (set bot health and power if cheats are enabled)
     if (bot->IsAlive() &&
         (static_cast<uint32>(GetCheat()) > 0 || static_cast<uint32>(sPlayerbotAIConfig.botCheatMask) > 0))
