@@ -23,49 +23,32 @@ and tell what the bots were doing (class, level, dungeon or open world) if you k
 
 ## Which versions go together
 
-The core and the module must come from the **same tag**. Each tag matches one jealous-sound release.
+The module follows jealous-sound's `main`; older releases keep the tag they were built with.
 
-| jealous-sound release | Tag (core and module) |
+| jealous-sound | This module |
 |---|---|
-| issue-batch-20260915 (`a8b28faac98d`) | `bots-issue-batch-20260915-v1.1` (latest, same code as the CoA Bots v1.1 zip) |
-| issue-batch-20260915 (`a8b28faac98d`) | `bots-issue-batch-20260915` (v1.0) |
+| **`main`** from `b3717c1` (19 Sep 2026, repack main-20260919-b3717c137) | branch **`coa`** (same code as the CoA Bots v1.2 zip) |
+| issue-batch-20260915 (`a8b28faac98d`) | tag `bots-issue-batch-20260915-v1.1`, with the core tag of the same name from [Zyth45/azerothcore-wotlk-coa](https://github.com/Zyth45/azerothcore-wotlk-coa) |
 
-The core needs the mod-playerbots core hooks and a small CoA specialization API. Until they are part of
-jealous-sound's repository, use [Zyth45/azerothcore-wotlk-coa](https://github.com/Zyth45/azerothcore-wotlk-coa):
+Since 17 September 2026 jealous-sound's `main` carries everything the bots need from the core: the mod-playerbots
+hooks and the CoA specialization API ([#3069](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3069))
+and the fixes for the crashes bots trigger often (#3072, #3075, #3080, #3083, #3085). **No fork of the core is
+needed any more**: the module goes into `modules/`, which the core's `.gitignore` leaves alone, so pulling `main`
+never conflicts with it.
 
-- tag `bots-issue-batch-20260915-v1.1` (branch `coa-bots`): the jealous-sound release, the core hooks, the
-  specialization API and fixes for crashes that bots trigger often. **Use this one.**
-- branch `playerbots-support`: only the core hooks and the specialization API, on the latest jealous-sound `main`.
-  These are the changes proposed to jealous-sound in
-  [PR #3069](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3069).
-
-### Building on the latest jealous-sound `main`
-
-Use the `coa` branch of this module with the `playerbots-support` core branch (tested on `main` `67ce9cb305`, #1498):
-
-```bash
-git clone --branch playerbots-support https://github.com/Zyth45/azerothcore-wotlk-coa.git
-git clone --branch coa https://github.com/Zyth45/mod-playerbots.git azerothcore-wotlk-coa/modules/mod-playerbots
-```
-
-- Since #1498 the worldserver stops at startup unless `DataDir/dbc` holds the CoA client DBC set (download link in
-  the CoA Discord's information channel, or `apps/coa-dbc/client_dbc.py`). Players need the matching client patch.
-- Bots trigger some existing crashes and a server freeze much faster than players. The fixes are proposed separately
-  ([#3072](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3072),
-  [#3075](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3075),
-  [#3080](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3080),
-  [#3083](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3083),
-  [#3085](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/3085)). Until they are merged, add them to your
-  build for a long-running server with many bots.
+Optional: [#4154](https://github.com/jealous-sound/azerothcore-wotlk-coa/pull/4154) (until it is merged) makes the
+challenges module much lighter with many bots online.
 
 ## Build
 
 1. Get the core and this module:
 
    ```bash
-   git clone --branch bots-issue-batch-20260915-v1.1 https://github.com/Zyth45/azerothcore-wotlk-coa.git
-   git clone --branch bots-issue-batch-20260915-v1.1 https://github.com/Zyth45/mod-playerbots.git azerothcore-wotlk-coa/modules/mod-playerbots
+   git clone https://github.com/jealous-sound/azerothcore-wotlk-coa.git
+   git clone --branch coa https://github.com/Zyth45/mod-playerbots.git azerothcore-wotlk-coa/modules/mod-playerbots
    ```
+
+   Already building the core? Only the second line, then re-run CMake so it picks the module up.
 
 2. Build and install the server as usual:
    [AzerothCore installation guide](https://www.azerothcore.org/wiki/installation) and
@@ -89,7 +72,7 @@ git clone --branch coa https://github.com/Zyth45/mod-playerbots.git azerothcore-
 |---|---|---|
 | `CharacterCreating.Disabled.ClassMask = 2047` | worldserver.conf | random bots are created with CoA classes only |
 | `MapUpdate.Threads = 8` (half your CPU threads) | worldserver.conf | hundreds of bots need several map threads |
-| `AiPlayerbot.MinRandomBots = 200` / `MaxRandomBots = 200` | playerbots.conf | about 7 GB RAM for 200 bots |
+| `AiPlayerbot.MinRandomBots = 200` / `MaxRandomBots = 200` | playerbots.conf | about 3.5 GB of server memory for 200 bots, 10 GB for 1000 |
 | `AiPlayerbot.RandomBotMaxLevel = 60` | playerbots.conf | the CoA default: random bots spread over levels 1-60 (80 upstream); set 1 instead to have every bot start at level 1 and level up while playing, which also leaves the level brackets below with nothing to balance |
 | `AiPlayerbot.LevelBrackets.Enabled = 1` with `Dynamic.UseDynamicDistribution = 1` | playerbots.conf | the CoA default: bots are rebalanced across 9 level brackets every 5 minutes, narrow up to 30 (1-3 on its own), so about two thirds of them are in 1-30; brackets holding a real player draw more bots (`Dynamic.RealPlayerWeight = 3.0`) |
 | `AiPlayerbot.LevelBrackets.FreshStart = 1` | playerbots.conf | the CoA default: a bot moved into the 1-3 bracket comes back at level 1 at its race's starting point, like a new player, and a bot moved to any other level is sent somewhere fitting that level |
