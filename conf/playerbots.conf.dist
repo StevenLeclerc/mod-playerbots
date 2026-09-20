@@ -2830,7 +2830,7 @@ AiPlayerbot.WildPvp.MercenaryPercent = 20
 #                     zones stay quiet and questing remains possible.
 #        Default:     10
 
-AiPlayerbot.WildPvp.MinLevel = 10
+AiPlayerbot.WildPvp.MinLevel = 7
 
 #
 #    AiPlayerbot.WildPvp.BotsFightBots
