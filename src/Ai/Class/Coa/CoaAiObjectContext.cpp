@@ -675,6 +675,22 @@ struct UsageCounter
 };
 
 std::array<UsageCounter, USAGE_MAX> Usage;
+
+// Diagnostic de l'embuscade. « stealth 0/0 » etablit que l'action n'est jamais
+// executee, sans dire pourquoi : le declencheur ne s'arme-t-il jamais, ou
+// s'arme-t-il sans que l'action soit jugee utile ? Ces compteurs tranchent, en
+// disant quelle condition refuse.
+struct AmbushProbe
+{
+    std::atomic<uint64> vu{ 0 };            // IsActive appele
+    std::atomic<uint64> sansClasse{ 0 };    // la classe ne sait pas se cacher
+    std::atomic<uint64> pasMercenaire{ 0 };
+    std::atomic<uint64> enCombat{ 0 };
+    std::atomic<uint64> dejaCache{ 0 };
+    std::atomic<uint64> sansProie{ 0 };
+    std::atomic<uint64> arme{ 0 };          // IsActive a rendu true
+};
+AmbushProbe Ambush;
 std::mutex UsageSpellsLock;
 std::map<uint32, uint32> UsageSpells[USAGE_MAX];  // spell id -> casts, dispels and interrupts only
 std::atomic<time_t> UsageLastReport{ 0 };
@@ -697,6 +713,12 @@ void ReportUsage(time_t now)
         line += Acore::StringFormat("{}{} {}/{}", kind ? ", " : "", UsageNames[kind],
                                     Usage[kind].cast.load(), Usage[kind].tried.load());
     LOG_INFO("playerbots.coa", "coa usage since start (cast/tried): {}", line);
+    LOG_INFO("playerbots.coa",
+             "coa ambush probe: vu {}, sans classe {}, pas mercenaire {}, en combat {}, "
+             "deja cache {}, sans proie {}, ARME {}",
+             Ambush.vu.load(), Ambush.sansClasse.load(), Ambush.pasMercenaire.load(),
+             Ambush.enCombat.load(), Ambush.dejaCache.load(), Ambush.sansProie.load(),
+             Ambush.arme.load());
 
     std::lock_guard<std::mutex> guard(UsageSpellsLock);
     // Attacks and heals list more spells: they show which rank of each spell the bots cast.
@@ -1232,6 +1254,13 @@ class CoaStealthAction : public Action
 public:
     CoaStealthAction(PlayerbotAI* botAI) : Action(botAI, "coa stealth") {}
 
+    // Secondes d'attente apres un echec. Sans ce repli, une action prioritaire
+    // qui echoue a chaque tick confisquerait le tour a « attack enemy player »
+    // et rendrait le mercenaire inoffensif : il resterait plante devant sa proie
+    // a rater sa furtivite. Au premier echec on se tait, l'attaque reprend la
+    // main, et on retentera a la prochaine rencontre.
+    static constexpr time_t RepliSecondes = 10;
+
     bool Execute(Event /*event*/) override
     {
         if (bot->IsInCombat() || bot->IsMounted() || bot->IsInFlight() || !bot->IsAlive())
@@ -1246,10 +1275,28 @@ public:
             if (StrictCheck(bot, spell.info, bot) == SPELL_CAST_OK && botAI->CastSpell(spell.info->Id, bot))
                 return RecordUsage(USAGE_STEALTH, spell.info);
 
+        // Echec : on se met en retrait pour laisser l'attaque passer.
+        prochainEssai = time(nullptr) + RepliSecondes;
+
+        // Compter l'ESSAI meme sans lancement, comme le fait CoaAttackAction :
+        // RecordUsage incremente `tried` a chaque appel et `cast` seulement sur un
+        // sort non nul. Ne l'appeler qu'en cas de succes rendait le compteur aveugle
+        // — « stealth 0/0 » ne disait alors pas si l'action n'avait jamais tourne ou
+        // si elle echouait a chaque fois, ce qui est precisement la question.
+        RecordUsage(USAGE_STEALTH, nullptr);
         return false;
     }
 
-    bool isUseful() override { return ClassHas(bot, KIND_STEALTH); }
+    // Le repli est teste ICI et non dans Execute : une action jugee inutile est
+    // ecartee par le moteur, qui passe alors a « attack enemy player ». La
+    // tester dans Execute la laisserait gagner le tour pour ne rien faire.
+    bool isUseful() override
+    {
+        return ClassHas(bot, KIND_STEALTH) && time(nullptr) >= prochainEssai;
+    }
+
+private:
+    time_t prochainEssai = 0;   // propre a ce bot : une instance d'action par bot
 };
 
 // Un mercenaire, hors combat, a decouvert, avec une proie en vue.
@@ -1260,18 +1307,33 @@ public:
 
     bool IsActive() override
     {
-        if (!sPlayerbotAIConfig.wildPvpStealthAmbush || !ClassHas(bot, KIND_STEALTH))
+        ++Ambush.vu;
+        if (!sPlayerbotAIConfig.wildPvpStealthAmbush)
             return false;
+        if (!ClassHas(bot, KIND_STEALTH))
+            { ++Ambush.sansClasse; return false; }
         if (!sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
-            return false;
+            { ++Ambush.pasMercenaire; return false; }
         if (bot->IsInCombat() || !bot->IsAlive() || bot->IsMounted() || bot->IsInFlight())
-            return false;
+            { ++Ambush.enCombat; return false; }
         if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
-            return false;
+            { ++Ambush.dejaCache; return false; }
 
-        // « enemy player » porte deja toutes les regles de cible : camp, zones interdites,
-        // detection. Ne pas en ecrire une seconde.
-        return AI_VALUE(Unit*, "enemy player") != nullptr;
+        // « enemy player target » porte deja toutes les regles de cible : camp, zones
+        // interdites, detection. Ne pas en ecrire une seconde.
+        //
+        // PIEGE PAYE (P-035) : le nom enregistre est « enemy player target ».
+        // « enemy player » n'est que l'argument par defaut du constructeur de
+        // EnemyPlayerValue, enregistre nulle part. Or AI_VALUE vaut
+        // context->GetValue<type>(name)->Get() : sur un nom inconnu, GetValue rend
+        // nullptr et la fleche dereference zero. Segfault deterministe des que les
+        // bots tournent. D'ou le garde ci-dessous plutot que AI_VALUE : un nom faux
+        // rendra desormais « pas de proie », jamais un plantage.
+        Value<Unit*>* proie = context->GetValue<Unit*>("enemy player target");
+        if (!proie || !proie->Get())
+            { ++Ambush.sansProie; return false; }
+        ++Ambush.arme;
+        return true;
     }
 };
 
@@ -1425,7 +1487,18 @@ public:
     void InitTriggers(std::vector<TriggerNode*>& triggers) override
     {
         triggers.push_back(new TriggerNode("often", { NextAction("coa buff", ACTION_NORMAL + 5) }));
-        triggers.push_back(new TriggerNode("coa ambush", { NextAction("coa stealth", ACTION_NORMAL + 6) }));
+        // 56, et non ACTION_NORMAL + 6 : « attack enemy player » est arme par le
+        // MEME declencheur (EnemyPlayerNear rend AI_VALUE(Unit*, "enemy player
+        // target"), PvpTriggers.cpp:16) a la priorite 55,0
+        // (AttackEnemyPlayersStrategy.cpp:13). A 16 la furtivite etait
+        // systematiquement evincee : mesure en jeu, declencheur arme 2 fois,
+        // action executee 0 fois. Le bot degainait avant d'avoir pu se cacher,
+        // et le mode attaque interdit ensuite la furtivite.
+        //
+        // Ne touche QUE la rencontre d'un joueur : le farm sur les creatures
+        // passe par « attack anything » a 4,0 (GrindingStrategy.cpp:25), sur un
+        // declencheur different, et n'est donc pas ralenti.
+        triggers.push_back(new TriggerNode("coa ambush", { NextAction("coa stealth", 56.0f) }));
     }
 };
 
