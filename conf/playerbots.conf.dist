@@ -2852,3 +2852,133 @@ AiPlayerbot.WildPvp.BotsFightBots = 1
 #        Default: 1 - active
 #                 0 - les mercenaires attaquent toujours a decouvert
 AiPlayerbot.WildPvp.StealthAmbush = 1
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.AllBotsAreTargets
+#        Cible et agresseur sont deux choses distinctes.
+#
+#        Le coeur exige le drapeau FFA DES DEUX COTES pour que deux joueurs de meme faction
+#        puissent s'affronter (Unit::GetReactionTo). Tant que seuls les mercenaires le portent,
+#        un mercenaire ne peut attaquer qu'un autre mercenaire : les quatre cinquiemes de la
+#        population sont intouchables, et les rencontres sont des accidents.
+#
+#        A 1, tout bot aleatoire qui rode librement porte le drapeau et devient une proie
+#        possible. Il ne devient pas chasseur pour autant : son choix de cible reste celui d'un
+#        bot ordinaire, faction contre faction. Il ne se bat que s'il est attaque.
+#
+#        Un bot qui a un maitre en est exclu : les compagnons d'un joueur ne sont pas du gibier.
+#        Default: 0 - seuls les mercenaires sont attaquables entre eux
+#                 1 - tout bot libre est une cible possible
+AiPlayerbot.WildPvp.AllBotsAreTargets = 0
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.MaxAttackersPerTarget
+#        Nombre maximum de mercenaires pouvant engager la MEME cible.
+#
+#        Chaque mercenaire decide seul : sans plafond, trois d'entre eux a portee du meme joueur
+#        repondent trois fois oui, et c'est la mort assuree pour qui joue seul.
+#
+#        Le plafond ne rompt jamais un combat en cours : il n'interdit que les ralliements.
+#        Default: 1 - un duel
+#                 0 - aucune limite
+AiPlayerbot.WildPvp.MaxAttackersPerTarget = 1
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.KillXpDivisor
+#        Experience gagnee par victime, en FRACTION du palier de niveau en cours :
+#            xp = experience necessaire au niveau suivant / KillXpDivisor
+#
+#        Hors champ de bataille, le coeur ne donne AUCUNE experience pour un joueur tue, et
+#        aucun honneur quand la victime est de meme faction. Sans ce reglage, un mercenaire ne
+#        progresse pas du tout.
+#
+#        Exprimer la recompense en fraction du palier la rend lisible a tous les niveaux : a 4,
+#        il faut quatre victimes de son niveau pour passer un palier, qu'on soit niveau 12 ou 60.
+#        La valeur absolue du coeur, elle, demanderait 80 victimes au niveau 10 et 840 au niveau 60.
+#
+#        Une victime plus faible que le tueur paie moins, en decroissance lineaire jusqu'au
+#        niveau gris ou elle ne paie plus rien. Une victime plus forte paie plein tarif, sans prime.
+#        Default: 4 - quatre victimes de son niveau par palier
+#                 0 - aucune experience versee
+AiPlayerbot.WildPvp.KillXpDivisor = 4
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.KillRepeatCooldown
+#        Delai, en secondes, avant qu'une MEME victime rapporte a nouveau au meme tueur.
+#
+#        Le coeur n'a aucune decroissance pour les kills repetes hors champ de bataille. Sans ce
+#        garde-fou, deux mercenaires qui se tuent en boucle atteignent le niveau maximum en
+#        quelques minutes.
+#        Default: 900 - un quart d'heure
+#                 0 - aucun delai
+AiPlayerbot.WildPvp.KillRepeatCooldown = 900
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.KillsPerHourCap
+#        Nombre maximum de victimes PAYANTES par heure et par mercenaire, toutes victimes
+#        confondues. La borne dure, celle qui tient quoi qu'il arrive par ailleurs.
+#        Default: 12
+#                 0 - aucun plafond
+AiPlayerbot.WildPvp.KillsPerHourCap = 12
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.TruceAfterDeathSec
+#        Duree, en secondes, pendant laquelle un joueur qui vient de mourir en PvP n'est plus
+#        convoite par aucun mercenaire.
+#
+#        Sans elle, le mercenaire attend au cimetiere et retue sa victime au relachement.
+#        S'applique a tout le monde, bot comme humain.
+#        Default: 60
+#                 0 - aucune treve
+AiPlayerbot.WildPvp.TruceAfterDeathSec = 60
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.LevelCapEnabled
+#    AiPlayerbot.WildPvp.LevelCapMedianOffset
+#        Plafond de montee d'un mercenaire, indexe sur la MEDIANE des niveaux des bots en ligne.
+#        Au-dela de mediane + offset, le mercenaire cesse de gagner de l'experience. Il patiente,
+#        il ne redescend jamais.
+#
+#        Sans ce plafond, un mercenaire qui gagne de l'experience au PvP monte plus vite que la
+#        population qui l'entoure. Le filtre d'ecart de niveau finit alors par lui refuser tout le
+#        monde, et il n'a plus qu'une proie possible : le joueur humain. La recompense se
+#        retourne contre son objectif.
+#
+#        La mediane ne compte QUE la population chassee : les mercenaires en sont exclus. Les y
+#        inclure creerait une boucle, leur propre montee relevant la mediane donc leur propre
+#        plafond, qui ne freinerait plus rien.
+#
+#        Le plafond est abandonne tant que moins de dix bots non mercenaires sont en ligne : une
+#        mediane n'y voudrait rien dire. L'offset est ramene a 1 s'il est inferieur, sans quoi le plafond
+#        passerait SOUS la mediane et personne ne gagnerait jamais rien.
+#        Default: 1 / 5
+AiPlayerbot.WildPvp.LevelCapEnabled = 1
+AiPlayerbot.WildPvp.LevelCapMedianOffset = 5
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.NoTeleportOnLevelUp
+#        Un bot qui monte de niveau est normalement teleporte vers une zone de son nouveau niveau.
+#        Un mercenaire monte AU MILIEU d'une chasse : le teleporter le fait disparaitre du combat
+#        qu'il vient de gagner.
+#        Default: 1 - le mercenaire reste ou il est
+#                 0 - comportement commun a tous les bots
+AiPlayerbot.WildPvp.NoTeleportOnLevelUp = 1
+
+###################################################################################################
+#    AiPlayerbot.WildPvp.MercenariesSkipPve
+#        Un mercenaire ne quete pas et ne farme pas : sa seule source de progression est ce qu'il
+#        tue. A 1, il echange la strategie de quete contre "move random" (il rode), et "grind"
+#        contre "pvp".
+#
+#        Ce qui est retire, c'est "grind" -> "attack anything" (priorite 4,0) : la voie par
+#        laquelle un bot va chercher des creatures. Le mercenaire ne demarre donc plus rien sur
+#        un monstre, mais le moteur de combat le laisse riposter si un monstre l'attaque.
+#
+#        Son agression sur les JOUEURS passe par "attack enemy player" (55,0), arme par la
+#        strategie "pvp", deja presente dans le jeu de base de tout bot hors champ de bataille.
+#
+#        Verifie en jeu (port 8888) : un mercenaire rend "move random, pvp" sans "grind" ni
+#        "new rpg" ; un bot ordinaire rend "grind, new rpg, pvp".
+#        Default: 1 - le mercenaire ne fait plus que du PvP
+#                 0 - le mercenaire quete et farme comme les autres bots
+AiPlayerbot.WildPvp.MercenariesSkipPve = 1

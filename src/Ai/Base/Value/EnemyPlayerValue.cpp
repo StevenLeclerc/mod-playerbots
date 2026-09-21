@@ -6,9 +6,53 @@
 
 #include "EnemyPlayerValue.h"
 #include "CombatManager.h"
+#include "MercenaryRewards.h"
 #include "Playerbots.h"
 #include "ServerFacade.h"
 #include "Vehicle.h"
+
+namespace
+{
+// --- PvP mercenaire (CoA) ---------------------------------------------------
+// Combien de mercenaires ont DEJA engage cette cible ? Chaque mercenaire decide
+// seul : sans ce compte, trois d'entre eux a portee du meme joueur repondent
+// trois fois oui, et c'est la mort assuree pour qui joue seul.
+//
+// Le compte se lit SUR LA CIBLE, dans ses propres references de combat, la
+// meme source que EnemyPlayerValue::Calculate emploie deja. Il n'y a donc
+// aucun conteneur global a tenir, et aucun verrou a prendre : c'est ce qui
+// distingue ce garde-fou du motif qui a fait tomber le monde (P-050).
+//
+// Le plafond ne rompt jamais un combat en cours : un mercenaire deja engage
+// retrouve sa cible par les references de combat (etape 1 de Calculate), qui
+// ne passent pas par ce filtre. Il n'interdit que les ralliements.
+bool MercenaryAttackSlotFree(Player* bot, Player* enemy)
+{
+    uint32 const cap = sPlayerbotAIConfig.wildPvpMaxAttackersPerTarget;
+    if (!cap)
+        return true;
+
+    uint32 engaged = 0;
+    for (auto const& [guid, combatRef] : enemy->GetCombatManager().GetPvPCombatRefs())
+    {
+        Unit* other = combatRef->GetOther(enemy);
+        if (!other || other == bot || !other->IsPlayer())
+            continue;
+
+        Player* attacker = other->ToPlayer();
+        if (!GET_PLAYERBOT_AI(attacker))
+            continue;
+
+        if (!sPlayerbotAIConfig.IsMercenary(attacker->GetGUID().GetRawValue()))
+            continue;
+
+        if (++engaged >= cap)
+            return false;
+    }
+
+    return true;
+}
+}
 
 bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
 {
@@ -31,6 +75,23 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
                       sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()) &&
                       (sPlayerbotAIConfig.wildPvpBotsFightBots ||
                        !GET_PLAYERBOT_AI(enemy));
+
+    // Deux bornes, dans cet ordre : qui vient de mourir n'est pas reconvoite
+    // tout de suite (sinon le mercenaire attend au cimetiere), et on ne se
+    // rallie pas a une curee deja en cours.
+    //
+    // Elles se posent sur le BOT, pas sur la branche qui a laisse passer la
+    // cible. Les rattacher a `mercenaire` seul laissait un trou : un
+    // mercenaire qui attaque un joueur de faction opposee marque PvP passe par
+    // la branche ordinaire, et echappait donc aux deux bornes. Un joueur seul
+    // pouvait encore y etre submerge.
+    if (enemy && sPlayerbotAIConfig.wildPvpEnabled &&
+        sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()) &&
+        (MercenaryRewards::instance().IsUnderTruce(enemy->GetGUID().GetRawValue()) ||
+         !MercenaryAttackSlotFree(bot, enemy)))
+    {
+        return false;
+    }
 
     if (enemy && (mercenaire || (botAI->IsOpposing(enemy) && enemy->IsPvP())) &&
         !sPlayerbotAIConfig.IsPvpProhibited(enemy->GetZoneId(), enemy->GetAreaId()) &&

@@ -52,6 +52,17 @@ void AutoMaintenanceOnLevelupAction::AutoTeleportForLevel()
     if (botAI->HasGameClientMaster())
         return;
 
+    // --- PvP mercenaire (CoA) ---------------------------------------------
+    // Un mercenaire monte en tuant, donc il monte AU MILIEU d'une chasse. Le
+    // teleporter vers une zone de son nouveau niveau le fait disparaitre du
+    // combat qu'il vient de gagner, et defait le rodage qu'on cherche a
+    // obtenir. On le laisse ou il est.
+    if (sPlayerbotAIConfig.wildPvpEnabled && sPlayerbotAIConfig.wildPvpNoTeleportOnLevelUp &&
+        sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
+    {
+        return;
+    }
+
     sRandomPlayerbotMgr.RandomTeleportForLevel(bot);
     return;
 }

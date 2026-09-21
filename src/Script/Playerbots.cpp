@@ -548,6 +548,7 @@ void AddSC_HyjalSummitBotScripts();
 void AddSC_IcecrownBotScripts();
 void AddSC_RubySanctumBotScripts();
 void AddSC_randombot_level_mgr();
+void AddSC_mercenary_rewards();
 
 void AddPlayerbotsScripts()
 {
@@ -569,4 +570,5 @@ void AddPlayerbotsScripts()
     AddSC_IcecrownBotScripts();
     AddSC_RubySanctumBotScripts();
     AddSC_randombot_level_mgr();
+    AddSC_mercenary_rewards();
 }

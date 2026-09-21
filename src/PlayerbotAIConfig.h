@@ -311,6 +311,53 @@ public:
     uint32 wildPvpMinLevel;
     bool wildPvpBotsFightBots;
 
+    // Cible et agresseur sont deux choses distinctes. Le coeur exige le
+    // drapeau FFA DES DEUX COTES pour deux joueurs de meme faction
+    // (Unit::GetReactionTo, Unit.cpp:7472) : sans ce reglage, un mercenaire ne
+    // peut attaquer qu'un autre mercenaire, soit un bot sur cinq. A 1, tous les
+    // bots aleatoires portent le drapeau et deviennent donc des proies
+    // possibles, sans devenir pour autant des chasseurs : leur choix de cible
+    // reste celui d'un bot ordinaire, faction contre faction.
+    bool wildPvpAllBotsAreTargets;
+
+    // Nombre maximum de mercenaires qui peuvent engager la MEME cible. A 1, un
+    // duel. C'est la borne qui empeche la meute, sans laquelle chaque
+    // mercenaire decide seul et trois d'entre eux repondent trois fois oui.
+    // A 0, aucune limite.
+    uint32 wildPvpMaxAttackersPerTarget;
+
+    // Recompense d'experience par victime, exprimee en FRACTION du palier de
+    // niveau en cours : xp = GetXPForLevel(niveau) / divisor. A 4, quatre
+    // victimes de son niveau pour passer un palier, a tous les niveaux. A 0,
+    // aucune experience n'est versee.
+    uint32 wildPvpKillXpDivisor;
+
+    // Garde-fous anti-farm. Delai avant qu'une MEME victime repaie, plafond de
+    // victimes payantes par heure toutes victimes confondues, et treve de
+    // ciblage accordee a qui vient de mourir (sinon le mercenaire attend au
+    // cimetiere). A 0, chacun est desactive.
+    uint32 wildPvpKillRepeatCooldown;
+    uint32 wildPvpKillsPerHourCap;
+    uint32 wildPvpTruceAfterDeathSec;
+
+    // Plafond de montee indexe sur la mediane des niveaux des bots en ligne :
+    // un mercenaire cesse de gagner de l'experience au-dela de
+    // mediane + offset. Il patiente, il ne redescend pas. Sans lui, il finit
+    // par n'avoir plus aucune proie a sa portee, sauf le joueur humain.
+    bool wildPvpLevelCapEnabled;
+    int32 wildPvpLevelCapMedianOffset;
+
+    // La montee de niveau teleporte un bot vers une zone de son niveau
+    // (AutoMaintenanceOnLevelupAction::AutoTeleportForLevel). Pour un
+    // mercenaire qui rode, c'est le faire disparaitre au milieu de sa chasse.
+    bool wildPvpNoTeleportOnLevelUp;
+
+    // Un mercenaire ne quete pas et ne farme pas : il echange "grind" et la
+    // strategie de quete contre "move random". Son agression sur les joueurs
+    // passe par "pvp", deja presente dans le jeu de base de tout bot.
+    // Verifie en jeu par le port 8888, voir AiFactory.cpp et P-056.
+    bool wildPvpMercenariesSkipPve;
+
     // Un bot est mercenaire ou non de facon STABLE dans le temps : la decision
     // derive de son GUID, pas d'un tirage. Sans cela un bot changerait de camp
     // a chaque appel, ce qui rendrait le monde illisible.

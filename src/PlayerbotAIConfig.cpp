@@ -690,6 +690,22 @@ bool PlayerbotAIConfig::Initialize()
     if (wildPvpMercenaryPercent > 100)
         wildPvpMercenaryPercent = 100;
 
+    wildPvpAllBotsAreTargets = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.AllBotsAreTargets", false);
+    wildPvpMaxAttackersPerTarget = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MaxAttackersPerTarget", 1);
+    wildPvpKillXpDivisor = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.KillXpDivisor", 4);
+    wildPvpKillRepeatCooldown = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.KillRepeatCooldown", 900);
+    wildPvpKillsPerHourCap = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.KillsPerHourCap", 12);
+    wildPvpTruceAfterDeathSec = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.TruceAfterDeathSec", 60);
+    wildPvpLevelCapEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.LevelCapEnabled", true);
+    wildPvpLevelCapMedianOffset = sConfigMgr->GetOption<int32>("AiPlayerbot.WildPvp.LevelCapMedianOffset", 5);
+    wildPvpNoTeleportOnLevelUp = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.NoTeleportOnLevelUp", true);
+    wildPvpMercenariesSkipPve = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.MercenariesSkipPve", true);
+
+    // Un offset negatif placerait le plafond SOUS la mediane : plus aucun
+    // mercenaire ne gagnerait jamais rien, sans que rien ne le signale.
+    if (wildPvpLevelCapMedianOffset < 1)
+        wildPvpLevelCapMedianOffset = 1;
+
     BotActiveAloneDurationSeconds = sConfigMgr->GetOption<int32>("AiPlayerbot.BotActiveAloneDurationSeconds", 30);
     BotActiveAloneForceWhenInRadius = sConfigMgr->GetOption<uint32>("AiPlayerbot.BotActiveAloneForceWhenInRadius", 150);
     BotActiveAloneForceWhenInZone = sConfigMgr->GetOption<bool>("AiPlayerbot.BotActiveAloneForceWhenInZone", 1);

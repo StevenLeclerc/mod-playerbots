@@ -675,17 +675,66 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
             // nonCombatEngine->addStrategy("collision");
             // nonCombatEngine->addStrategy("group");
             // nonCombatEngine->addStrategy("guild");
-            nonCombatEngine->addStrategy("grind", false);
+            // --- PvP mercenaire (CoA) -------------------------------------
+            // Un mercenaire ne quete pas et ne farme pas : sa seule source de
+            // progression est ce qu'il tue. Trois strategies changent donc.
+            //
+            // Ce qu'on retire, c'est "grind" -> "attack anything" (priorite
+            // 4,0, GrindingStrategy.cpp:25) : c'est par la qu'un bot va
+            // chercher des creatures. Le mercenaire ne demarre donc plus rien
+            // sur un monstre ; le moteur de combat le laisse riposter si un
+            // monstre l'attaque.
+            //
+            // Son agression sur les JOUEURS n'en depend pas : elle passe par
+            // "attack enemy player" (55,0), arme par la strategie "pvp" —
+            // laquelle est deja dans le jeu de base de tout bot hors champ de
+            // bataille (addStrategiesNoInit ligne 650 de ce fichier). Le
+            // addStrategy ci-dessous est donc une redondance assumee : il
+            // rend l'intention explicite et protege le mercenaire si ce jeu
+            // de base changeait un jour.
+            //
+            // VERIFIE EN JEU le 20/09 par le port 8888 : un mercenaire rend
+            // "move random, pvp" sans "grind" ni "new rpg" ; un bot ordinaire
+            // rend "grind, new rpg, pvp". C'est ce releve, et non la lecture
+            // du code, qui a tranche : une premiere lecture avait conclu a
+            // tort que "pvp" n'etait activee nulle part. Voir P-056.
+            //
+            // LE SEUIL EST INDISPENSABLE. Le drapeau FFA n'est pose qu'a partir
+            // de WildPvp.MinLevel (PlayerbotAI::UpdateAI) : en dessous, un
+            // mercenaire ne peut ni etre attaque ni attaquer. Lui retirer le
+            // PvE des le niveau 1 en ferait un bot sans aucune activite NI
+            // aucune source de progression, bloque a vie. Il garde donc quete
+            // et farm jusqu'au seuil, puis bascule.
+            //
+            // Limite assumee : les strategies sont posees a l'initialisation de
+            // l'IA. Un mercenaire qui franchit le seuil en cours de session
+            // garde son jeu PvE jusqu'a sa prochaine reinitialisation (une
+            // reconnexion suffit, et les bots tournent). A MinLevel = 1, le cas
+            // ne se presente pas du tout.
+            bool const mercenaireSansPve =
+                sPlayerbotAIConfig.wildPvpEnabled && sPlayerbotAIConfig.wildPvpMercenariesSkipPve &&
+                player->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
+                sPlayerbotAIConfig.IsMercenary(player->GetGUID().GetRawValue());
 
-            if (sPlayerbotAIConfig.enableNewRpgStrategy)
-                nonCombatEngine->addStrategy("new rpg", false);
-            else if (sPlayerbotAIConfig.autoDoQuests)
+            if (mercenaireSansPve)
             {
-                // nonCombatEngine->addStrategy("travel");
-                nonCombatEngine->addStrategy("rpg", false);
+                nonCombatEngine->addStrategy("pvp", false);
+                nonCombatEngine->addStrategy("move random", false);
             }
             else
-                nonCombatEngine->addStrategy("move random", false);
+            {
+                nonCombatEngine->addStrategy("grind", false);
+
+                if (sPlayerbotAIConfig.enableNewRpgStrategy)
+                    nonCombatEngine->addStrategy("new rpg", false);
+                else if (sPlayerbotAIConfig.autoDoQuests)
+                {
+                    // nonCombatEngine->addStrategy("travel");
+                    nonCombatEngine->addStrategy("rpg", false);
+                }
+                else
+                    nonCombatEngine->addStrategy("move random", false);
+            }
 
             if (sPlayerbotAIConfig.randomBotJoinBG)
                 nonCombatEngine->addStrategy("bg", false);
