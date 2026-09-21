@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <array>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -309,6 +310,12 @@ bool EnsureCoaSpecialization(Player* bot)
     }
 
     std::vector<uint32> const& candidates = byRole[chosenRole];
+    // The loop above only ever settles on a role the class can fill, so this cannot happen today.
+    // It is kept because indexing an empty vector here would not fail loudly: it would read out of
+    // bounds and hand SwitchAscensionSpecialization a specialization id out of thin air.
+    if (candidates.empty())
+        return false;
+
     uint32 const specializationId = candidates[Hash(bot->GetGUID().GetCounter(), 0x50494B4Bu) % candidates.size()];   // 'PIKK'
 
     // The specialization a character is created with decides nothing about the group: keep it only
@@ -371,6 +378,19 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
         return false;
     }
 
+    // Specializations of a class by role, built once per class rather than once per bot: the walk
+    // below goes through every free bot in the world. References into an unordered_map stay valid
+    // when it grows, so the reference returned here outlives later insertions.
+    std::unordered_map<uint8, std::array<std::vector<uint32>, 3>> byClassCache;
+    auto rolesOf = [&byClassCache](uint8 classId) -> std::array<std::vector<uint32>, 3> const&
+    {
+        auto const found = byClassCache.find(classId);
+        if (found != byClassCache.end())
+            return found->second;
+
+        return byClassCache.emplace(classId, SpecializationsByRole(classId)).first->second;
+    };
+
     // A free random bot whose class can fill the role, preferably on the master's map (a
     // dungeon instance has none, so any map will do), then one that already holds a
     // specialization of the role, then the nearest.
@@ -392,7 +412,12 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
 
         uint32 const specialization = GetAscensionActiveSpecialization(bot);
         bool const fits = specialization && !IsExcludedSpecialization(specialization) && GetCoaRole(bot) == role;
-        if (!fits && SpecializationsByRole(bot->getClass())[uint8(role)].empty())
+        // A class with no specialization of the role is never a candidate, whatever the bot
+        // currently carries: the specialization is a persisted setting that is not revalidated
+        // against the class, and when the Character Advancement DBC of the client is missing the
+        // whole table is empty while every bot still reports the specialization it last saved.
+        // Trusting `fits` alone let such a bot through to a rebuild with no specialization to pick.
+        if (rolesOf(bot->getClass())[uint8(role)].empty())
             continue;
 
         bool const sameMap = bot->GetMap() == master->GetMap();
@@ -443,10 +468,18 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
 
     if (!chosenFits)
     {
-        // Keep the array alive: a reference into the temporary would dangle.
-        std::array<std::vector<uint32>, 3> const byRole = SpecializationsByRole(chosen->getClass());
-        std::vector<uint32> const& candidates = byRole[uint8(role)];
-        if (!SwitchAscensionSpecialization(chosen, candidates[urand(0, candidates.size() - 1)]))
+        std::vector<uint32> const& candidates = rolesOf(chosen->getClass())[uint8(role)];
+        // urand takes two uint32: on an empty vector, size() - 1 is SIZE_MAX, its ASSERT(max >= min)
+        // passes and the index it returns is nowhere near the vector. The filter above already
+        // rules this out; the guard stays because the cost of being wrong is a read far out of
+        // bounds inside the world server, triggered by a GM command.
+        if (candidates.empty())
+        {
+            message = chosen->GetName() + " cannot play " + RoleName(role) + ".";
+            return false;
+        }
+
+        if (!SwitchAscensionSpecialization(chosen, candidates[urand(0, uint32(candidates.size() - 1))]))
         {
             message = "Could not give " + chosen->GetName() + " a specialization.";
             return false;

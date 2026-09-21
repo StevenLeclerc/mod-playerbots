@@ -52,7 +52,8 @@ enum AbilityKind : uint16
     KIND_INTERRUPT  = 0x0800,
     KIND_CONTROL    = 0x1000,  // stuns, fears, polymorphs... never aimed at a group member
     KIND_STANCE     = 0x2000,  // a form or stance on the caster that never expires
-    KIND_STEALTH    = 0x4000   // hides the caster: hunted, not worn
+    KIND_STEALTH    = 0x4000,  // hides the caster: hunted, not worn
+    KIND_SELF_HEAL  = 0x8000   // heals the caster and nobody else
 };
 
 /*
@@ -76,24 +77,53 @@ struct ClassKit
     uint16 kinds = 0;  // every kind some ability of the class has
 };
 
-// Ally targets: pet, party and raid areas, ally or any unit, chain heal.
+// Ally targets: pet, the nearest ally, party and raid areas, ally or any unit, chain heal.
+// Named from SharedDefines.h rather than written as numbers: the four NEARBY and CONE forms
+// (3, 4, 58, 59) were missing from the list while they were bare numbers.
 bool IsAllyTarget(uint32 target)
 {
     switch (target)
     {
-        case 5: case 20: case 21: case 25: case 30: case 31: case 33:
-        case 34: case 35: case 37: case 45: case 56: case 57: case 61:
+        case TARGET_UNIT_NEARBY_ALLY:           // 3
+        case TARGET_UNIT_NEARBY_PARTY:          // 4
+        case TARGET_UNIT_PET:                   // 5
+        case TARGET_UNIT_CASTER_AREA_PARTY:     // 20
+        case TARGET_UNIT_TARGET_ALLY:           // 21
+        case TARGET_UNIT_TARGET_ANY:            // 25
+        case TARGET_UNIT_SRC_AREA_ALLY:         // 30
+        case TARGET_UNIT_DEST_AREA_ALLY:        // 31
+        case TARGET_UNIT_SRC_AREA_PARTY:        // 33
+        case TARGET_UNIT_DEST_AREA_PARTY:       // 34
+        case TARGET_UNIT_TARGET_PARTY:          // 35
+        case TARGET_UNIT_LASTTARGET_AREA_PARTY: // 37
+        case TARGET_UNIT_TARGET_CHAINHEAL_ALLY: // 45
+        case TARGET_UNIT_CASTER_AREA_RAID:      // 56
+        case TARGET_UNIT_TARGET_RAID:           // 57
+        case TARGET_UNIT_NEARBY_RAID:           // 58
+        case TARGET_UNIT_CONE_ALLY:             // 59
+        case TARGET_UNIT_TARGET_AREA_RAID_CLASS:// 61
             return true;
         default:
             return false;
     }
 }
 
+// Of those, the ones that reach several allies at once. The NEARBY forms (3, 4, 58) pick a single
+// unit and are left out, as SpellInfo.cpp's target table has them under TARGET_SELECT_CATEGORY_NEARBY.
 bool IsAllyAreaTarget(uint32 target)
 {
     switch (target)
     {
-        case 20: case 30: case 31: case 33: case 34: case 37: case 45: case 56: case 61:
+        case TARGET_UNIT_CASTER_AREA_PARTY:     // 20
+        case TARGET_UNIT_SRC_AREA_ALLY:         // 30
+        case TARGET_UNIT_DEST_AREA_ALLY:        // 31
+        case TARGET_UNIT_SRC_AREA_PARTY:        // 33
+        case TARGET_UNIT_DEST_AREA_PARTY:       // 34
+        case TARGET_UNIT_LASTTARGET_AREA_PARTY: // 37
+        case TARGET_UNIT_TARGET_CHAINHEAL_ALLY: // 45
+        case TARGET_UNIT_CASTER_AREA_RAID:      // 56
+        case TARGET_UNIT_CONE_ALLY:             // 59
+        case TARGET_UNIT_TARGET_AREA_RAID_CLASS:// 61
             return true;
         default:
             return false;
@@ -103,8 +133,9 @@ bool IsAllyAreaTarget(uint32 target)
 // Aimed at one chosen ally, who may be someone else than the caster.
 bool IsAllyCastTarget(uint32 target)
 {
-    return target == TARGET_UNIT_TARGET_ALLY || target == TARGET_UNIT_TARGET_ANY || target == 35 ||
-           target == TARGET_UNIT_TARGET_CHAINHEAL_ALLY || target == TARGET_UNIT_TARGET_RAID;
+    return target == TARGET_UNIT_TARGET_ALLY || target == TARGET_UNIT_TARGET_ANY ||
+           target == TARGET_UNIT_TARGET_PARTY || target == TARGET_UNIT_TARGET_CHAINHEAL_ALLY ||
+           target == TARGET_UNIT_TARGET_RAID;
 }
 
 bool IsEnemyAreaTarget(uint32 target)
@@ -247,9 +278,16 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
         bool const periodicHeal = aura && effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL;
         bool const heal = effect.Effect == SPELL_EFFECT_HEAL || effect.Effect == SPELL_EFFECT_HEAL_PCT ||
                           effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH || periodicHeal;
-        if (heal && ally)
+        // A heal aimed at the caster alone (TARGET_UNIT_CASTER) is still a heal. Left out, such a
+        // spell came out of Classify with kind == 0 and was then refused by every action - IsAttack
+        // returns false on kind == 0, and the heal and defensive actions ask for KIND_HEAL. A
+        // Barbarian, which has no healing specialization at all, was left with no heal whatsoever.
+        // KIND_SELF_HEAL marks it so the party heals below do not offer it to somebody else.
+        if (heal && (ally || self))
         {
             ability.kind |= KIND_HEAL;
+            if (!ally)
+                ability.kind |= KIND_SELF_HEAL;
             if (IsAllyAreaTarget(targetA) || IsAllyAreaTarget(targetB))
                 ability.kind |= KIND_GROUP_HEAL;
             if (periodicHeal)
@@ -429,6 +467,25 @@ bool IsFriendlyDispel(uint16 kind)
     return (kind & KIND_DISPEL) && !(kind & (KIND_CONTROL | KIND_HOSTILE));
 }
 
+// Whether a heal can land on somebody else than the bot. A spell that also aims at a chosen ally
+// (KIND_ALLY_CAST) or at an area of allies (KIND_GROUP_HEAL) still can, even when one of its
+// effects only heals the caster.
+bool CanHealOther(uint16 kind)
+{
+    return !(kind & KIND_SELF_HEAL) || (kind & (KIND_ALLY_CAST | KIND_GROUP_HEAL));
+}
+
+SpellInfo const* EffectiveSpell(Player* bot, SpellInfo const* info);
+
+// Whether a spell is still set aside. The bench is keyed by the id that was actually checked,
+// which is the replacement's id when a proc or a talent has swapped the listed spell (see
+// EffectiveSpell), so both ids have to be consulted before a spell is tried.
+bool IsBenched(std::unordered_map<uint32, time_t> const& benched, uint32 spellId, time_t now)
+{
+    auto const bench = benched.find(spellId);
+    return bench != benched.end() && bench->second > now;
+}
+
 // Whether the bot knows an ability for which `wanted(kind)` is true and that is off cooldown:
 // actions only run when they have something to cast, which keeps the usage counters honest.
 template <typename Filter>
@@ -439,8 +496,12 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
 
     for (Usable const& spell : KnownAbilities(bot, wanted))
     {
-        auto const bench = benched.find(spell.info->Id);
-        if (!bot->HasSpellCooldown(spell.info->Id) && (bench == benched.end() || bench->second <= now))
+        // What the bot would really cast, as in CastFirst: the cooldown and the bench of a
+        // swapped spell are the replacement's. Reading only the listed id had this answer yes
+        // on a spell CastFirst then refuses to try, and the action ran for nothing.
+        SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+        if (!bot->HasSpellCooldown(info->Id) && !IsBenched(benched, spell.info->Id, now) &&
+            !IsBenched(benched, info->Id, now))
             return true;
     }
 
@@ -474,6 +535,25 @@ bool IsAttack(uint16 kind, bool tank)
 }
 
 /*
+ * The spell the bot will really cast.
+ *
+ * Ascension swaps a spell for another while a proc is up - Malefic Wrath becomes Malefic Arrow,
+ * Reclamation becomes Spirit Volley - and PlayerbotAI::CastSpell follows the swap
+ * (PlayerbotAI.cpp:3718). Everything the caller decides about the cast has to be decided on the
+ * replacement: its cost, its range, its cooldown, its cast time, and the name it is blamed under
+ * when it fails. The cast itself is still asked for under the base id, or the proc is not consumed.
+ */
+SpellInfo const* EffectiveSpell(Player* bot, SpellInfo const* info)
+{
+    uint32 const replacement = bot->GetTemporarySpellReplacement(info->Id);
+    if (replacement && replacement != info->Id)
+        if (SpellInfo const* swapped = sSpellMgr->GetSpellInfo(replacement))
+            return swapped;
+
+    return info;
+}
+
+/*
  * The check CastSpell will actually face.
  *
  * PlayerbotAI::CanCastSpell checks with TRIGGERED_IGNORE_POWER_AND_REAGENT_COST and
@@ -482,6 +562,14 @@ bool IsAttack(uint16 kind, bool tank)
  */
 SpellCastResult StrictCheck(Player* bot, SpellInfo const* info, Unit* target)
 {
+    // The check has to bear on the spell that will be prepared, replacement included: checking the
+    // base spell meant checking the wrong cost and the wrong range, so the check said yes and
+    // prepare() said no - which the caller read as "refused for a reason we cannot see" and
+    // answered by benching a spell that was never at fault. The resource pre-check below is the
+    // clearest case: it compared the cost of a base spell to the resource, while the replacement
+    // the proc grants is often free.
+    info = EffectiveSpell(bot, info);
+
     ObjectGuid const oldSel = bot->GetTarget();
 
     // Spell::CheckCast reads m_powerCost, and that is only worked out in Spell::prepare: a check run
@@ -512,6 +600,12 @@ constexpr uint16 FAILURE_NOTHING = 1001;  // nothing left to cast (e.g. every he
 constexpr uint16 FAILURE_MOVING = 1002;   // cast time while moving: the bot stops and casts on a later tick
 constexpr uint16 FAILURE_SITTING = 1003;  // refused while sitting (eating, drinking): the bot stands up first
 constexpr uint16 FAILURE_CASTING = 1004;  // refused while still casting a heal or buff
+
+// The usage kinds a bot drops its attack cast for. Until now this followed "was a usage kind
+// passed at all", so the actions that passed none - area attack, defensive, interrupt - never
+// dropped anything, which is the opposite of what the comment below promises. Attack and area
+// attack are left out on purpose: an attack must not cut off another attack.
+bool PreemptsAttackCast(uint8 usage);
 
 // A bot busy casting an attack drops it for a heal, dispel, defensive, taunt or interrupt. A heal
 // or buff in progress is kept, or heals would keep cutting each other off.
@@ -589,36 +683,54 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
 
     for (Usable const& spell : spells)
     {
+        // What the bot will really cast: a proc or a talent may have replaced this spell (see
+        // EffectiveSpell). Cooldowns, cast time, the bench and the failure log all go by the
+        // replacement; only the cast itself keeps the id the rotation lists, because that is the
+        // id the lists hold and the one PlayerbotAI::CastSpell has to be given for the proc to be
+        // consumed.
+        SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+
         // A spell on cooldown would only fail with SPELL_FAILED_NOT_READY.
-        if (bot->HasSpellCooldown(spell.info->Id))
+        if (bot->HasSpellCooldown(info->Id))
             continue;
 
         // The global cooldown blocks every spell alike: try again on a later tick.
-        if (bot->GetGlobalCooldownMgr().HasGlobalCooldown(spell.info))
+        if (bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
             return nullptr;
 
-        auto const bench = benched.find(spell.info->Id);
-        if (bench != benched.end())
+        // The bench is posted under the id that was checked, so a failure that belongs to a
+        // replacement never sidelines the listed spell: a proc lasting two seconds used to take
+        // the bot's permanent ability out of the rotation for twenty, which is the very injustice
+        // this bench was written to prevent. Both ids are read, and a spent entry is dropped so
+        // the table does not grow for ever.
+        bool stillBenched = false;
+        for (uint32 const benchedId : { spell.info->Id, info->Id })
         {
-            if (bench->second > now)
+            auto const bench = benched.find(benchedId);
+            if (bench == benched.end())
                 continue;
-            benched.erase(bench);
+            if (bench->second > now)
+                stillBenched = true;
+            else
+                benched.erase(bench);
         }
+        if (stillBenched)
+            continue;
 
-        SpellCastResult const check = StrictCheck(bot, spell.info, target);
+        SpellCastResult const check = StrictCheck(bot, info, target);
         if (check == SPELL_CAST_OK)
         {
             // PlayerbotAI::CastSpell refuses a spell with a cast time while the bot moves: stop
             // now and cast it on a later tick, once standing still.
-            if (bot->isMoving() && spell.info->CalcCastTime(bot))
+            if (bot->isMoving() && info->CalcCastTime(bot))
             {
                 bot->StopMoving();
                 if (usage != 255)
-                    RecordFailure(usage, spell.info->Id, FAILURE_MOVING);
+                    RecordFailure(usage, info->Id, FAILURE_MOVING);
                 continue;
             }
 
-            if (usage != 255)
+            if (PreemptsAttackCast(usage))
                 DropAttackCast(bot);
 
             bool const sitting = !bot->IsStandState();
@@ -630,22 +742,22 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             // resources when the cast is prepared): leave it aside briefly so the next ability
             // of the list gets its turn instead of this one failing every tick.
             if (!sitting && !casting)
-                benched[spell.info->Id] = now + RefusedBenchSeconds;
+                benched[info->Id] = now + RefusedBenchSeconds;
 
             if (usage != 255)
-                RecordFailure(usage, spell.info->Id, sitting ? FAILURE_SITTING : casting ? FAILURE_CASTING : FAILURE_REFUSED);
+                RecordFailure(usage, info->Id, sitting ? FAILURE_SITTING : casting ? FAILURE_CASTING : FAILURE_REFUSED);
             continue;
         }
         else if (IsLastingFailure(check))
-            benched[spell.info->Id] = now + SpellBenchSeconds;
+            benched[info->Id] = now + SpellBenchSeconds;
         // Out of mana, energy or rage: asking again on the very next tick changes nothing, and
         // with the spell set aside the action reports itself useless, so the bot does something
         // it can afford instead of spending its ticks being turned down.
         else if (check == SPELL_FAILED_NO_POWER)
-            benched[spell.info->Id] = now + NoPowerBenchSeconds;
+            benched[info->Id] = now + NoPowerBenchSeconds;
 
         if (usage != 255)
-            RecordFailure(usage, spell.info->Id, uint16(check));
+            RecordFailure(usage, info->Id, uint16(check));
     }
 
     return nullptr;
@@ -667,6 +779,18 @@ constexpr char const* UsageNames[USAGE_MAX] =
     "attack", "aoe", "heal", "group heal", "hot", "taunt", "defensive", "dispel", "interrupt", "buff",
     "stealth"
 };
+
+bool PreemptsAttackCast(uint8 usage)
+{
+    switch (usage)
+    {
+        case USAGE_HEAL: case USAGE_GROUP_HEAL: case USAGE_HOT:
+        case USAGE_TAUNT: case USAGE_DEFENSIVE: case USAGE_DISPEL: case USAGE_INTERRUPT:
+            return true;
+        default:
+            return false;
+    }
+}
 
 struct UsageCounter
 {
@@ -737,10 +861,12 @@ void ReportUsage(time_t now)
         LOG_INFO("playerbots.coa", "coa {} spells: {}", UsageNames[kind], spells.empty() ? "none yet" : spells);
     }
 
-    // Why heals and taunts fail: spell (id) reason xcount. Reasons are SpellCastResult values,
+    // Why a cast fails: spell (id) reason xcount. Reasons are SpellCastResult values,
     // "refused" when CastSpell turned down a spell the check accepted, "nothing" when no
-    // ability was left to try.
-    for (UsageKind kind : { USAGE_HEAL, USAGE_GROUP_HEAL, USAGE_HOT, USAGE_TAUNT, USAGE_DISPEL })
+    // ability was left to try. Kinds that record no failure print nothing.
+    for (UsageKind kind : { USAGE_HEAL, USAGE_GROUP_HEAL, USAGE_HOT, USAGE_TAUNT, USAGE_DISPEL,
+                            USAGE_ATTACK, USAGE_AOE, USAGE_DEFENSIVE, USAGE_INTERRUPT, USAGE_BUFF,
+                            USAGE_STEALTH })
     {
         std::vector<std::pair<std::pair<uint32, uint16>, uint32>> top(UsageFailures[kind].begin(), UsageFailures[kind].end());
         if (top.empty())
@@ -903,48 +1029,38 @@ public:
         // (and its weapon), keeping the rest for heals.
         bool const saveMana = SavingManaForHeals(bot);
 
-        std::vector<Usable> const usable = KnownAbilities(bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
+        std::vector<Usable> usable = KnownAbilities(bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
         if (usable.empty())
             return false;
 
-        time_t const now = time(nullptr);
+        if (saveMana)
+            DropManaSpells(bot, usable);
+        if (usable.empty())
+            return RecordUsage(USAGE_ATTACK, nullptr);
 
         // Rotate through the abilities, starting after the last one that went off, so a
         // bot uses its whole kit instead of spamming the first ability that works.
-        for (size_t i = 0; i < usable.size(); ++i)
+        size_t const start = next % usable.size();
+        std::rotate(usable.begin(), usable.begin() + start, usable.end());
+
+        // The cast goes through CastFirst rather than through a second loop of its own. The one
+        // written here judged every refusal by PlayerbotAI::CastSpell to be the spell's fault and
+        // benched it for a minute after three of them - while CastSpell also refuses for reasons
+        // that pass in a tick and have nothing to do with the spell: a cast time while the bot is
+        // moving, a bot still sitting, a cast already in progress. A ranged bot, which moves for
+        // the whole fight, lost its main spell for a minute in under a second, and the count never
+        // decayed, so three refusals hours apart did the same. CastFirst handles the three cases,
+        // benches for 8 seconds and says why in the failure log.
+        SpellInfo const* const cast = CastFirst(botAI, bot, usable, target, USAGE_ATTACK);
+        if (cast)
         {
-            size_t const index = (next + i) % usable.size();
-            SpellInfo const* info = usable[index].info;
-
-            Strikes& strikes = failures[info->Id];
-            if (strikes.benchedUntil > now)
-                continue;
-
-            if (saveMana && info->PowerType == POWER_MANA && info->CalcPowerCost(bot, info->GetSchoolMask()) > 0)
-                continue;
-
-            if (StrictCheck(bot, info, target) != SPELL_CAST_OK)
-                continue;
-
-            if (botAI->CastSpell(info->Id, target))
-            {
-                strikes.count = 0;
-                next = index + 1;
-                RecordUsage(USAGE_ATTACK, info);
-                return true;
-            }
-
-            // Passed the strict check yet refused: something we cannot see from here.
-            // Stop insisting for a while rather than burning every tick on it.
-            if (++strikes.count >= MaxStrikes)
-            {
-                strikes.count = 0;
-                strikes.benchedUntil = now + BenchSeconds;
-            }
+            auto const itr = std::find_if(usable.begin(), usable.end(),
+                [cast](Usable const& spell) { return spell.info == cast; });
+            if (itr != usable.end())
+                next = start + size_t(std::distance(usable.begin(), itr)) + 1;
         }
 
-        RecordUsage(USAGE_ATTACK, nullptr);
-        return false;
+        return RecordUsage(USAGE_ATTACK, cast);
     }
 
     bool isUseful() override
@@ -954,17 +1070,8 @@ public:
     }
 
 private:
-    static constexpr uint8 MaxStrikes = 3;
-    static constexpr time_t BenchSeconds = 60;
-
-    struct Strikes
-    {
-        uint8 count = 0;
-        time_t benchedUntil = 0;
-    };
-
+    // Index into the ability list of the next spell to try, kept from one tick to the next.
     size_t next = 0;
-    std::unordered_map<uint32, Strikes> failures;
 };
 
 // Area attacks on the current target, when several enemies are around.
@@ -984,7 +1091,7 @@ public:
         if (SavingManaForHeals(bot))
             DropManaSpells(bot, spells);
 
-        return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, spells, target));
+        return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, spells, target, USAGE_AOE));
     }
 
     bool isUseful() override
@@ -1041,6 +1148,14 @@ public:
                 break;
         }
 
+        // Since a heal aimed at the caster alone is classified as a heal (KIND_SELF_HEAL), it has
+        // to be kept out of the list when the wounded member is somebody else: the strict check
+        // would turn it down for bad targets and bench it for 20 seconds, blaming a spell that was
+        // simply asked the impossible.
+        if (target != bot)
+            spells.erase(std::remove_if(spells.begin(), spells.end(),
+                [](Usable const& spell) { return !CanHealOther(spell.kind); }), spells.end());
+
         if (SavingManaForHeals(bot))
             CheapestFirst(bot, spells);
 
@@ -1055,9 +1170,13 @@ public:
     {
         Unit* target = AI_VALUE(Unit*, "party member to heal");
         uint16 const wanted = mode == Mode::Group ? KIND_GROUP_HEAL : mode == Mode::OverTime ? KIND_HOT : KIND_HEAL;
+        // Same rule as Execute: a caster-only heal makes this action useful for the bot itself,
+        // never for another member, or the action would run every tick and cast nothing.
+        bool const onSelf = target == bot;
         return target && target->IsAlive() && target->GetHealthPct() < sPlayerbotAIConfig.almostFullHealth &&
                ClassHas(bot, wanted) &&
-               HasReadyAbility(botAI, bot,[wanted](uint16 kind) { return (kind & wanted) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
+               HasReadyAbility(botAI, bot,[wanted, onSelf](uint16 kind)
+                   { return (kind & wanted) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) && (onSelf || CanHealOther(kind)); });
     }
 
 private:
@@ -1097,7 +1216,8 @@ public:
     bool Execute(Event /*event*/) override
     {
         SpellInfo const* cast =
-            CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }), bot);
+            CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }), bot,
+                      USAGE_DEFENSIVE);
         if (!cast)
         {
             std::vector<Usable> heals = KnownAbilities(bot, [](uint16 kind)
@@ -1105,7 +1225,7 @@ public:
             if (SavingManaForHeals(bot))
                 CheapestFirst(bot, heals);
 
-            cast = CastFirst(botAI, bot, heals, bot);
+            cast = CastFirst(botAI, bot, heals, bot, USAGE_DEFENSIVE);
         }
 
         return RecordUsage(USAGE_DEFENSIVE, cast);
@@ -1163,7 +1283,8 @@ public:
             return false;
 
         return RecordUsage(USAGE_INTERRUPT,
-            CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_INTERRUPT) != 0; }), caster));
+            CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_INTERRUPT) != 0; }), caster,
+                      USAGE_INTERRUPT));
     }
 
     bool isUseful() override
@@ -1225,11 +1346,24 @@ public:
                 if (found != recent.end() && found->second > now)
                     continue;
 
-                if (StrictCheck(bot, spell.info, member) == SPELL_CAST_OK && botAI->CastSpell(spell.info->Id, member))
+                // Buff and stealth cast on their own rather than through CastFirst - they pick
+                // their target themselves and are never benched - so they record their own
+                // failures. Without this, "coa usage" could show a buff that never lands and the
+                // failure log had nothing at all to say about why.
+                SpellCastResult const check = StrictCheck(bot, spell.info, member);
+                if (check != SPELL_CAST_OK)
+                {
+                    RecordFailure(USAGE_BUFF, spell.info->Id, uint16(check));
+                    continue;
+                }
+
+                if (botAI->CastSpell(spell.info->Id, member))
                 {
                     recent[key] = now + time_t(spell.info->GetMaxDuration() / IN_MILLISECONDS * 9 / 10);
                     return RecordUsage(USAGE_BUFF, spell.info);
                 }
+
+                RecordFailure(USAGE_BUFF, spell.info->Id, FAILURE_REFUSED);
             }
 
         return false;
@@ -1272,8 +1406,21 @@ public:
             { return (kind & KIND_STEALTH) && !(kind & (KIND_HOSTILE | KIND_DAMAGE)); });
 
         for (Usable const& spell : spells)
-            if (StrictCheck(bot, spell.info, bot) == SPELL_CAST_OK && botAI->CastSpell(spell.info->Id, bot))
+        {
+            // Comme le buff, l'embuscade lance elle-meme : elle consigne donc elle-meme ses
+            // echecs, sans quoi « stealth 0/N » ne dit jamais QUELLE condition refuse.
+            SpellCastResult const check = StrictCheck(bot, spell.info, bot);
+            if (check != SPELL_CAST_OK)
+            {
+                RecordFailure(USAGE_STEALTH, spell.info->Id, uint16(check));
+                continue;
+            }
+
+            if (botAI->CastSpell(spell.info->Id, bot))
                 return RecordUsage(USAGE_STEALTH, spell.info);
+
+            RecordFailure(USAGE_STEALTH, spell.info->Id, FAILURE_REFUSED);
+        }
 
         // Echec : on se met en retrait pour laisser l'attaque passer.
         prochainEssai = time(nullptr) + RepliSecondes;

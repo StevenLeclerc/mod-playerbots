@@ -287,9 +287,59 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // Les capitales et les sanctuaires sont epargnes sans rien coder :
     // UpdateFFAPvPState refuse de poser le drapeau quand IsInNoPvPArea est
     // vrai, et le coeur le positionne deja pour ces zones.
+    //
+    // CIBLE ET AGRESSEUR SONT DEUX CHOSES. Le drapeau rend attaquable ; il ne
+    // rend pas chasseur. Avec WildPvp.AllBotsAreTargets, tout bot qui rode
+    // librement le porte, et devient donc une proie possible pour un
+    // mercenaire, mais son propre choix de cible reste celui d'un bot
+    // ordinaire (NearestEnemyPlayersValue::AcceptUnit), faction contre
+    // faction : il ne devient agresseur que par riposte.
+    //
+    // UN MAITRE EXCLUT -- MAIS PAS LE MEME SELON LA BRANCHE, ET C'EST VOULU.
+    // Le principe commun est qu'un bot qui joue avec quelqu'un ne doit pas
+    // etre livre aux mercenaires. Les deux branches ne le traduisent pas par
+    // le meme test, parce qu'elles ne partent pas du meme etat.
+    //
+    // Branche AllBotsAreTargets : le garde est !GetMaster(), c'est-a-dire
+    // << aucun maitre du tout >>. C'est exactement le garde qu'elle portait
+    // deja avant ce correctif, et il est laisse tel quel A DESSEIN : l'elargir
+    // a !HasGameClientMaster() aurait marque EN PLUS tous les bots aleatoires
+    // devenus compagnons d'un AUTRE BOT (AcceptInvitationAction.cpp:50 pose
+    // SetMaster(inviter) pour tout bot aleatoire qui accepte une invitation, et
+    // UpdateAIGroupMaster n'efface jamais un maitre-bot puisque FindNewMaster
+    // ne rend que des humains ou des selfbots et que rendre nullptr ne
+    // declenche aucun effacement). Cela aurait donne le drapeau FFA a vie a une
+    // population qui ne l'avait pas -- un changement de gameplay que ce
+    // correctif n'a pas a faire en passant.
+    //
+    // Branche mercenaire : le garde est !HasGameClientMaster(), et il est
+    // NOUVEAU. Avant, cette branche n'avait aucun garde de maitre : un
+    // compagnon ajoute par `.bot add` dont le GUID tombait dans le seau
+    // mercenaire (MercenaryPercent = 50 en service) etait marque FFA a chaque
+    // tick des le niveau 1, a vie, sans que son maitre l'ait choisi, et le
+    // commentaire ci-dessus affirmait le contraire. On exclut ici le maitre
+    // HUMAIN et non tout maitre -- HasGameClientMaster, defini plus bas dans ce
+    // fichier, est IsRealPlayer(master) || IsSelfBot(master) -- pour qu'un
+    // mercenaire aleatoire invite dans un groupe mene par un BOT garde son
+    // drapeau au lieu de le perdre a vie : sans quoi le PvP sauvage se serait
+    // eteint en silence pour ces mercenaires-la.
+    //
+    // La branche mercenaire exige en plus IsRandomBot, exactement comme
+    // MercenaryRewards::ComputeReward : sans lui, IsMercenary hache aussi le
+    // GUID d'un personnage humain -- un selfbot, dont le maitre est le joueur
+    // lui-meme -- et en ferait une proie a son insu.
+    //
+    // COUT. GetMaster() est un simple acces au pointeur (PlayerbotAI.h:542) ;
+    // IsRealPlayer et IsSelfBot tolerent master == nullptr et court-circuitent
+    // dessus, ce qui est le cas de la quasi-totalite des bots aleatoires. Avec
+    // AllBotsAreTargets = 1 (la conf en service), un bot sans maitre est
+    // accepte par la premiere branche et la recherche dans currentBots que fait
+    // IsRandomBot n'est jamais executee.
     if (sPlayerbotAIConfig.wildPvpEnabled && bot->IsAlive() &&
         bot->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
-        sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
+        ((sPlayerbotAIConfig.wildPvpAllBotsAreTargets && !GetMaster()) ||
+         (!HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(bot) &&
+          sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))))
     {
         if (!bot->pvpInfo.IsInFFAPvPArea)
         {
