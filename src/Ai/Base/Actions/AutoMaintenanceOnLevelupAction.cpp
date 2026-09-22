@@ -57,7 +57,16 @@ void AutoMaintenanceOnLevelupAction::AutoTeleportForLevel()
     // teleporter vers une zone de son nouveau niveau le fait disparaitre du
     // combat qu'il vient de gagner, et defait le rodage qu'on cherche a
     // obtenir. On le laisse ou il est.
+    //
+    // LE SEUIL FAIT PARTIE DE LA CONDITION, comme a PlayerbotAI::UpdateAI et a
+    // AiFactory::AddDefaultNonCombatStrategies. En dessous de WildPvp.MinLevel
+    // un "mercenaire" n'en est pas encore un : il n'a pas le drapeau FFA, il
+    // garde ses strategies PvE et il monte donc en quetant, exactement comme un
+    // bot ordinaire. Sans ce test il perdait quand meme ses teleportations de
+    // palier et restait bloque dans sa vallee de depart pendant toute la montee
+    // jusqu'au seuil, alors que la conf promet le contraire.
     if (sPlayerbotAIConfig.wildPvpEnabled && sPlayerbotAIConfig.wildPvpNoTeleportOnLevelUp &&
+        bot->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
         sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
     {
         return;

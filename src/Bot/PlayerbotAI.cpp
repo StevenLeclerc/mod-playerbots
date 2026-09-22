@@ -279,10 +279,19 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // APRES UpdateArea, c'est-a-dire une modification du coeur — ce qu'on
     // refuse ici, le but etant de n'avoir aucune dette a reappliquer.
     //
-    // Detourner IsInFFAPvPArea est sans effet de bord : verifie, le coeur ne
-    // le lit que dans UpdateFFAPvPState et SetFFAPvPTimer, nulle part ailleurs.
+    // Detourner IsInFFAPvPArea est sans effet de bord : verifie par relecture
+    // du coeur, le champ n'a que cinq occurrences dans tout
+    // /opt/coa/core-main/src -- sa declaration (Player.h:352), l'unique
+    // ECRITURE du coeur (PlayerUpdates.cpp:1271, dans Player::UpdateArea) et
+    // trois lectures, toutes dans Player::UpdateFFAPvPState
+    // (PlayerUpdates.cpp:1506, 1518, 1562). Nulle part ailleurs.
+    //   (Une version precedente de ce commentaire citait ici << SetFFAPvPTimer
+    //   >>, qui n'existe ni dans le coeur ni dans le module : un nom ecrit de
+    //   memoire. Les numeros de ligne ci-dessus se reverifient, un nom invente
+    //   ne se reverifie pas -- P-055, P-074.)
     // Le maintenir a vrai empeche aussi le minuteur de retrait de 30 s de
-    // demarrer, ce qui est exactement voulu pour un mercenaire permanent.
+    // demarrer (PlayerUpdates.cpp:1562-1568 ne l'arme que si IsInFFAPvPArea est
+    // faux), ce qui est exactement voulu pour un mercenaire permanent.
     //
     // Les capitales et les sanctuaires sont epargnes sans rien coder :
     // UpdateFFAPvPState refuse de poser le drapeau quand IsInNoPvPArea est
@@ -335,16 +344,63 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // AllBotsAreTargets = 1 (la conf en service), un bot sans maitre est
     // accepte par la premiere branche et la recherche dans currentBots que fait
     // IsRandomBot n'est jamais executee.
-    if (sPlayerbotAIConfig.wildPvpEnabled && bot->IsAlive() &&
+    //
+    // LE DRAPEAU SE RETIRE AUSSI, ET C'EST NOUVEAU. Le bloc ne savait que
+    // poser : aucune branche ne remettait pvpInfo.IsInFFAPvPArea a faux quand
+    // le bot cessait d'etre eligible. Deux consequences concretes, toutes deux
+    // silencieuses. (1) Un bot aleatoire marque parce qu'il rodait sans maitre,
+    // puis recrute par `.playerbots bot add` : GetMaster() devient non nul, la
+    // condition devient fausse, et le compagnon du joueur restait marque FFA
+    // -- donc convoitable par tous les mercenaires et attaquable par n'importe
+    // quel joueur, exactement ce que le paragraphe UN MAITRE EXCLUT ci-dessus
+    // promet d'eviter. L'etat ne se serait corrige qu'au prochain
+    // Player::UpdateArea, c'est-a-dire au prochain franchissement de frontiere
+    // de zone -- jamais si le bot suit son maitre dans la meme zone. (2)
+    // L'exploitant passe WildPvp.Enabled a 0 pour observer le monde sans
+    // mercenaires : les bots deja marques le restaient pour la duree de vie du
+    // processus, alors que PlayerbotAIConfig.h affirme << A 0, comportement
+    // d'origine strictement inchange >>.
+    //
+    // Le retrait recalcule le champ EXACTEMENT comme le coeur le fait, en
+    // relisant le seul drapeau de zone dont il depend : Player::UpdateArea fait
+    // `pvpInfo.IsInFFAPvPArea = area && (area->flags & AREA_FLAG_ARENA)`
+    // (PlayerUpdates.cpp:1271). Un bot qui se trouve reellement dans une fosse
+    // FFA du coeur garde donc son drapeau, et la branche ne refait alors aucun
+    // travail au tick suivant.
+    //
+    // UpdateFFAPvPState(true) et non (false) : le `true` est le parametre
+    // `reset`, qui demande le retrait IMMEDIAT du bit au lieu d'armer le
+    // minuteur de 30 s (PlayerUpdates.cpp:1525). C'est ce qu'on veut : le
+    // compagnon d'un joueur ne doit pas rester une demi-minute a la merci de la
+    // meute. Le coeur y rompt aussi les attaques devenues illegales
+    // (PlayerUpdates.cpp:1539-1554), ce qui est precisement l'effet recherche.
+    //
+    // ETRE MORT NE FAIT PAS PERDRE LE DRAPEAU. bot->IsAlive() ne garde plus que
+    // la POSE, pas l'eligibilite : le laisser dans la condition commune aurait
+    // fait tomber le drapeau de tout mercenaire a chaque mort, puis revenir a
+    // la resurrection.
+    bool const meriteLeDrapeauFFA =
+        sPlayerbotAIConfig.wildPvpEnabled &&
         bot->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
         ((sPlayerbotAIConfig.wildPvpAllBotsAreTargets && !GetMaster()) ||
          (!HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(bot) &&
-          sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))))
+          sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue())));
+
+    if (meriteLeDrapeauFFA)
     {
-        if (!bot->pvpInfo.IsInFFAPvPArea)
+        if (bot->IsAlive() && !bot->pvpInfo.IsInFFAPvPArea)
         {
             bot->pvpInfo.IsInFFAPvPArea = true;
             bot->UpdateFFAPvPState(false);
+        }
+    }
+    else if (bot->pvpInfo.IsInFFAPvPArea)
+    {
+        AreaTableEntry const* area = sAreaTableStore.LookupEntry(bot->GetAreaId());
+        if (!area || !(area->flags & AREA_FLAG_ARENA))
+        {
+            bot->pvpInfo.IsInFFAPvPArea = false;
+            bot->UpdateFFAPvPState(true);
         }
     }
 

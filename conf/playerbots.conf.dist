@@ -377,6 +377,80 @@ AiPlayerbot.DispelAuraDuration = 700
 # Delay between two bot actions
 AiPlayerbot.ReactDelay = 100
 
+###############################################################################
+# ORACLE DE DECISION LAYA
+#
+#    Un petit modele de decision typee tourne sur une machine a part (Apple
+#    Silicon, MLX) et pondere le choix d'action des mercenaires d'elite. Le
+#    serveur lui parle en UDP, sans jamais attendre : machine eteinte, endormie
+#    ou saturee, les bots se comportent exactement comme sans elle.
+#
+#    Voir modules/mod-playerbots/src/Ai/Coa/CoaLayaOracle.h et, cote projet,
+#    docs/CONCEPTION-laya-mercenaires-elite.md.
+#
+#    AiPlayerbot.Laya.Enabled
+#        Interrupteur general. A 0, aucun datagramme n'est emis et aucun
+#        multiplicateur n'est enregistre.
+#        Defaut : 0
+#
+#    AiPlayerbot.Laya.ElitePercent
+#        Part des MERCENAIRES qui deviennent des elites, sur le meme hachage de
+#        GUID : un bot elite le reste a vie. A 0, personne.
+#        Mesure : l'oracle tient 33 decisions/s sur un M1. Vingt bots a 1 Hz en
+#        consomment 60 %.
+#        Defaut : 0
+#
+#    AiPlayerbot.Laya.Endpoint
+#        <ipv4>:<port> de l'oracle. Adresse litterale obligatoire : aucune
+#        resolution DNS n'est faite, elle bloquerait le thread monde.
+#        Defaut : ""
+#
+#    AiPlayerbot.Laya.MaxAgeMs
+#        Au-dela de cet age, une reponse en cache est ignoree et le
+#        multiplicateur rend 1.0.
+#        Defaut : 1500
+#
+#    AiPlayerbot.Laya.PeriodMs
+#        Delai minimal entre deux demandes pour un meme bot. Borne a 250 ms au
+#        minimum : plus bas, un seul bot emettrait des milliers de datagrammes
+#        par seconde.
+#        Defaut : 1000
+#
+#    LE MODELE NE RECLASSE RIEN, IL OPPOSE UN VETO. Le moteur depile l'action la
+#    plus pertinente AVANT d'appeler les multiplicateurs : le classement a deja
+#    eu lieu. Le seul effet possible est de ramener la pertinence a zero, ce qui
+#    fait passer le moteur au candidat suivant. Les trois options ci-dessous
+#    encadrent ce veto.
+#
+#    AiPlayerbot.Laya.VetoRatio
+#        En pourcentage de la probabilite du favori du modele. Une action en
+#        dessous est refusee. A 100, toute action qui n'est pas le favori est
+#        refusee ; a 0, aucune ne l'est.
+#        Defaut : 50
+#
+#    AiPlayerbot.Laya.VetoMaxRelevance
+#        Une action dont la pertinence moteur atteint ce seuil est hors
+#        d'atteinte du veto. 20 = ACTION_HIGH : les soins d'urgence, les
+#        interruptions et les fuites restent au moteur seul.
+#        Defaut : 20
+#
+#    AiPlayerbot.Laya.VetoMax
+#        Refus au maximum par fenetre de PeriodMs et par bot, pour qu'un modele
+#        qui deraille ne puisse pas paralyser un bot.
+#        Defaut : 2
+#
+
+AiPlayerbot.Laya.Enabled = 0
+AiPlayerbot.Laya.ElitePercent = 0
+AiPlayerbot.Laya.Endpoint = ""
+AiPlayerbot.Laya.MaxAgeMs = 1500
+AiPlayerbot.Laya.PeriodMs = 1000
+AiPlayerbot.Laya.VetoRatio = 50
+AiPlayerbot.Laya.VetoMaxRelevance = 20
+AiPlayerbot.Laya.VetoMax = 2
+
+
+
 # Dynamically adjust react delay for bots in different status to reduce server lags
 AiPlayerbot.DynamicReactDelay = 1
 
@@ -2827,8 +2901,25 @@ AiPlayerbot.WildPvp.MercenaryPercent = 20
 #
 #    AiPlayerbot.WildPvp.MinLevel
 #        Description: Bots below this level are never mercenaries, so starting
-#                     zones stay quiet and questing remains possible.
-#        Default:     10
+#                     zones stay quiet and questing remains possible. The
+#                     threshold governs three distinct behaviours, all of which
+#                     read this same option: the FFA flag is not set
+#                     (PlayerbotAI::UpdateAI), the PvE strategies are kept
+#                     (AiFactory::AddDefaultNonCombatStrategies), and levelling
+#                     teleports are kept (AutoMaintenanceOnLevelupAction::
+#                     AutoTeleportForLevel).
+#                     Known gaps, all of them because the code tests
+#                     MercenaryRewards::EstMercenaire alone, which reads
+#                     IsMercenary and IsRandomBot but never the level:
+#                     the mercenary truce and the attacker cap in
+#                     NearestEnemyPlayersValue::AcceptUnit, the kill payment in
+#                     MercenaryRewards::ComputeReward, and the exclusion from
+#                     the levelling median in
+#                     MercenaryRewards::CompteDansLaMediane still apply below
+#                     the threshold.
+#                     The value shipped here is the same as the built-in
+#                     default, so commenting the line out changes nothing.
+#        Default:     7
 
 AiPlayerbot.WildPvp.MinLevel = 7
 

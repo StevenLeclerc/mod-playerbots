@@ -4,6 +4,7 @@
  * or (at your option) any later version.
  */
 
+#include "CoaLayaOracle.h"
 #include "CoaAiObjectContext.h"
 
 #include "Action.h"
@@ -428,23 +429,42 @@ struct Usable
     uint32 dispelMask;
 };
 
-// Active abilities the bot has reached and actually knows, for which `wanted(kind)` is true.
-template <typename Filter>
-std::vector<Usable> KnownAbilities(Player* bot, Filter wanted)
+// How long a bot's kit is trusted when neither its level nor the size of its spell book has
+// moved. It only has to be short next to a level up, not next to a tick.
+constexpr time_t CoaKitLifeSeconds = 5;
+
+/*
+ * The abilities the bot has reached and really knows, unfiltered, held by its context
+ * between ticks. See CoaKnownAbility and CoaAiObjectContext::knownKit.
+ *
+ * The three tests hoisted here - required level, Player::HasSpell, and the SpellInfo lookup
+ * that drops passives - do not depend on what the caller is looking for, so filtering the
+ * result afterwards gives exactly the list the per-call walk used to build.
+ */
+std::vector<CoaKnownAbility> const& KnownKit(PlayerbotAI* botAI, Player* bot)
 {
-    std::vector<Usable> usable;
+    auto* const coaContext = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext());
+    time_t const now = time(nullptr);
+    uint8 const level = bot->GetLevel();
+    uint32 const spellCount = uint32(bot->GetSpellMap().size());
+
+    if (coaContext->knownKitBuilt && coaContext->knownKitLevel == level &&
+        coaContext->knownKitSpells == spellCount && now - coaContext->knownKitBuilt < CoaKitLifeSeconds)
+        return coaContext->knownKit;
+
+    coaContext->knownKit.clear();
+    coaContext->knownKitBuilt = now;
+    coaContext->knownKitLevel = level;
+    coaContext->knownKitSpells = spellCount;
 
     auto const& all = ClassAbilities();
     auto const found = all.find(bot->getClass());
     if (found == all.end())
-        return usable;
+        return coaContext->knownKit;
 
-    // A bot can still know the lower ranks of a spell: only cast the highest one it has reached.
-    // Abilities are ordered by required level, so a later rank replaces an earlier one.
-    std::unordered_map<uint32, size_t> rankIndex;
     for (CoaAbility const& ability : found->second.abilities)
     {
-        if (!wanted(ability.kind) || ability.requiredLevel > bot->GetLevel() || !bot->HasSpell(ability.spellId))
+        if (ability.requiredLevel > level || !bot->HasSpell(ability.spellId))
             continue;
 
         // Class grants include passives (e.g. 552011 Resilient Constitution).
@@ -452,11 +472,37 @@ std::vector<Usable> KnownAbilities(Player* bot, Filter wanted)
         if (!info || info->IsPassive())
             continue;
 
-        auto const [itr, inserted] = rankIndex.try_emplace(ability.firstSpellId, usable.size());
-        if (inserted)
-            usable.push_back({ info, ability.kind, ability.dispelMask });
+        coaContext->knownKit.push_back({ info, ability.kind, ability.dispelMask, ability.firstSpellId });
+    }
+
+    return coaContext->knownKit;
+}
+
+// Active abilities the bot has reached and actually knows, for which `wanted(kind)` is true.
+template <typename Filter>
+std::vector<Usable> KnownAbilities(PlayerbotAI* botAI, Player* bot, Filter wanted)
+{
+    std::vector<Usable> usable;
+    // First rank of each entry of `usable`, at the same index: which ability a row stands for.
+    // A linear scan rather than a hash map - the filtered lists hold a handful of spells, and
+    // this runs several times per bot and per tick.
+    std::vector<uint32> firsts;
+
+    // A bot can still know the lower ranks of a spell: only cast the highest one it has reached.
+    // Abilities are ordered by required level, so a later rank replaces an earlier one.
+    for (CoaKnownAbility const& ability : KnownKit(botAI, bot))
+    {
+        if (!wanted(ability.kind))
+            continue;
+
+        auto const at = std::find(firsts.begin(), firsts.end(), ability.firstSpellId);
+        if (at == firsts.end())
+        {
+            firsts.push_back(ability.firstSpellId);
+            usable.push_back({ ability.info, ability.kind, ability.dispelMask });
+        }
         else
-            usable[itr->second] = { info, ability.kind, ability.dispelMask };
+            usable[size_t(at - firsts.begin())] = { ability.info, ability.kind, ability.dispelMask };
     }
 
     return usable;
@@ -494,7 +540,7 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
     auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
     time_t const now = time(nullptr);
 
-    for (Usable const& spell : KnownAbilities(bot, wanted))
+    for (Usable const& spell : KnownAbilities(botAI, bot, wanted))
     {
         // What the bot would really cast, as in CastFirst: the cooldown and the bench of a
         // swapped spell are the replacement's. Reading only the listed id had this answer yes
@@ -621,7 +667,7 @@ void DropAttackCast(Player* bot)
 // A healer keeps the larger share; any other bot that knows a heal keeps a smaller cushion, so
 // that it can still patch itself up; a bot with no heal at all never holds anything back, as it
 // would stop fighting for nothing. Both shares are settings, 0 turning the reserve off.
-bool SavingManaForHeals(Player* bot)
+bool SavingManaForHeals(PlayerbotAI* botAI, Player* bot)
 {
     if (bot->getPowerType() != POWER_MANA)
         return false;
@@ -631,7 +677,7 @@ bool SavingManaForHeals(Player* bot)
     if (!reserve || bot->GetPowerPct(POWER_MANA) >= float(reserve))
         return false;
 
-    return !KnownAbilities(bot, [](uint16 kind)
+    return !KnownAbilities(botAI, bot, [](uint16 kind)
         { return (kind & (KIND_HEAL | KIND_HOT)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); }).empty();
 }
 
@@ -653,6 +699,34 @@ void CheapestFirst(Player* bot, std::vector<Usable>& spells)
                b.info->CalcPowerCost(bot, b.info->GetSchoolMask());
     });
 }
+
+/*
+ * Priorite de « attack enemy player », recopiee de AttackEnemyPlayersStrategy.cpp:13.
+ *
+ * L'amont ne l'exporte sous aucun nom : la valeur est forcement dupliquee ici, mais elle
+ * l'est sous un nom, si bien qu'un grep relie les deux endroits. Le commentaire seul ne le
+ * faisait pas : une mise a jour amont portant 55 a 60 aurait remis l'embuscade derriere
+ * l'attaque, sans conflit de fusion, sans erreur et sans ligne de journal.
+ */
+constexpr float AttackEnemyPlayerPriority = 55.0f;
+
+// L'embuscade passe juste devant : les deux actions sont armees par le meme declencheur
+// (« enemy player near » et « coa ambush » lisent tous deux « enemy player target »), au
+// meme tick. Voir CoaBuffStrategy::InitTriggers.
+constexpr float AmbushPriority = AttackEnemyPlayerPriority + 1.0f;
+
+/*
+ * Delai avant de proposer a nouveau un buff dont la duree ne dit rien.
+ *
+ * Une posture est permanente : IsStance exige GetMaxDuration() <= 0, donc la garde de
+ * duree de CoaBuffAction calculait 0/1000*9/10 = 0 (ou -1/1000 = 0), c'est-a-dire une
+ * entree deja expiree au tick suivant. Pour une posture dont l'aura atterrit sous un
+ * autre id que celui du sort - le cas meme qui justifie l'existence de `recent` - le bot
+ * la relancait a chaque passage de « coa buff », soit un temps de recharge global par
+ * tick hors combat. Trente secondes suffisent a fermer la boucle sans retarder une
+ * reprise legitime.
+ */
+constexpr time_t StanceRecastSeconds = 30;
 
 constexpr time_t SpellBenchSeconds = 20;
 constexpr time_t RefusedBenchSeconds = 8;
@@ -800,21 +874,6 @@ struct UsageCounter
 
 std::array<UsageCounter, USAGE_MAX> Usage;
 
-// Diagnostic de l'embuscade. « stealth 0/0 » etablit que l'action n'est jamais
-// executee, sans dire pourquoi : le declencheur ne s'arme-t-il jamais, ou
-// s'arme-t-il sans que l'action soit jugee utile ? Ces compteurs tranchent, en
-// disant quelle condition refuse.
-struct AmbushProbe
-{
-    std::atomic<uint64> vu{ 0 };            // IsActive appele
-    std::atomic<uint64> sansClasse{ 0 };    // la classe ne sait pas se cacher
-    std::atomic<uint64> pasMercenaire{ 0 };
-    std::atomic<uint64> enCombat{ 0 };
-    std::atomic<uint64> dejaCache{ 0 };
-    std::atomic<uint64> sansProie{ 0 };
-    std::atomic<uint64> arme{ 0 };          // IsActive a rendu true
-};
-AmbushProbe Ambush;
 std::mutex UsageSpellsLock;
 std::map<uint32, uint32> UsageSpells[USAGE_MAX];  // spell id -> casts, dispels and interrupts only
 std::atomic<time_t> UsageLastReport{ 0 };
@@ -837,12 +896,13 @@ void ReportUsage(time_t now)
         line += Acore::StringFormat("{}{} {}/{}", kind ? ", " : "", UsageNames[kind],
                                     Usage[kind].cast.load(), Usage[kind].tried.load());
     LOG_INFO("playerbots.coa", "coa usage since start (cast/tried): {}", line);
-    LOG_INFO("playerbots.coa",
-             "coa ambush probe: vu {}, sans classe {}, pas mercenaire {}, en combat {}, "
-             "deja cache {}, sans proie {}, ARME {}",
-             Ambush.vu.load(), Ambush.sansClasse.load(), Ambush.pasMercenaire.load(),
-             Ambush.enCombat.load(), Ambush.dejaCache.load(), Ambush.sansProie.load(),
-             Ambush.arme.load());
+
+    // L'oracle Laya ne se prouve que par ses compteurs. « vetos » est le
+    // chiffre qui compte : combien de fois le modele a change le cours des
+    // choses. A zero, on a monte un pont reseau pour rien, et il faut pouvoir
+    // le constater plutot que de le supposer.
+    if (sPlayerbotAIConfig.layaEnabled)
+        LOG_INFO("playerbots.coa", "coa laya: {}", CoaLayaOracle::Instance().Compteurs());
 
     std::lock_guard<std::mutex> guard(UsageSpellsLock);
     // Attacks and heals list more spells: they show which rank of each spell the bots cast.
@@ -1027,9 +1087,9 @@ public:
         // measured on 18/09 that is the usual state: in 99% of the casts turned down for want of
         // power the bot sat below 10% mana. Under its reserve it attacks with what costs nothing
         // (and its weapon), keeping the rest for heals.
-        bool const saveMana = SavingManaForHeals(bot);
+        bool const saveMana = SavingManaForHeals(botAI, bot);
 
-        std::vector<Usable> usable = KnownAbilities(bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
+        std::vector<Usable> usable = KnownAbilities(botAI, bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
         if (usable.empty())
             return false;
 
@@ -1086,9 +1146,9 @@ public:
         if (!target || !target->IsAlive())
             return false;
 
-        std::vector<Usable> spells = KnownAbilities(bot, [](uint16 kind)
+        std::vector<Usable> spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
-        if (SavingManaForHeals(bot))
+        if (SavingManaForHeals(botAI, bot))
             DropManaSpells(bot, spells);
 
         return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, spells, target, USAGE_AOE));
@@ -1126,11 +1186,11 @@ public:
         switch (mode)
         {
             case Mode::Group:
-                spells = KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_GROUP_HEAL) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
+                spells = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_GROUP_HEAL) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
                 break;
             case Mode::OverTime:
             {
-                spells = KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_HOT) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
+                spells = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_HOT) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
                 ObjectGuid const caster = bot->GetGUID();
                 spells.erase(std::remove_if(spells.begin(), spells.end(),
                     [target, caster](Usable const& spell) { return target->HasAura(spell.info->Id, caster); }),
@@ -1139,7 +1199,7 @@ public:
             }
             default:
                 // Single target heals first, direct ones before those over time; area heals last.
-                spells = KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_HEAL) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
+                spells = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_HEAL) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
                 std::stable_sort(spells.begin(), spells.end(), [](Usable const& a, Usable const& b)
                 {
                     auto rank = [](uint16 kind) { return ((kind & KIND_GROUP_HEAL) ? 2 : 0) + ((kind & KIND_HOT) ? 1 : 0); };
@@ -1156,7 +1216,7 @@ public:
             spells.erase(std::remove_if(spells.begin(), spells.end(),
                 [](Usable const& spell) { return !CanHealOther(spell.kind); }), spells.end());
 
-        if (SavingManaForHeals(bot))
+        if (SavingManaForHeals(botAI, bot))
             CheapestFirst(bot, spells);
 
         UsageKind const usage = mode == Mode::Group ? USAGE_GROUP_HEAL : mode == Mode::OverTime ? USAGE_HOT : USAGE_HEAL;
@@ -1196,7 +1256,7 @@ public:
             return false;
 
         return RecordUsage(USAGE_TAUNT, CastFirst(botAI, bot,
-            KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_TAUNT) != 0; }), target, USAGE_TAUNT));
+            KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_TAUNT) != 0; }), target, USAGE_TAUNT));
     }
 
     bool isUseful() override
@@ -1216,13 +1276,13 @@ public:
     bool Execute(Event /*event*/) override
     {
         SpellInfo const* cast =
-            CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }), bot,
+            CastFirst(botAI, bot, KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }), bot,
                       USAGE_DEFENSIVE);
         if (!cast)
         {
-            std::vector<Usable> heals = KnownAbilities(bot, [](uint16 kind)
+            std::vector<Usable> heals = KnownAbilities(botAI, bot, [](uint16 kind)
                 { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); });
-            if (SavingManaForHeals(bot))
+            if (SavingManaForHeals(botAI, bot))
                 CheapestFirst(bot, heals);
 
             cast = CastFirst(botAI, bot, heals, bot, USAGE_DEFENSIVE);
@@ -1246,7 +1306,7 @@ public:
 
     bool Execute(Event /*event*/) override
     {
-        std::vector<Usable> const spells = KnownAbilities(bot, IsFriendlyDispel);
+        std::vector<Usable> const spells = KnownAbilities(botAI, bot, IsFriendlyDispel);
         if (spells.empty())
             return false;
 
@@ -1283,7 +1343,7 @@ public:
             return false;
 
         return RecordUsage(USAGE_INTERRUPT,
-            CastFirst(botAI, bot, KnownAbilities(bot, [](uint16 kind) { return (kind & KIND_INTERRUPT) != 0; }), caster,
+            CastFirst(botAI, bot, KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_INTERRUPT) != 0; }), caster,
                       USAGE_INTERRUPT));
     }
 
@@ -1301,14 +1361,23 @@ public:
 
     bool Execute(Event /*event*/) override
     {
+        // Chaque sortie compte un passage, meme celles qui ne lancent rien. Sans cela
+        // `cast` et `tried` n'etaient incrementes que par le meme appel, avec le meme sort
+        // non nul : le releve affichait « buff 4971/4971 », c'est-a-dire 100 % de reussite
+        // par construction, et un systeme de buffs en panne restait indemontrable. Meme
+        // patron que CoaStealthAction. RecordUsage rend le pointeur recu, donc nullptr,
+        // donc false.
         if (bot->IsInCombat() || bot->IsMounted() || bot->IsInFlight() || !bot->IsAlive())
-            return false;
+            return RecordUsage(USAGE_BUFF, nullptr);
 
-        std::vector<Usable> const spells = KnownAbilities(bot, [](uint16 kind)
+        std::vector<Usable> const spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & (KIND_BUFF | KIND_STANCE)) && !(kind & KIND_STEALTH) &&
                      !(kind & (KIND_HOSTILE | KIND_DAMAGE | KIND_TAUNT | KIND_HEAL | KIND_CONTROL)); });
         if (spells.empty())
-            return false;
+        {
+            RecordFailure(USAGE_BUFF, 0, FAILURE_NOTHING);
+            return RecordUsage(USAGE_BUFF, nullptr);
+        }
 
         // A stance replaces the one the bot is in, and CoA classes have several of them
         // (five Boons, twenty-two Runic Tattoos): take one only while standing in none, or
@@ -1359,14 +1428,21 @@ public:
 
                 if (botAI->CastSpell(spell.info->Id, member))
                 {
-                    recent[key] = now + time_t(spell.info->GetMaxDuration() / IN_MILLISECONDS * 9 / 10);
+                    // Une posture, et tout buff sans duree, rend 0 ou -1 : la garde
+                    // expirait au tick suivant et ne gardait rien. Voir StanceRecastSeconds.
+                    int32 const duration = spell.info->GetMaxDuration();
+                    recent[key] = now + (duration > 0 ? time_t(duration / IN_MILLISECONDS * 9 / 10)
+                                                      : StanceRecastSeconds);
                     return RecordUsage(USAGE_BUFF, spell.info);
                 }
 
                 RecordFailure(USAGE_BUFF, spell.info->Id, FAILURE_REFUSED);
             }
 
-        return false;
+        // Rien n'a ete lance : ni faute de sort connu, ni faute de cible, mais parce que
+        // tout ce qui etait a portee tenait deja. Compte quand meme, sans quoi le releve
+        // ne saurait pas distinguer « rien a faire » de « tout a echoue ».
+        return RecordUsage(USAGE_BUFF, nullptr);
     }
 
     bool isUseful() override { return ClassHas(bot, KIND_BUFF | KIND_STANCE); }
@@ -1402,7 +1478,7 @@ public:
         if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
             return false;
 
-        std::vector<Usable> const spells = KnownAbilities(bot, [](uint16 kind)
+        std::vector<Usable> const spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & KIND_STEALTH) && !(kind & (KIND_HOSTILE | KIND_DAMAGE)); });
 
         for (Usable const& spell : spells)
@@ -1446,7 +1522,17 @@ private:
     time_t prochainEssai = 0;   // propre a ce bot : une instance d'action par bot
 };
 
-// Un mercenaire, hors combat, a decouvert, avec une proie en vue.
+/*
+ * Un mercenaire, hors combat, a decouvert, avec une proie en vue.
+ *
+ * Une sonde de diagnostic a vecu ici : sept compteurs globaux (vu, sans classe, pas
+ * mercenaire, en combat, deja cache, sans proie, arme) et une ligne « coa ambush probe »
+ * toutes les dix minutes. Elle a repondu a la question qu'elle posait - le declencheur
+ * s'arme bien, et l'action etait evincee par « attack enemy player » - ce qui a donne
+ * AmbushPriority. La question fermee, la sonde est retiree le 21/09/2026 : ces compteurs
+ * n'etaient plus un outil, ils n'etaient qu'un reliquat qu'une revue devait a nouveau
+ * identifier. La rouvrir, c'est relire ce paragraphe, pas deviner.
+ */
 class CoaAmbushTrigger : public Trigger
 {
 public:
@@ -1454,17 +1540,16 @@ public:
 
     bool IsActive() override
     {
-        ++Ambush.vu;
         if (!sPlayerbotAIConfig.wildPvpStealthAmbush)
             return false;
         if (!ClassHas(bot, KIND_STEALTH))
-            { ++Ambush.sansClasse; return false; }
+            return false;
         if (!sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
-            { ++Ambush.pasMercenaire; return false; }
+            return false;
         if (bot->IsInCombat() || !bot->IsAlive() || bot->IsMounted() || bot->IsInFlight())
-            { ++Ambush.enCombat; return false; }
+            return false;
         if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
-            { ++Ambush.dejaCache; return false; }
+            return false;
 
         // « enemy player target » porte deja toutes les regles de cible : camp, zones
         // interdites, detection. Ne pas en ecrire une seconde.
@@ -1478,8 +1563,8 @@ public:
         // rendra desormais « pas de proie », jamais un plantage.
         Value<Unit*>* proie = context->GetValue<Unit*>("enemy player target");
         if (!proie || !proie->Get())
-            { ++Ambush.sansProie; return false; }
-        ++Ambush.arme;
+            return false;
+
         return true;
     }
 };
@@ -1495,7 +1580,7 @@ public:
         if (!ClassHas(bot, KIND_DISPEL))
             return false;
 
-        std::vector<Usable> const spells = KnownAbilities(bot, IsFriendlyDispel);
+        std::vector<Usable> const spells = KnownAbilities(botAI, bot, IsFriendlyDispel);
         for (Player* member : NearbyGroup(bot))
             for (Usable const& spell : spells)
                 if ((member == bot || (spell.kind & KIND_ALLY_CAST)) && HasDispellable(member, spell.dispelMask))
@@ -1534,9 +1619,36 @@ public:
         return CombatStrategy::GetType() | STRATEGY_TYPE_DPS | (ranged ? STRATEGY_TYPE_RANGED : 0);
     }
 
+    /*
+     * ACTION_NORMAL vaut 10, et Engine.cpp ecarte toute action de pertinence < 100 quand le
+     * bot passe en mode minimal (AiPlayerbot.BotActiveAlone) : le bot reste alors en combat,
+     * cible selectionnee, et ne fait rien, avec « PUSH:coa attack - 10.000000 | no actions
+     * executed » a chaque tick. Consigne en P-066 (incidents du projet) et referme en
+     * EXPLOITATION, pas dans le code : BotActiveAlone est a 100, donc plus aucun bot ne passe
+     * en mode minimal.
+     *
+     * Volontairement laisse a ACTION_NORMAL : monter la rotation au-dessus de 100 la ferait
+     * aussi passer devant des comportements amont qui comptent sur 10, ce qui est un
+     * arbitrage de jeu, pas un correctif. Si BotActiveAlone redescend un jour, c'est ici
+     * qu'il faut revenir.
+     */
     std::vector<NextAction> getDefaultActions() override
     {
         return { NextAction("coa attack", ACTION_NORMAL) };
+    }
+
+    // L'oracle de decision Laya, pour les seuls mercenaires d'elite et
+    // seulement si la conf l'arme. Herite par CoaTankStrategy et
+    // CoaHealStrategy : les trois roles en beneficient sans duplication.
+    //
+    // Le multiplicateur ne bloque jamais le thread monde : il note les
+    // candidats, emet au plus une demande par LayaPeriodMs, et lit un cache.
+    // Voir Ai/Coa/CoaLayaOracle.h.
+    void InitMultipliers(std::vector<Multiplier*>& multipliers) override
+    {
+        CombatStrategy::InitMultipliers(multipliers);
+        if (sPlayerbotAIConfig.IsLayaElite(botAI->GetBot()->GetGUID().GetRawValue()))
+            multipliers.push_back(new CoaLayaMultiplier(botAI));
     }
 
     void InitTriggers(std::vector<TriggerNode*>& triggers) override
@@ -1634,7 +1746,7 @@ public:
     void InitTriggers(std::vector<TriggerNode*>& triggers) override
     {
         triggers.push_back(new TriggerNode("often", { NextAction("coa buff", ACTION_NORMAL + 5) }));
-        // 56, et non ACTION_NORMAL + 6 : « attack enemy player » est arme par le
+        // AmbushPriority, et non ACTION_NORMAL + 6 : « attack enemy player » est arme par le
         // MEME declencheur (EnemyPlayerNear rend AI_VALUE(Unit*, "enemy player
         // target"), PvpTriggers.cpp:16) a la priorite 55,0
         // (AttackEnemyPlayersStrategy.cpp:13). A 16 la furtivite etait
@@ -1645,7 +1757,7 @@ public:
         // Ne touche QUE la rencontre d'un joueur : le farm sur les creatures
         // passe par « attack anything » a 4,0 (GrindingStrategy.cpp:25), sur un
         // declencheur different, et n'est donc pas ralenti.
-        triggers.push_back(new TriggerNode("coa ambush", { NextAction("coa stealth", 56.0f) }));
+        triggers.push_back(new TriggerNode("coa ambush", { NextAction("coa stealth", AmbushPriority) }));
     }
 };
 

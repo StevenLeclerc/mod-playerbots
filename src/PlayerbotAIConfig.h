@@ -358,10 +358,22 @@ public:
     // Verifie en jeu par le port 8888, voir AiFactory.cpp et P-056.
     bool wildPvpMercenariesSkipPve;
 
+    // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
+    // sans lui le moteur se comporte exactement comme avant.
+    bool layaEnabled;
+    uint32 layaElitePercent;      // part des MERCENAIRES qui deviennent des elites
+    std::string layaEndpoint;     // <ipv4>:<port>, aucune resolution DNS
+    uint32 layaMaxAgeMs;          // au-dela, la reponse en cache est ignoree
+    uint32 layaPeriodMs;          // delai minimal entre deux demandes pour un bot
+    uint32 layaVetoRatio;         // en %, du favori du modele ; en dessous, veto
+    uint32 layaVetoMaxRelevance;  // au-dessus, l'action est hors d'atteinte du veto
+    uint32 layaVetoMax;           // refus au maximum par fenetre de layaPeriodMs
+
     // Un bot est mercenaire ou non de facon STABLE dans le temps : la decision
     // derive de son GUID, pas d'un tirage. Sans cela un bot changerait de camp
     // a chaque appel, ce qui rendrait le monde illisible.
     bool IsMercenary(uint64 botGuid) const;
+    bool IsLayaElite(uint64 botGuid) const;
 
     std::vector<uint32> pvpProhibitedZoneIds;
     std::vector<uint32> pvpProhibitedAreaIds;

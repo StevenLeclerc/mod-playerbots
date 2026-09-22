@@ -5,6 +5,8 @@
  */
 
 #include "PlayerbotAIConfig.h"
+
+#include "CoaLayaOracle.h"
 #include "BisListMgr.h"
 #include "Config.h"
 #include "NewRpgInfo.h"
@@ -685,8 +687,30 @@ bool PlayerbotAIConfig::Initialize()
     wildPvpEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.Enabled", false);
     wildPvpMercenaryPercent = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MercenaryPercent", 20);
     wildPvpStealthAmbush = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.StealthAmbush", true);
-    wildPvpMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MinLevel", 10);
+    wildPvpMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MinLevel", 7);
     wildPvpBotsFightBots = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.BotsFightBots", true);
+
+    // Oracle de decision Laya. Eteint par defaut : rien n'est emis, aucun
+    // multiplicateur n'est enregistre, le moteur est celui d'avant, bit pour bit.
+    layaEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Laya.Enabled", false);
+    layaElitePercent = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.ElitePercent", 0);
+    layaEndpoint = sConfigMgr->GetOption<std::string>("AiPlayerbot.Laya.Endpoint", "");
+    layaMaxAgeMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.MaxAgeMs", 1500);
+    layaPeriodMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.PeriodMs", 1000);
+    if (layaElitePercent > 100)
+        layaElitePercent = 100;
+    // Une periode nulle ferait emettre un datagramme par action candidate et par
+    // tour : plusieurs milliers par seconde pour un seul bot.
+    if (layaPeriodMs < 250)
+        layaPeriodMs = 250;
+    // Un Multiplier ne peut pas reclasser les actions du moteur : son seul
+    // effet est le franchissement de zero. Ces trois bornes encadrent donc un
+    // VETO, pas une ponderation. Voir Ai/Coa/CoaLayaOracle.h.
+    layaVetoRatio = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.VetoRatio", 50);
+    layaVetoMaxRelevance = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.VetoMaxRelevance", 20);
+    layaVetoMax = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.VetoMax", 2);
+    if (layaVetoRatio > 100)
+        layaVetoRatio = 100;
     if (wildPvpMercenaryPercent > 100)
         wildPvpMercenaryPercent = 100;
 
@@ -819,6 +843,8 @@ bool PlayerbotAIConfig::Initialize()
 
     excludedHunterPetFamilies.clear();
     LoadList<std::vector<uint32>>(sConfigMgr->GetOption<std::string>("AiPlayerbot.ExcludedHunterPetFamilies", ""), excludedHunterPetFamilies);
+
+    CoaLayaOracle::Instance().Demarrer();
 
     LOG_INFO("server.loading", "---------------------------------------");
     LOG_INFO("server.loading", "       mod-playerbots initialized      ");
@@ -1004,6 +1030,26 @@ bool PlayerbotAIConfig::IsMercenary(uint64 botGuid) const
     hash ^= botGuid;
     hash *= 1099511628211ULL;
     return (hash % 100) < wildPvpMercenaryPercent;
+}
+
+// Les elites sont un SOUS-ENSEMBLE des mercenaires, decoupe dans le meme
+// hachage : un bot elite reste elite pour toute sa vie, sans table ni migration.
+// Le meme hash sert aux deux seuils, donc les elites sont exactement les
+// mercenaires de plus faible rang de hachage — c'est voulu, cela garde
+// l'ensemble stable quand on fait varier MercenaryPercent.
+bool PlayerbotAIConfig::IsLayaElite(uint64 botGuid) const
+{
+    if (!layaEnabled || !layaElitePercent)
+        return false;
+    if (!IsMercenary(botGuid))
+        return false;
+    if (layaElitePercent >= 100)
+        return true;
+
+    uint64 hash = 14695981039346656037ULL;
+    hash ^= botGuid;
+    hash *= 1099511628211ULL;
+    return (hash % 100) < layaElitePercent;
 }
 
 bool PlayerbotAIConfig::IsPvpProhibited(uint32 zoneId, uint32 areaId)

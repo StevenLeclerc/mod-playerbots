@@ -6,6 +6,7 @@
 
 #include "CoaSpecialization.h"
 #include "CoaLevelBuildData.h"
+#include "CoaSpecStrategies.h"
 
 #include "Group.h"
 #include "GroupMgr.h"
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <array>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -31,37 +33,39 @@ namespace
 
 constexpr uint8 SpecializationLevel = 10;
 
-// Nothing in the specialization data names a role. These come from the live tier lists,
-// matched to the CoA specialization ids through the heals, taunts and mitigation each
-// specialization's spells carry.
-CoaRole RoleOf(uint32 specializationId)
+/*
+ * Role of a specialization, read from CoaSpecStrategies.h.
+ *
+ * This used to carry its own switch: seventy hand written cases describing exactly the
+ * same specializations as the table tools/coa_spec_header_bauen.py generates, with
+ * nothing holding the two in agreement. Each half of the module read one of them -
+ * AiFactory and LfgActions through here, ChatHelper, StatsWeightCalculator,
+ * ChangeTalentsAction and PlayerbotFactory through the generated one - so a role changed
+ * upstream would have given a bot the "coa heal" strategy while it was equipped and
+ * announced as a damage dealer, with no assertion and no test to catch it.
+ *
+ * The two tables were compared before this change: they agreed on all 70 specializations,
+ * class included. Nothing about the game changes here; there is simply one table less.
+ *
+ * The class has to be given because the generated table is keyed on (class, spec), which
+ * is also what makes a spec id belonging to another class read as Dps rather than as the
+ * role of a same numbered spec.
+ */
+CoaRole RoleOf(uint8 classId, uint32 specializationId)
 {
-    switch (specializationId)
+    // GetCoaSpecStrategy takes a uint16: a wider id must not be truncated into a valid one.
+    if (specializationId > 0xFFFF)
+        return CoaRole::Dps;
+
+    CoaSpecStrategy const* entry = GetCoaSpecStrategy(classId, uint16(specializationId));
+    if (!entry)
+        return CoaRole::Dps;
+
+    switch (entry->role)
     {
-        case 6:   // Witch Doctor, Brewing
-        case 31:  // Chronomancer, Time
-        case 37:  // Pyromancer, Flameweaving
-        case 40:  // Cultist, Heretic
-        case 43:  // Starcaller, Moon Priest
-        case 51:  // Tinker, Invention
-        case 98:  // Sun Cleric, Blessings
-        case 101: // Venomancer, Vizier
-            return CoaRole::Heal;
-        case 9:   // Felsworn, Tyrant
-        case 17:  // Knight of Xoroth, Defiance
-        case 21:  // Guardian, Vanguard
-        case 22:  // Templar, Oathkeeper
-        case 48:  // Sun Cleric, Seraphim
-        case 52:  // Venomancer, Fortitude
-        case 57:  // Reaper, Domination
-        case 60:  // Primalist, Mountain King
-        case 96:  // Cultist, Dreadnought
-        case 97:  // Witch Hunter, Black Knight
-        case 99:  // Bloodmage, Eternal
-        case 100: // Starcaller, Moon Guard
-            return CoaRole::Tank;
-        default:
-            return CoaRole::Dps;
+        case CoaSpecRole::Tank: return CoaRole::Tank;
+        case CoaSpecRole::Heal: return CoaRole::Heal;
+        default:                return CoaRole::Dps;
     }
 }
 
@@ -92,7 +96,7 @@ std::array<std::vector<uint32>, 3> SpecializationsByRole(uint8 classId)
 
     std::array<std::vector<uint32>, 3> byRole;
     for (uint32 specializationId : specializations)
-        byRole[uint8(RoleOf(specializationId))].push_back(specializationId);
+        byRole[uint8(RoleOf(classId, specializationId))].push_back(specializationId);
 
     return byRole;
 }
@@ -157,7 +161,45 @@ SpecializationProfile const* FindProfile(uint32 specializationId)
     return nullptr;
 }
 
-// The style most specializations of the class share (melee on a tie), with their stats.
+/*
+ * The style most specializations of the class share (melee on a tie), with their stats.
+ *
+ * SIGNALE, NON CORRIGE (21/09/2026, mesure corrigee le 21/09/2026). This majority rule is a
+ * second, implicit table next to the "default" rows of CoaSpecStrategies.h - the default spec
+ * of a class being its first row there. Both columns below name a specialization from that
+ * file, but the styles compared come from two different places, so the two measures differ.
+ *
+ * (a) Majority here versus the `position` field of the default row, which is the only style
+ * CoaSpecStrategies.h carries: CoaSpecStrategy has classId, specId, specName, role, position
+ * ("close" or "ranged"), combat, nonCombat, support - no style column. Six of the 21 classes
+ * disagree, "close" reading as melee and "ranged" as non-melee:
+ *
+ *   15 Witch Hunter melee / Boltslinger ranged   20 Bloodmage  melee / Sanguine ranged
+ *   26 Starcaller   melee / Sentinel    ranged   27 Sun Cleric melee / Piety    ranged
+ *   29 Venomancer   melee / Rot         ranged   32 Runemaster melee / Glyphic  ranged
+ *
+ * 13 Witch Doctor is NOT one of them: its majority is caster and Shadowhunting is "ranged",
+ * both non-melee.
+ *
+ * (b) Majority here versus the Style, in Profiles[] above, of the row of that same default
+ * spec. Seven classes disagree - the six of (a) plus 13 Witch Doctor caster / Shadowhunting
+ * ranged, and 20 Sanguine, 26 Sentinel, 27 Piety, 29 Rot, 32 Glyphic read caster here where
+ * CoaSpecStrategies.h only says "ranged".
+ *
+ * Only (a) changes the strategy picked, because that consumer is a melee / non-melee choice:
+ * AiFactory.cpp:429 takes "coa" for CoaStyle::Melee and "coa ranged" otherwise, so the caster
+ * versus ranged split of (b) is invisible to it. GetCoaStyle has other callers that do read
+ * CoaStyle::Caster apart from CoaStyle::Ranged (PlayerbotAI.cpp:2109, StatsWeightCalculator);
+ * ClassStyle is what they all fall back on when the bot has no spec.
+ *
+ * This only decides bots with no specialization, which is every bot under level 10 - the bulk
+ * of the fleet. Aligning it on the default row (what GetCoaSpecStrategyFor already
+ * does for item weights, chat and LFG) would send the six classes of (a) from "coa" to
+ * "coa ranged", which drops the "enemy out of melee" -> "reach melee" trigger. Whether a
+ * level 5 Bloodmage still has something to cast from range has not been measured, so this is
+ * a balance decision and not a defect fix: left as it is on purpose, with the measurement
+ * written down so the next reader does not have to redo it.
+ */
 CoaStyle ClassStyle(uint8 classId, uint8& stats)
 {
     std::array<uint8, 3> counts = { 0, 0, 0 };
@@ -230,7 +272,7 @@ CoaRole GetCoaRole(Player const* player)
     if (!player || !IsAscensionCustomClassId(player->getClass()))
         return CoaRole::Dps;
 
-    return RoleOf(GetAscensionActiveSpecialization(player));
+    return RoleOf(player->getClass(), GetAscensionActiveSpecialization(player));
 }
 
 CoaStyle GetCoaStyle(Player const* player)
@@ -256,6 +298,28 @@ uint8 GetCoaPrimaryStats(Player const* player)
     uint8 stats = 0;
     ClassStyle(player->getClass(), stats);
     return stats;
+}
+
+/*
+ * Whether this (class, spec, level) has still to be complained about.
+ *
+ * ApplyCoaTalents runs on every level up of every bot, so a warning left unguarded would
+ * repeat for each of the hundreds of bots that share a build hole. One line per hole is
+ * what is wanted: the hole belongs to the table, not to the bot.
+ *
+ * `level` 0 is never a character level: callers use it to mean "once for this class and
+ * specialization, whatever the level".
+ *
+ * Called from several MapUpdate threads, hence the lock.
+ */
+static bool FirstBuildComplaint(uint8 classId, uint32 specializationId, uint8 level)
+{
+    static std::set<uint32> complained;
+    static std::mutex complainedLock;
+
+    uint32 const key = (uint32(classId) << 24) | ((specializationId & 0xFFFFu) << 8) | level;
+    std::lock_guard<std::mutex> guard(complainedLock);
+    return complained.insert(key).second;
 }
 
 // A stable number per bot and purpose, so the same bot keeps the same role and specialization
@@ -322,7 +386,8 @@ bool EnsureCoaSpecialization(Player* bot)
     // when it already plays the role this bot was given.
     uint32 const current = GetAscensionActiveSpecialization(bot);
     if (current == specializationId ||
-        (current && !IsExcludedSpecialization(current) && uint8(RoleOf(current)) == chosenRole))
+        (current && !IsExcludedSpecialization(current) &&
+         uint8(RoleOf(bot->getClass(), current)) == chosenRole))
         return false;
 
     if (!SwitchAscensionSpecialization(bot, specializationId))
@@ -344,10 +409,17 @@ uint32 ApplyCoaTalents(Player* bot)
         return 0;
 
     // Rank each entry should hold at the bot's level: the build's picks up to that level.
+    // `buildTop` is the highest level the table covers for this (class, spec), whether or not
+    // the bot has reached it: past it, this function has nothing left to spend, for ever.
     std::vector<std::pair<uint32, uint8>> wanted;
+    uint8 buildTop = 0;
     for (CoaLevelBuildData::Pick const& pick : CoaLevelBuildData::Picks)
     {
-        if (pick.ClassId != bot->getClass() || pick.SpecId != specializationId || pick.Level > bot->GetLevel())
+        if (pick.ClassId != bot->getClass() || pick.SpecId != specializationId)
+            continue;
+
+        buildTop = std::max(buildTop, pick.Level);
+        if (pick.Level > bot->GetLevel())
             continue;
 
         auto itr = std::find_if(wanted.begin(), wanted.end(),
@@ -358,14 +430,43 @@ uint32 ApplyCoaTalents(Player* bot)
             itr->second = pick.Rank;
     }
 
-    uint32 raised = 0;
+    // The three outcomes are counted apart. The old code kept only `raised` and threw the
+    // boolean of SetAscensionTalentRank away, which has six distinct refusal causes: a bot
+    // whose build was missing, out of date or refused spent nothing and said nothing, and the
+    // only symptom was a character levelling with a half empty tree.
+    uint32 raised = 0, held = 0, refused = 0;
     for (auto const& [entryId, rank] : wanted)
-        if (GetAscensionTalentRank(bot, entryId) < rank && SetAscensionTalentRank(bot, entryId, rank))
+    {
+        if (GetAscensionTalentRank(bot, entryId) >= rank)
+            ++held;
+        else if (SetAscensionTalentRank(bot, entryId, rank))
             ++raised;
+        else
+            ++refused;
+    }
 
     if (raised)
-        LOG_INFO("playerbots", "coa: {} (class {}, level {}, specialization {}) raised {} talent entries",
-                 bot->GetName(), bot->getClass(), bot->GetLevel(), specializationId, raised);
+        LOG_INFO("playerbots", "coa: {} (class {}, level {}, specialization {}) raised {} talent entries "
+                 "({} already held, {} refused)",
+                 bot->GetName(), bot->getClass(), bot->GetLevel(), specializationId, raised, held, refused);
+
+    // No line at all for this (class, spec) at this level, or an entry the core refused: once
+    // per (class, spec, level), because the hole belongs to the table, not to this bot.
+    if ((wanted.empty() || refused) &&
+        FirstBuildComplaint(bot->getClass(), specializationId, bot->GetLevel()))
+        LOG_WARN("playerbots", "coa build: class {}, specialization {}, level {}: {} entries wanted, "
+                 "{} raised, {} already held, {} refused, table covers up to level {}",
+                 bot->getClass(), specializationId, bot->GetLevel(), uint32(wanted.size()), raised, held,
+                 refused, buildTop);
+
+    // Past the last level the table covers there is nothing left to spend, for ever. Said once
+    // per (class, spec): keyed on the level it would be said again at every level up to
+    // MaxPlayerLevel, which is 80 while the builds stop at 60.
+    else if (bot->GetLevel() > buildTop && FirstBuildComplaint(bot->getClass(), specializationId, 0))
+        LOG_WARN("playerbots", "coa build: class {}, specialization {}: the build table stops at level {}, "
+                 "bots are levelling past it (this one is {}); nothing more will be spent",
+                 bot->getClass(), specializationId, buildTop, bot->GetLevel());
+
     return raised;
 }
 
