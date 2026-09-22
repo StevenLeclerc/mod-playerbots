@@ -689,6 +689,79 @@ void DropManaSpells(Player* bot, std::vector<Usable>& spells)
         spells.end());
 }
 
+// Retire les sorts que le coeur REFUSERA de toute facon, sur cette cible et a cette
+// distance. Mesure du 2026-09-22, ligne « coa usage since start » du module :
+// attack 44834/124990, soit 36 % de reussite et 80 156 refus. Sur les dix sorts les
+// plus refuses, deux causes se corrigent ici :
+//
+//   TOO_CLOSE          6 554  dont Darkslayer (680256) 5 341 a lui seul — « Fire a dark
+//                             shot... Ranged Weapon Damage », un tir a portee minimale
+//                             que le bot reessaie au corps a corps, tick apres tick
+//   AFFECTING_COMBAT   1 068  Flay Corpse (801042), un sort hors combat propose dans la
+//                             rotation d'attaque
+//
+// Les autres causes du releve ne sont PAS filtrees ici, et c'est deliberé : STUNNED
+// (2 804) et NO_POWER (2 109) sont des refus legitimes — le bot est etourdi ou a sec,
+// il n'y a rien a corriger ; NOT_MOUNTED (1 872, Soul Capture et Scythe Rush) n'est pas
+// compris, et filtrer sur une cause qu'on n'explique pas reviendrait a deviner.
+//
+// RESERVE : ce top dix ne couvre que 15 831 des 80 156 refus, soit environ 20 %. Le
+// gain attendu porte sur cette part-la, pas sur la totalite.
+//
+// POURQUOI ICI ET PAS DANS KnownAbilities : cette derniere est mise en cache sur le
+// niveau et la taille du livre de sorts, alors que la distance change a chaque tick.
+// Y porter le filtre empoisonnerait le cache.
+//
+// La portee MAXIMALE n'est volontairement pas filtree : un sort hors d'atteinte parce
+// que le bot est trop LOIN se corrige en s'approchant, et le retirer de la liste priverait
+// le moteur de la raison de le faire. Seul le « trop pres » est sans recours pour le bot.
+void DropUncastableHere(Player* bot, Unit* target, std::vector<Usable>& spells)
+{
+    if (!bot || !target)
+        return;
+
+    bool const inCombat = bot->IsInCombat();
+
+    spells.erase(std::remove_if(spells.begin(), spells.end(),
+        [bot, target, inCombat](Usable const& spell)
+        {
+            SpellInfo const* info = spell.info;
+            if (!info)
+                return true;
+
+            // SpellInfo::CanBeUsedInCombat() est !HasAttribute(SPELL_ATTR0_NOT_IN_COMBAT_ONLY_PEACEFUL),
+            // lu dans SpellInfo.cpp. C'est exactement ce que le coeur teste avant de rendre
+            // SPELL_FAILED_AFFECTING_COMBAT.
+            if (inCombat && !info->CanBeUsedInCombat())
+                return true;
+
+            // Le test de portee minimale est RECOPIE de Spell::CheckRange (Spell.cpp), pas
+            // approche : le coeur en a DEUX branches, et une premiere redaction qui n'avait
+            // gardé que la seconde aurait manque le poste dominant — Darkslayer est un sort
+            // SPELL_RANGE_RANGED, donc il passe par la premiere.
+            if (!info->RangeEntry)
+                return false;
+            // RangeEntry->ID == 1 : le coeur rend SPELL_CAST_OK sans rien verifier.
+            if (info->RangeEntry->ID == 1)
+                return false;
+
+            float const minRange = bot->GetSpellMinRangeForTarget(target, info);
+
+            // EGALITE, pas masque : SpellRangeFlag (Spell.h) est une enumeration de valeurs
+            // — DEFAULT 0, MELEE 1, RANGED 2 — et non des bits. Le coeur ecrit lui-meme
+            // `range_type == SPELL_RANGE_RANGED`.
+            if (info->RangeEntry->Flags == SPELL_RANGE_RANGED && !bot->IgnoresSpellMinRange(info))
+            {
+                // Pour un sort a distance, le coeur ajoute la portee de melee au minimum.
+                float const minRangeCombined = minRange + bot->GetMeleeRange(target);
+                return bot->IsWithinRange(target, minRangeCombined);
+            }
+
+            return minRange > 0.0f && bot->IsWithinCombatRange(target, minRange);
+        }),
+        spells.end());
+}
+
 // Puts the cheapest heals first. Low on mana a bot would otherwise keep offering its biggest heal,
 // be turned down for want of power and heal nobody, while a small heal was still within reach.
 void CheapestFirst(Player* bot, std::vector<Usable>& spells)
@@ -1095,6 +1168,10 @@ public:
 
         if (saveMana)
             DropManaSpells(bot, usable);
+        // Retire ce que le coeur refuserait ici et maintenant — trop pres, ou hors combat
+        // seulement. Apres DropManaSpells, pour ne pas payer le calcul de portee sur des
+        // sorts qu'on vient d'ecarter.
+        DropUncastableHere(bot, target, usable);
         if (usable.empty())
             return RecordUsage(USAGE_ATTACK, nullptr);
 
