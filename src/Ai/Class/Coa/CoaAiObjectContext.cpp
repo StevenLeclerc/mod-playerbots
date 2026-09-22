@@ -760,6 +760,39 @@ void DropUncastableHere(Player* bot, Unit* target, std::vector<Usable>& spells)
             return minRange > 0.0f && bot->IsWithinCombatRange(target, minRange);
         }),
         spells.end());
+
+    // Deuxieme passe, ajoutee le 2026-09-22 apres mesure : deux causes de plus de la
+    // meme famille « ne peut jamais reussir dans cet etat ». Elles sont separees de la
+    // portee parce qu'elles ne dependent pas de la distance et se lisent d'un coup d'oeil.
+    //
+    //   ONLY_STEALTHED     3 324   Arachnophobia (804970) lance a decouvert
+    //   UNIT_NOT_INFRONT   4 448   Bloodmoon Blast (501608) lance dans le dos de la cible
+    //
+    // CE QUI REND LE FILTRE D'ORIENTATION UTILE MALGRE SON CARACTERE PASSAGER. Un bot mal
+    // oriente le sera encore une fraction de seconde : on pourrait croire qu'il suffit
+    // d'attendre le tick suivant. Mais CastFirst MET AU BAN 8 SECONDES tout sort dont le
+    // lancement est refuse. Un simple quart de tour coutait donc huit secondes de rotation.
+    // Ecarter le sort pour ce tick le laisse disponible au suivant : c'est exactement
+    // l'inverse.
+    spells.erase(std::remove_if(spells.begin(), spells.end(),
+        [bot, target](Usable const& spell)
+        {
+            SpellInfo const* info = spell.info;
+
+            // Spell.cpp : HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !HasStealthAura().
+            if (info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !bot->HasStealthAura())
+                return true;
+
+            // Spell.cpp, recopie sans le IsPlayer() qui est vrai par construction ici :
+            // (FacingCasterFlags & SPELL_FACING_FLAG_INFRONT) && !HasInArc(M_PI, target)
+            // && !IsWithinBoundaryRadius(target). Le dernier terme compte : au contact,
+            // le coeur ne reclame pas l'orientation, et l'oublier ferait ecarter a tort
+            // les sorts de melee.
+            return (info->FacingCasterFlags & SPELL_FACING_FLAG_INFRONT)
+                && !bot->HasInArc(static_cast<float>(M_PI), target)
+                && !bot->IsWithinBoundaryRadius(target);
+        }),
+        spells.end());
 }
 
 // Puts the cheapest heals first. Low on mana a bot would otherwise keep offering its biggest heal,
