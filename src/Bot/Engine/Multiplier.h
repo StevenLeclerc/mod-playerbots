@@ -9,7 +9,10 @@
 
 #include "AiObject.h"
 
+#include <list>
+
 class Action;
+class ActionBasket;
 class PlayerbotAI;
 
 class Multiplier : public AiNamedObject
@@ -19,6 +22,17 @@ public:
     virtual ~Multiplier() {}
 
     virtual float GetValue([[maybe_unused]] Action* action) { return 1.0f; }
+
+    /**
+     * @brief Called once per tick with the whole candidate set, before any is popped
+     *
+     * GetValue() only sees the actions the engine actually tried, and
+     * DoNextAction stops at the first one that executes: usually exactly one
+     * per tick. A multiplier that needs to know what the alternatives WERE
+     * must be told separately, which is what this is for. No effect by
+     * default, and it must not modify anything.
+     */
+    virtual void ObserveQueue([[maybe_unused]] std::list<ActionBasket*> const& candidats) {}
 };
 
 #endif

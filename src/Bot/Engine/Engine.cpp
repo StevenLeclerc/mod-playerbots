@@ -158,6 +158,19 @@ bool Engine::DoNextAction(Unit* /*unit*/, uint32 /*depth*/, bool minimal)
     ProcessTriggers(minimal);
     PushDefaultActions();
 
+    // Le seul instant du tour ou la file contient TOUS les candidats : les
+    // declencheurs viennent de la remplir, et rien n'a encore ete depile.
+    // Passe cette ligne, DoNextAction s'arrete a la premiere action qui
+    // s'execute (voir le `break` plus bas), si bien qu'un multiplicateur n'en
+    // voit qu'une par tour et jamais les alternatives. Sans effet par defaut :
+    // Multiplier::ObserveQueue ne fait rien.
+    if (!multipliers.empty())
+    {
+        std::list<ActionBasket*> const& candidats = queue.All();
+        for (Multiplier* multiplier : multipliers)
+            multiplier->ObserveQueue(candidats);
+    }
+
     uint32 iterations = 0;
     uint32 iterationsPerTick = queue.Size() * (minimal ? 2 : sPlayerbotAIConfig.iterationsPerTick);
 

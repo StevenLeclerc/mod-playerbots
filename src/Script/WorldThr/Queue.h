@@ -62,6 +62,20 @@ public:
      */
     void RemoveExpired();
 
+    /**
+     * @brief Read-only view of every basket currently queued
+     * @return The internal list, in insertion order (NOT sorted by relevance)
+     *
+     * Added for observers that need the whole candidate set of a tick, which
+     * Pop() and Peek() cannot give: DoNextAction stops at the first action
+     * that executes, so an observer driven by the pop loop sees one action per
+     * tick and never the alternatives. See Multiplier::ObserveQueue.
+     *
+     * Read only. Callers must not keep the pointers: the baskets are deleted
+     * by Pop() and RemoveExpired() within the same tick.
+     */
+    std::list<ActionBasket*> const& All() const { return actions; }
+
 private:
     /**
      * @brief Updates existing basket with new relevance and cleans up new basket
