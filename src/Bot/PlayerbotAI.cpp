@@ -5094,14 +5094,21 @@ uint32 PlayerbotAI::GetEquipGearScore(Player* player)
     Item* main = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
     Item* off = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
 
+    // Item::GetTemplate() rend sObjectMgr->GetItemTemplate(GetEntry()) (Item.cpp:545-548), qui
+    // rend nullptr des que l'entree sort du magasin (ObjectMgr.cpp:3935-3938). Le pointeur
+    // n'etait teste nulle part ici. En pratique un objet porte a toujours son modele ; mais
+    // cette fonction est desormais appelee sur TOUT le vivier de bots a chaque recrutement CoA
+    // (CoaSpecialization.cpp), soit des centaines d'appels la ou il y en avait une poignee, et
+    // un seul objet orphelin ferait tomber le worldserver depuis une commande de MJ.
     bool ignoreOffhand = false;  // true → divisor = 16
-    if (main)
+    ItemTemplate const* mainTemplate = main ? main->GetTemplate() : nullptr;
+    if (mainTemplate)
     {
-        bool twoHand = (main->GetTemplate()->InventoryType == INVTYPE_2HWEAPON);
+        bool twoHand = (mainTemplate->InventoryType == INVTYPE_2HWEAPON);
         if (twoHand && !player->HasAura(SPELL_TITAN_GRIP))
             ignoreOffhand = true;  // classic 2-hander
     }
-    else if (!off)  // both hands empty
+    else if (!main && !off)  // both hands empty
         ignoreOffhand = true;
 
     /* ---------- 1.  Sum up item-levels -------------------------- */
@@ -5114,7 +5121,8 @@ uint32 PlayerbotAI::GetEquipGearScore(Player* player)
             continue;  // skip off-hand in 2-H case
 
         if (Item* it = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-            sumLevel += it->GetTemplate()->ItemLevel;  // missing items add 0
+            if (ItemTemplate const* proto = it->GetTemplate())  // meme motif que ci-dessus
+                sumLevel += proto->ItemLevel;  // missing items add 0
     }
 
     /* ---------- 2.  Divide by 17 or 16 -------------------------- */

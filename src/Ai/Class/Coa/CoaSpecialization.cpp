@@ -470,8 +470,56 @@ uint32 ApplyCoaTalents(Player* bot)
     return raised;
 }
 
-bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
+namespace
 {
+
+// Le seuil d'indice d'equipement que le palier demande, exprime en PERCENTILE du vivier.
+// `sortedGear` est trie par ordre croissant. Le motif du choix - percentile plutot que
+// pourcentage du maximum - est dans CoaSpecialization.h, au-dessus de CoaGearTier, avec la
+// mesure qui le justifie.
+//
+// Un percentile est toujours atteint par au moins un element du tableau : ce seuil ne peut
+// donc jamais vider un vivier non vide, et il n'y a aucune division a garder contre zero.
+uint32 GearFloorForTier(std::vector<uint32> const& sortedGear, CoaGearTier tier)
+{
+    if (sortedGear.empty())
+        return 0;
+
+    size_t const n = sortedGear.size();
+    switch (tier)
+    {
+        // Mediane basse : n = 1 rend l'unique element, n = 4 rend le troisieme plus petit.
+        case CoaGearTier::Median:
+            return sortedGear[n / 2];
+        // Quartile superieur : n = 1 -> indice 0, n = 4 -> indice 3 (le meilleur),
+        // n = 8 -> indice 6, soit le quart superieur.
+        case CoaGearTier::Top:
+            return sortedGear[(n * 3) / 4];
+        default:
+            return 0;
+    }
+}
+
+// Un candidat retenu par le premier passage. Les Player* n'ont de sens qu'entre les deux
+// passages, qui sont contigus et ne rendent la main a personne : voir le commentaire sur
+// les fils dans RecruitCoaBot.
+struct CoaCandidate
+{
+    Player* bot;
+    bool sameMap;
+    bool fits;
+    uint32 levelGap;
+    float distance;
+    uint32 gear;
+};
+
+}  // namespace
+
+bool RecruitCoaBot(Player* master, CoaRole role, CoaRecruitOptions const& options, CoaRecruitReport& report,
+                   std::string& message)
+{
+    report = CoaRecruitReport();
+
     Group* group = master->GetGroup();
     if (group && group->IsFull())
     {
@@ -492,56 +540,162 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
         return byClassCache.emplace(classId, SpecializationsByRole(classId)).first->second;
     };
 
-    // A free random bot whose class can fill the role, preferably on the master's map (a
-    // dungeon instance has none, so any map will do), then one that already holds a
-    // specialization of the role, then the nearest.
-    Player* chosen = nullptr;
-    bool chosenSameMap = false;
-    bool chosenFits = false;
-    uint32 chosenLevelGap = 0;
-    float chosenDistance = 0.0f;
+    int32 const masterLevel = int32(master->GetLevel());
+    // On calcule l'indice d'equipement des que l'exploitant a pose UN critere, pas seulement
+    // un palier : c'est ce qui permet de lui rendre le chiffre absolu meme quand il demande
+    // « palier=bas ». Sur le chemin par defaut - la forme que le panneau en service joue - on
+    // ne calcule rien et la sortie reste identique au caractere pres a celle d'avant ce lot.
+    bool const needGear = !options.IsDefault();
+
+    /*
+     * LES FILS, ET POURQUOI IL N'Y A RIEN A VERROUILLER ICI - relu apres P-050.
+     *
+     * GetAllBots() rend PlayerbotHolder::playerBots PAR VALEUR (RandomPlayerbotMgr.h:124) :
+     * la boucle ci-dessous travaille sur une copie, et la seule fenetre ouverte sur le
+     * conteneur partage est la construction de cette copie. On la garde telle quelle
+     * exactement pour cela - la lecon de P-050 est de reduire la fenetre non protegee, pas
+     * d'ajouter un verrou la ou il n'y a pas de deuxieme ecrivain. Iterer directement
+     * (GetPlayerBotsBegin/End) economiserait 500 allocations mais tiendrait un iterateur sur
+     * la table partagee pendant tout le calcul des indices d'equipement, soit une fenetre
+     * bien plus large.
+     *
+     * VERIFIE (relu dans le code le 2026-09-23, pas suppose) :
+     *  - playerBots n'a que deux ecritures : playerBots[guid] = bot dans
+     *    PlayerbotHolder::OnBotLogin (PlayerbotMgr.cpp:470) et playerBots.erase(guid) dans
+     *    PlayerbotHolder::RemoveFromPlayerbotsMap (PlayerbotMgr.cpp:445) ;
+     *  - RemoveFromPlayerbotsMap est appelee AVANT WorldSession::LogoutPlayer, qui est ce
+     *    qui detruit l'objet Player (PlayerbotMgr.cpp:406-408 et 437) : la table ne retient
+     *    donc jamais un pointeur mort, et la copie non plus ;
+     *  - cette commande tourne sur le fil du monde. World::Update (World.cpp:1120) appelle
+     *    sWorldSessionMgr->UpdateSessions (l. 1218, d'ou vient la forme en jeu) puis
+     *    ProcessCliCommands (l. 1341, d'ou vient la forme console) : les deux formes sont
+     *    sequentielles sur le meme fil, et c'est aussi ce fil qui fait entrer et sortir les
+     *    bots aleatoires. L'analyse longue est deja ecrite, verifiee et datee dans ce module,
+     *    au-dessus de MercenaryRewards::RecomputeMedian (Bot/MercenaryRewards.cpp).
+     *
+     * RIEN ENTRE LES DEUX PASSAGES NE REND LA MAIN. Le premier passage ne fait que des
+     * lectures ; la refabrication, l'ajout au groupe et la teleportation viennent tous
+     * APRES l'election. C'est la contrainte la plus facile a violer par inadvertance : tout
+     * appel insere entre les deux passages qui puisse deconnecter un bot rendrait les
+     * Player* du vecteur caducs, sans le moindre signe.
+     */
+    std::vector<CoaCandidate> candidates;
     for (auto const& [guid, bot] : sRandomPlayerbotMgr.GetAllBots())
     {
+        ++report.seen;
+
         if (!bot || bot == master || !bot->IsInWorld() || bot->IsBeingTeleported() ||
             !IsAscensionCustomClassId(bot->getClass()) || !bot->IsAlive() || bot->IsInCombat() || bot->GetGroup() ||
             bot->InBattleground() || bot->IsInFlight())
+        {
+            ++report.unavailable;
             continue;
+        }
 
         PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
         if (!botAI || botAI->GetMaster())
+        {
+            ++report.unavailable;
             continue;
+        }
 
-        uint32 const specialization = GetAscensionActiveSpecialization(bot);
-        bool const fits = specialization && !IsExcludedSpecialization(specialization) && GetCoaRole(bot) == role;
         // A class with no specialization of the role is never a candidate, whatever the bot
         // currently carries: the specialization is a persisted setting that is not revalidated
         // against the class, and when the Character Advancement DBC of the client is missing the
         // whole table is empty while every bot still reports the specialization it last saved.
         // Trusting `fits` alone let such a bot through to a rebuild with no specialization to pick.
+        //
+        // Remonte avant le calcul de `fits` : la reponse est la meme, et un bot ecarte ici
+        // n'a plus a payer une lecture de sa specialisation active.
         if (rolesOf(bot->getClass())[uint8(role)].empty())
+        {
+            ++report.wrongRole;
             continue;
+        }
+
+        // L'ecart est SIGNE, et compare a des bornes signees. Le chosenLevelGap d'avant ce
+        // lot etait en valeur absolue : une valeur absolue ne distingue pas -3 de +3, alors
+        // que le delta demande est asymetrique (« -1/+3 » n'est pas « +1/-3 »).
+        int32 const delta = int32(bot->GetLevel()) - masterLevel;
+        if (delta < options.levelDeltaLow || delta > options.levelDeltaHigh)
+        {
+            ++report.outsideDelta;
+            continue;
+        }
+
+        uint32 const specialization = GetAscensionActiveSpecialization(bot);
+        bool const fits = specialization && !IsExcludedSpecialization(specialization) && GetCoaRole(bot) == role;
 
         bool const sameMap = bot->GetMap() == master->GetMap();
-        float const distance = sameMap ? master->GetDistance(bot) : 0.0f;
-        // A bot close to the master's level needs no rebuild below, and keeps its own gear.
-        uint32 const levelGap = uint32(std::abs(int32(bot->GetLevel()) - int32(master->GetLevel())));
+        CoaCandidate candidate;
+        candidate.bot = bot;
+        candidate.sameMap = sameMap;
+        candidate.fits = fits;
+        candidate.levelGap = uint32(std::abs(delta));
+        candidate.distance = sameMap ? master->GetDistance(bot) : 0.0f;
+        // 17 lectures d'inventaire deja en memoire, aucune requete : GetEquipGearScore ne
+        // touche que l'equipement du Player, qui est charge puisque le bot est en monde.
+        // Non calcule sur le chemin par defaut (voir `needGear` plus haut).
+        candidate.gear = needGear ? botAI->GetEquipGearScore(bot) : 0;
+        candidates.push_back(candidate);
+    }
+
+    uint32 gearFloor = 0;
+    if (needGear && !candidates.empty())
+    {
+        std::vector<uint32> sortedGear;
+        sortedGear.reserve(candidates.size());
+        for (CoaCandidate const& candidate : candidates)
+            sortedGear.push_back(candidate.gear);
+        std::sort(sortedGear.begin(), sortedGear.end());
+
+        gearFloor = GearFloorForTier(sortedGear, options.tier);
+        report.gearKnown = true;
+        report.gearMin = sortedGear.front();
+        report.gearMedian = sortedGear[sortedGear.size() / 2];
+        report.gearMax = sortedGear.back();
+        report.gearFloor = gearFloor;
+    }
+
+    // A free random bot whose class can fill the role, preferably on the master's map (a
+    // dungeon instance has none, so any map will do), then one that already holds a
+    // specialization of the role, then the nearest. La cascade est celle d'avant ce lot,
+    // inchangee : le palier a deja fait le tri sur l'equipement, et melanger deux
+    // corrections dans un meme lot rend chacune impossible a imputer.
+    Player* chosen = nullptr;
+    bool chosenSameMap = false;
+    bool chosenFits = false;
+    uint32 chosenLevelGap = 0;
+    float chosenDistance = 0.0f;
+    uint32 chosenGear = 0;
+    for (CoaCandidate const& candidate : candidates)
+    {
+        if (candidate.gear < gearFloor)
+        {
+            ++report.belowTier;
+            continue;
+        }
+
+        ++report.eligible;
+
         bool better = !chosen;
-        if (!better && sameMap != chosenSameMap)
-            better = sameMap;
-        else if (!better && fits != chosenFits)
-            better = fits;
-        else if (!better && levelGap != chosenLevelGap)
-            better = levelGap < chosenLevelGap;
+        if (!better && candidate.sameMap != chosenSameMap)
+            better = candidate.sameMap;
+        else if (!better && candidate.fits != chosenFits)
+            better = candidate.fits;
+        else if (!better && candidate.levelGap != chosenLevelGap)
+            better = candidate.levelGap < chosenLevelGap;
         else if (!better)
-            better = sameMap && distance < chosenDistance;
+            better = candidate.sameMap && candidate.distance < chosenDistance;
 
         if (better)
         {
-            chosen = bot;
-            chosenSameMap = sameMap;
-            chosenFits = fits;
-            chosenLevelGap = levelGap;
-            chosenDistance = distance;
+            chosen = candidate.bot;
+            chosenSameMap = candidate.sameMap;
+            chosenFits = candidate.fits;
+            chosenLevelGap = candidate.levelGap;
+            chosenDistance = candidate.distance;
+            chosenGear = candidate.gear;
         }
     }
 
@@ -551,43 +705,93 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
         return false;
     }
 
-    // At the master's level, down as well as up. CoA scales every creature to the highest level
-    // player in its sight, so a level 42 tank beside a level 22 player turns every pull into a
-    // skull. The bot is rebuilt the way a random bot is - gear, talents and spells of that level -
-    // rather than merely relabelled, which would leave it in gear it could no longer wear.
-    if (chosen->GetLevel() != master->GetLevel())
+    report.picked = true;
+    // pickedGear est pose APRES le repli, plus bas : une refabrication refait l'equipement.
+    report.pickedName = chosen->GetName();
+
+    /*
+     * LE REPLI, ET RIEN D'AUTRE. Avant ce lot, tout bot dont le niveau differait de celui du
+     * maitre etait refabrique, en silence et sans retour possible. C'est desormais un repli
+     * qu'il faut demander : par defaut on prend le bot tel qu'il est, avec la vie qu'il a
+     * eue. Ce qui est refabrique le reste - on ne restaure rien, on ne defait rien.
+     *
+     * CE QUE LA REFABRICATION DETRUIT VRAIMENT, lu ligne a ligne dans
+     * PlayerbotFactory::Randomize (Bot/Factory/PlayerbotFactory.cpp:796-931) avec la
+     * configuration en service (EquipAndSpecPersistence = 1) :
+     *   - ClearInventory() (l. 827) n'est conditionnee par rien : LE BUTIN EN SAC BRULE,
+     *     sauf les objets de quete de IsInRandomQuestItemList ;
+     *   - ClearSkills() (l. 817) efface les metiers, ResetQuests() (l. 819) les quetes ;
+     *   - ClearAllItems() (l. 821-825) n'emporte l'equipement porte que si le bot DESCEND
+     *     de niveau ; un bot qui monte garde ses pieces, que InitEquipment remplacera
+     *     ensuite emplacement par emplacement sans comparer (incremental = false saute le
+     *     garde des 1,2x) ;
+     *   - ClearSpells() ne fait rien pour une classe CoA : elle sort des sa premiere ligne,
+     *     et le filtre ci-dessus n'admet que des classes CoA.
+     *
+     * POURQUOI LE MOTIF D'ORIGINE RESTE VALABLE, ET COMMENT LE DELTA LE REMPLACE. Le
+     * commentaire d'avant ce lot disait : CoA met les creatures a l'echelle du joueur le
+     * plus haut en vue, donc un tank de niveau 42 a cote d'un joueur de niveau 22 change
+     * chaque groupe de monstres en mur. Borner l'ecart de niveau (delta=) interdit
+     * exactement cet ecart, sans rien detruire : c'est le meme garde, par la selection
+     * plutot que par la reconstruction.
+     */
+    report.rebuilt = false;
+    if (options.rebuild && chosen->GetLevel() != master->GetLevel())
     {
         uint32 const level = master->GetLevel();
+        // A GARDER DANS CE `if`, et le motif est verifie : RandomPlayerbotMgr::IncreaseLevel
+        // (RandomPlayerbotMgr.cpp:1958-1968) relit GetValue(bot, "level") et ne refabrique le
+        // bot a sa montee suivante QUE si cette valeur differe du nouveau niveau. Ecrite
+        // alors qu'on n'a rien reconstruit, elle ferait sauter une refabrication longtemps
+        // apres, sans rien dans les journaux pour la relier a cette commande.
         sRandomPlayerbotMgr.SetValue(chosen, "level", level);
         PlayerbotFactory factory(chosen, level);
         factory.Randomize(false);
+        report.rebuilt = true;
         // The rebuild picks a specialization of its own: whether it still plays the role is
         // decided below, on what it holds now.
         uint32 const rebuilt = GetAscensionActiveSpecialization(chosen);
         chosenFits = rebuilt && !IsExcludedSpecialization(rebuilt) && GetCoaRole(chosen) == role;
+
+        // RELU APRES COUP, ET C'EST UN VRAI ECART : chosenGear est l'indice du bot TEL QU'IL
+        // ETAIT au premier passage. La refabrication vient de lui refaire tout son equipement
+        // (InitEquipment, emplacement par emplacement), donc cet indice-la ne decrit plus
+        // personne. Rendu tel quel, il annoncait « coa gear: Untel 3 » sur un bot qui porte
+        // desormais l'equipement de son nouveau niveau - un chiffre faux dans la ligne meme
+        // qui existe pour donner un chiffre vrai. On le relit sur le bot d'apres.
+        if (needGear)
+        {
+            if (PlayerbotAI* chosenAI = GET_PLAYERBOT_AI(chosen))
+                chosenGear = chosenAI->GetEquipGearScore(chosen);
+        }
     }
+
+    // Apres le repli, pour que l'indice rendu soit celui du bot qu'on livre vraiment.
+    report.pickedGear = chosenGear;
 
     if (!chosenFits)
     {
-        std::vector<uint32> const& candidates = rolesOf(chosen->getClass())[uint8(role)];
+        std::vector<uint32> const& candidateSpecs = rolesOf(chosen->getClass())[uint8(role)];
         // urand takes two uint32: on an empty vector, size() - 1 is SIZE_MAX, its ASSERT(max >= min)
         // passes and the index it returns is nowhere near the vector. The filter above already
         // rules this out; the guard stays because the cost of being wrong is a read far out of
         // bounds inside the world server, triggered by a GM command.
-        if (candidates.empty())
+        if (candidateSpecs.empty())
         {
             message = chosen->GetName() + " cannot play " + RoleName(role) + ".";
             return false;
         }
 
-        if (!SwitchAscensionSpecialization(chosen, candidates[urand(0, uint32(candidates.size() - 1))]))
+        if (!SwitchAscensionSpecialization(chosen, candidateSpecs[urand(0, uint32(candidateSpecs.size() - 1))]))
         {
             message = "Could not give " + chosen->GetName() + " a specialization.";
             return false;
         }
     }
 
-    // Points for every level it just skipped.
+    // Points for every level it just skipped. Sans refabrication, cela ne change ni le
+    // niveau ni l'equipement : cela ne fait que depenser les points d'avancement que le bot
+    // n'avait pas depenses, ce que la commande faisait deja pour un bot deja au bon niveau.
     ApplyCoaTalents(chosen);
 
     if (!group)
@@ -618,12 +822,24 @@ bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
         botAI->ResetStrategies();
     }
 
-    LOG_INFO("playerbots", "coa: {} recruited {} (class {}, level {}, specialization {}) as {}",
+    LOG_INFO("playerbots", "coa: {} recruited {} (class {}, level {}, specialization {}) as {}, gear {}, rebuilt {}",
              master->GetName(), chosen->GetName(), chosen->getClass(), chosen->GetLevel(),
-             GetAscensionActiveSpecialization(chosen), RoleName(role));
+             GetAscensionActiveSpecialization(chosen), RoleName(role), chosenGear, report.rebuilt ? 1 : 0);
 
+    // FORME EXACTE, A NE PAS TOUCHER : le panneau en service l'analyse avec une expression
+    // ancree par $ (phase8-panel/panel.py, _RE_GROUPE_RECRUE). Y ajouter le moindre suffixe
+    // - ne serait-ce que « , gear 12 » - ferait tomber la ligne dans les restes, et le
+    // panneau annoncerait « ligne servie court sans raison » sur un recrutement REUSSI.
+    // Tout ce qui est nouveau part sur des lignes nouvelles, cote appelant.
     message = chosen->GetName() + " joins as " + RoleName(role) + " (specialization " +
               std::to_string(GetAscensionActiveSpecialization(chosen)) + ", level " +
               std::to_string(chosen->GetLevel()) + ").";
     return true;
+}
+
+bool RecruitCoaBot(Player* master, CoaRole role, std::string& message)
+{
+    CoaRecruitOptions const options;
+    CoaRecruitReport report;
+    return RecruitCoaBot(master, role, options, report, message);
 }
