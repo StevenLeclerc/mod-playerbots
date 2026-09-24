@@ -143,6 +143,12 @@ public:
     std::string GetData(uint32 bot, std::string const& type);
     void SetValue(uint32 bot, std::string const& type, uint32 value, std::string const& data = "");
     void SetValue(Player* bot, std::string const& type, uint32 value, std::string const& data = "");
+    // CoA — remet un bot dans la population GEREE par ce gestionnaire, et le
+    // connecte s'il ne l'est pas. Voir CoaEnroler dans le .cpp : appeler
+    // AddPlayerBot tout seul ne suffit pas, et le manquer coute une campagne
+    // de mesure entiere.
+    bool CoaEnroler(ObjectGuid guid);
+
     bool IsSpecPvp(uint32 bot, uint8 cls);
     void Remove(Player* bot);
     ObjectGuid GetBattleMasterGUID(Player* bot, BattlegroundTypeId bgTypeId);

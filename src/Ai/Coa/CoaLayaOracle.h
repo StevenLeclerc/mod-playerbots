@@ -23,6 +23,15 @@
  *   req <guid> <seq>|<etat>|<opt>=<desc>;<opt>=<desc>;...|<noul>;<noul>
  *   ans <guid> <seq>|<opt>=<proba>;...|<proba>;<proba>
  *   err <guid> <seq>|<raison>
+ *
+ * DEUX CANAUX DANS UN SEUL PROTOCOLE. Un bot pose deux questions de nature
+ * differente : quelle ACTION jouer, et quel SORT lancer dans l'action d'attaque.
+ * Les reponses ne doivent pas s'ecraser l'une l'autre dans le cache.
+ *
+ * Le canal voyage dans le BIT DE POIDS FAIBLE du `seq`, qui nous appartient :
+ * seq = (compteur << 1) | canal. L'oracle le renvoie tel quel sans le lire, le
+ * format de fil ne change pas, et le controle de monotonie continue de valoir
+ * canal par canal puisque le compteur d'un canal avance de deux en deux.
  */
 
 #ifndef PLAYERBOTS_COALAYAORACLE_H
@@ -44,6 +53,13 @@ class PlayerbotAI;
 class CoaLayaOracle
 {
 public:
+    // Les deux questions qu'un bot pose, tenues separement dans le cache.
+    enum Canal : uint32
+    {
+        CANAL_ACTION = 0,   // quelle action jouer (multiplicateur, historique)
+        CANAL_SORT   = 1,   // quel sort lancer dans l'action d'attaque
+    };
+
     static CoaLayaOracle& Instance();
 
     // Ouvre le socket et lance le thread receveur. Idempotent, sans effet si
@@ -55,25 +71,43 @@ public:
 
     // Emis depuis le thread monde. Ne bloque jamais : le datagramme part ou il
     // est perdu, les deux conviennent.
-    void Demander(uint64 guid, std::string const& etat,
-                  std::vector<std::pair<std::string, float>> const& candidats);
+    // `candidats` : (libelle, poids de tri). `descriptions` peut etre vide, et
+    // le libelle sert alors aussi de description. `avecNoul` ajoute la question
+    // « le bot risque-t-il de mourir » : utile pour le canal action, inutile et
+    // deux fois plus lent pour le canal sort.
+    void Demander(uint64 guid, uint32 canal, std::string const& etat,
+                  std::vector<std::pair<std::string, float>> const& candidats,
+                  std::vector<std::string> const& descriptions = {},
+                  bool avecNoul = true);
 
-    // Rend la probabilite de cette action pour ce bot, ou -1.0f si aucune
-    // reponse fraiche n'est disponible. Ne touche que le cache.
-    float Probabilite(uint64 guid, std::string const& action) const;
+    // Rend la probabilite de ce libelle pour ce bot sur ce canal, ou -1.0f si
+    // aucune reponse fraiche n'est disponible. Ne touche que le cache.
+    //
+    // Le libelle est assaini ICI avec la meme regle qu'a l'emission : l'appelant
+    // passe le nom brut et n'a pas a connaitre le protocole.
+    float Probabilite(uint64 guid, uint32 canal, std::string const& libelle) const;
 
     // La plus forte probabilite de la derniere reponse retenue, ou -1.0f.
-    // Sert a situer une action par rapport au favori du modele.
-    float MeilleureProbabilite(uint64 guid) const;
+    float MeilleureProbabilite(uint64 guid, uint32 canal) const;
 
     // Le veto est prononce par le multiplicateur ; l'oracle le compte, pour
     // que le releve dise combien de fois le modele a change le cours des choses.
     void CompterVeto() { _vetos.fetch_add(1, std::memory_order_relaxed); }
 
+    // Une consultation qu'on renonce a faire, faute qu'elle puisse servir.
+    void CompterMuet() { _muets.fetch_add(1, std::memory_order_relaxed); }
+
+    // Un tour ou le modele a reellement ordonne les sorts, plutot que le
+    // tourniquet. C'est LE chiffre qui dit si le canal sort sert a quelque chose.
+    void CompterChoix() { _choix.fetch_add(1, std::memory_order_relaxed); }
+
     void Oublier(uint64 guid);
 
+    // Le nettoyage que subit tout libelle avant de partir sur le fil.
+    static std::string LibelleSur(std::string const& brut, size_t maxLongueur = 48);
+
     // Delai minimal entre deux demandes pour un meme bot, en ms.
-    bool PeutRedemander(uint64 guid) const;
+    bool PeutRedemander(uint64 guid, uint32 canal) const;
 
     std::string Compteurs() const;
 
@@ -95,6 +129,9 @@ private:
     void Recevoir();               // corps du thread receveur
     void Integrer(char const* datagramme, size_t taille);
 
+    // Cle du cache : le guid et le canal, puisqu'un bot pose deux questions.
+    static uint64 Cle(uint64 guid, uint32 canal) { return (guid << 1) | (canal & 1u); }
+
     int _sock = -1;
     std::thread _receveur;
     std::atomic<bool> _actif{false};
@@ -111,6 +148,8 @@ private:
     std::atomic<uint64> _erreurs{0};      // datagramme "err" renvoye par l'oracle
     std::atomic<uint64> _echecsEnvoi{0};
     std::atomic<uint64> _vetos{0};
+    std::atomic<uint64> _muets{0};
+    std::atomic<uint64> _choix{0};
     // mutable : Probabilite() est const — elle ne touche que le cache — mais
     // doit pouvoir compter ce qu'elle sert. fetch_add n'est pas const.
     mutable std::atomic<uint64> _lecturesServies{0};

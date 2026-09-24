@@ -550,6 +550,9 @@ void AddSC_RubySanctumBotScripts();
 void AddSC_randombot_level_mgr();
 void AddSC_mercenary_rewards();
 
+// Ai/Coa/CoaDuelCommandScript.cpp : `.coa plein <nom>`, pour le banc de duels.
+void AddSC_coa_duel_commandscript();
+
 void AddPlayerbotsScripts()
 {
     new PlayerbotsBattlefieldScript();
@@ -571,4 +574,5 @@ void AddPlayerbotsScripts()
     AddSC_RubySanctumBotScripts();
     AddSC_randombot_level_mgr();
     AddSC_mercenary_rewards();
+    AddSC_coa_duel_commandscript();
 }

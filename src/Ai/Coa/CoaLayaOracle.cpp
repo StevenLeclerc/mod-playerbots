@@ -5,6 +5,8 @@
 
 #include "CoaLayaOracle.h"
 
+#include "CoaLayaEtat.h"
+
 #include "Action.h"
 #include "AiObjectContext.h"
 #include "Log.h"
@@ -30,33 +32,44 @@ namespace
 {
     constexpr size_t TAILLE_DATAGRAMME = 4096;
 
-    // L'oracle refuse au-dela de 12 options ; on s'arrete plus tot pour borner
-    // le datagramme et le cout d'inference, qui croit avec le nombre de
-    // questions posees.
-    constexpr size_t MAX_OPTIONS = 8;
+    // L'oracle refuse au-dela de 12 options. On s'arretait a 8 pour borner le
+    // datagramme et le cout d'inference.
+    //
+    // RELEVE DU 2026-09-23, QUI A FAIT LEVER LA BORNE. Une fois les duellistes
+    // montes au niveau 60, la capture du fil montre 8 options sur TOUTES les
+    // requetes : la borne etait atteinte a chaque tour. Or le canal sort ne
+    // classe pas ses candidats — il leur donne tous le poids 0,0 — donc la
+    // troncature gardait les huit PREMIERS du kit, toujours les memes, et
+    // cachait le reste au modele en permanence. Mesurer l'effet de l'oracle
+    // sur une rotation dont un tiers ne lui est jamais montre n'a pas de sens.
+    //
+    // A 12, tout le kit d'un niveau 60 passe. C'est la limite de l'oracle
+    // lui-meme, pas une valeur choisie.
+    constexpr size_t MAX_OPTIONS = 12;
 
-    // Le protocole reserve ces trois caracteres. Un nom d'action qui en
-    // contiendrait decalerait le decoupage cote oracle : on les neutralise
-    // plutot que d'inventer un echappement.
-    std::string Assainir(std::string const& texte, size_t maxLongueur)
+}
+
+// Le protocole reserve ces trois caracteres. Un nom qui en contiendrait
+// decalerait le decoupage cote oracle : on les neutralise plutot que d'inventer
+// un echappement. Publique parce que la lecture du cache doit appliquer
+// exactement la meme regle que l'emission, sans quoi rien ne s'apparie.
+std::string CoaLayaOracle::LibelleSur(std::string const& brut, size_t maxLongueur)
+{
+    std::string sortie;
+    sortie.reserve(std::min(brut.size(), maxLongueur));
+    for (char c : brut)
     {
-        std::string sortie;
-        sortie.reserve(std::min(texte.size(), maxLongueur));
-        for (char c : texte)
-        {
-            if (sortie.size() >= maxLongueur)
-                break;
-            unsigned char u = static_cast<unsigned char>(c);
-            if (c == '|' || c == ';' || c == '=' || u < 0x20 || u > 0x7E)
-                sortie.push_back(' ');
-            else
-                sortie.push_back(c);
-        }
-        // Un libelle vide ferait rejeter toute la requete par l'oracle.
-        if (sortie.find_first_not_of(' ') == std::string::npos)
-            return "action";
-        return sortie;
+        if (sortie.size() >= maxLongueur)
+            break;
+        unsigned char u = static_cast<unsigned char>(c);
+        if (c == '|' || c == ';' || c == '=' || u < 0x20 || u > 0x7E)
+            sortie.push_back(' ');
+        else
+            sortie.push_back(c);
     }
+    if (sortie.find_first_not_of(' ') == std::string::npos)
+        return "option";
+    return sortie;
 }
 
 CoaLayaOracle& CoaLayaOracle::Instance()
@@ -199,7 +212,8 @@ void CoaLayaOracle::Integrer(char const* datagramme, size_t taille)
         _illisibles.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    uint64 const guid = static_cast<uint64>(lu);
+    // Le canal voyage dans le bit de poids faible du seq (voir l'en-tete).
+    uint64 const cle = Cle(static_cast<uint64>(lu), seq & 1u);
 
     size_t const finChoix = texte.find('|', finEntete + 1);
     std::string const champ = texte.substr(finEntete + 1,
@@ -238,7 +252,7 @@ void CoaLayaOracle::Integrer(char const* datagramme, size_t taille)
 
     uint32 const maintenant = getMSTime();
     std::lock_guard<std::mutex> tenu(_verrou);
-    auto trouve = _cache.find(guid);
+    auto trouve = _cache.find(cle);
     if (trouve == _cache.end())
     {
         // Une reponse pour un bot dont on n'a rien demande : l'oracle parle a
@@ -271,28 +285,33 @@ void CoaLayaOracle::Integrer(char const* datagramme, size_t taille)
     entree.probabilites = std::move(probabilites);
 }
 
-void CoaLayaOracle::Demander(uint64 guid, std::string const& etat,
-                             std::vector<std::pair<std::string, float>> const& candidats)
+void CoaLayaOracle::Demander(uint64 guid, uint32 canal, std::string const& etat,
+                             std::vector<std::pair<std::string, float>> const& candidats,
+                             std::vector<std::string> const& descriptions,
+                             bool avecNoul)
 {
     if (!_actif.load(std::memory_order_acquire) || candidats.size() < 2)
         return;
 
+    uint64 const cle = Cle(guid, canal);
     uint32 seq = 0;
     {
         std::lock_guard<std::mutex> tenu(_verrou);
-        Entree& entree = _cache[guid];
-        seq = ++entree.seqEmis;
+        Entree& entree = _cache[cle];
+        // Le compteur avance de deux en deux pour laisser le bit du canal
+        // intact ; la monotonie du seq reste donc vraie canal par canal.
+        seq = (++entree.seqEmis << 1) | (canal & 1u);
         entree.msEmission = getMSTime();
 
         // Un bot qui se deconnecte laisse son entree derriere lui, et les bots
         // tournent en permanence sur ce serveur. Sans ce balayage le cache ne
         // redescend jamais. Une fois tous les 512 envois suffit : c'est de
         // l'entretien, pas une urgence.
-        if ((seq & 0x1FF) == 0)
+        if ((entree.seqEmis & 0x1FF) == 0)
         {
             for (auto it = _cache.begin(); it != _cache.end();)
             {
-                if (it->first != guid && GetMSTimeDiffToNow(it->second.msEmission) > 60 * IN_MILLISECONDS)
+                if (it->first != cle && GetMSTimeDiffToNow(it->second.msEmission) > 60 * IN_MILLISECONDS)
                     it = _cache.erase(it);
                 else
                     ++it;
@@ -307,7 +326,12 @@ void CoaLayaOracle::Demander(uint64 guid, std::string const& etat,
     message += ' ';
     message += std::to_string(seq);
     message += '|';
-    message += etat;
+    // L'etat passe par le meme assainisseur que les libelles. Il ne contient
+    // en principe aucun des trois caracteres reserves, mais il est desormais
+    // construit a partir de noms de specialisation et de valeurs de contexte
+    // (CoaLayaEtat.cpp) : une seule de ces sources qui changerait decalerait
+    // tout le decoupage cote oracle, sans erreur visible ici.
+    message += LibelleSur(etat, 800);
     message += '|';
 
     // Deux noms differents peuvent devenir identiques une fois assainis et
@@ -315,11 +339,13 @@ void CoaLayaOracle::Demander(uint64 guid, std::string const& etat,
     // double. On ecarte le doublon ici plutot que de perdre la decision.
     std::vector<std::string> nomsPoses;
     size_t posees = 0;
+    size_t index = 0;
     for (auto const& candidat : candidats)
     {
+        size_t const i = index++;
         if (posees >= MAX_OPTIONS)
             break;
-        std::string const nom = Assainir(candidat.first, 48);
+        std::string const nom = LibelleSur(candidat.first);
         if (std::find(nomsPoses.begin(), nomsPoses.end(), nom) != nomsPoses.end())
             continue;
         nomsPoses.push_back(nom);
@@ -332,16 +358,26 @@ void CoaLayaOracle::Demander(uint64 guid, std::string const& etat,
         // deja attribuee. Inventer une semantique par correspondance de nom
         // serait une regle de plus a maintenir, et fausse le jour ou une action
         // est renommee.
-        message += nom;
-        message += ". Priorite moteur ";
-        message += std::to_string(static_cast<int>(candidat.second));
-        message += '.';
+        if (i < descriptions.size() && !descriptions[i].empty())
+        {
+            message += LibelleSur(descriptions[i], 200);
+        }
+        else
+        {
+            message += nom;
+            message += ". Priorite moteur ";
+            message += std::to_string(static_cast<int>(candidat.second));
+            message += '.';
+        }
         ++posees;
     }
     if (posees < 2)
         return;
 
-    message += "|Le bot risque-t-il de mourir dans les prochaines secondes ?";
+    // La question annexe double le cout d'inference (27 ms contre 14 mesures
+    // sur M1). On ne la pose que quand elle sert.
+    if (avecNoul)
+        message += "|Le bot risque-t-il de mourir dans les prochaines secondes ?";
 
     if (message.size() > TAILLE_DATAGRAMME)
         message.resize(TAILLE_DATAGRAMME);
@@ -356,13 +392,16 @@ void CoaLayaOracle::Demander(uint64 guid, std::string const& etat,
         _emises.fetch_add(1, std::memory_order_relaxed);
 }
 
-float CoaLayaOracle::Probabilite(uint64 guid, std::string const& action) const
+float CoaLayaOracle::Probabilite(uint64 guid, uint32 canal, std::string const& libelle) const
 {
     if (!_actif.load(std::memory_order_acquire))
         return -1.0f;
 
+    // Meme nettoyage qu'a l'emission, sinon rien ne s'apparie.
+    std::string const action = LibelleSur(libelle);
+
     std::lock_guard<std::mutex> tenu(_verrou);
-    auto trouve = _cache.find(guid);
+    auto trouve = _cache.find(Cle(guid, canal));
     if (trouve == _cache.end() || trouve->second.probabilites.empty())
     {
         _lecturesVides.fetch_add(1, std::memory_order_relaxed);
@@ -385,10 +424,10 @@ float CoaLayaOracle::Probabilite(uint64 guid, std::string const& action) const
     return -1.0f;
 }
 
-float CoaLayaOracle::MeilleureProbabilite(uint64 guid) const
+float CoaLayaOracle::MeilleureProbabilite(uint64 guid, uint32 canal) const
 {
     std::lock_guard<std::mutex> tenu(_verrou);
-    auto trouve = _cache.find(guid);
+    auto trouve = _cache.find(Cle(guid, canal));
     if (trouve == _cache.end() || trouve->second.probabilites.empty())
         return -1.0f;
     if (GetMSTimeDiffToNow(trouve->second.msReception) > sPlayerbotAIConfig.layaMaxAgeMs)
@@ -399,10 +438,10 @@ float CoaLayaOracle::MeilleureProbabilite(uint64 guid) const
     return meilleure;
 }
 
-bool CoaLayaOracle::PeutRedemander(uint64 guid) const
+bool CoaLayaOracle::PeutRedemander(uint64 guid, uint32 canal) const
 {
     std::lock_guard<std::mutex> tenu(_verrou);
-    auto trouve = _cache.find(guid);
+    auto trouve = _cache.find(Cle(guid, canal));
     if (trouve == _cache.end())
         return true;
     return GetMSTimeDiffToNow(trouve->second.msEmission) >= sPlayerbotAIConfig.layaPeriodMs;
@@ -411,7 +450,8 @@ bool CoaLayaOracle::PeutRedemander(uint64 guid) const
 void CoaLayaOracle::Oublier(uint64 guid)
 {
     std::lock_guard<std::mutex> tenu(_verrou);
-    _cache.erase(guid);
+    for (uint32 canal = 0; canal <= 1; ++canal)
+        _cache.erase(Cle(guid, canal));
 }
 
 std::string CoaLayaOracle::Compteurs() const
@@ -431,6 +471,8 @@ std::string CoaLayaOracle::Compteurs() const
     sortie += " refus=" + std::to_string(_erreurs.load(std::memory_order_relaxed));
     sortie += " echecs_envoi=" + std::to_string(_echecsEnvoi.load(std::memory_order_relaxed));
     sortie += " vetos=" + std::to_string(_vetos.load(std::memory_order_relaxed));
+    sortie += " muets=" + std::to_string(_muets.load(std::memory_order_relaxed));
+    sortie += " choix_sorts=" + std::to_string(_choix.load(std::memory_order_relaxed));
     sortie += " lectures_servies=" + std::to_string(_lecturesServies.load(std::memory_order_relaxed));
     sortie += " lectures_vides=" + std::to_string(_lecturesVides.load(std::memory_order_relaxed));
     sortie += " bots_suivis=" + std::to_string(suivis);
@@ -443,35 +485,12 @@ std::string CoaLayaOracle::Compteurs() const
 
 std::string CoaLayaMultiplier::DecrireEtat()
 {
-    // Que des faits lisibles dans l'etat du bot. Rien d'interprete : c'est au
-    // modele d'arbitrer, pas a nous de lui souffler la reponse.
-    int const vie = static_cast<int>(bot->GetHealthPct());
-    int const ressource = static_cast<int>(bot->GetPowerPct(POWER_MANA));
-
-    int cibleVie = -1;
-    int distance = -1;
-    // P-035 : AI_VALUE sur un nom inconnu dereference un nullptr. On passe par
-    // GetValue et on garde le nullptr, plutot que de faire confiance au nom.
-    if (Value<Unit*>* valeur = context->GetValue<Unit*>("current target"))
-    {
-        if (Unit* cible = valeur->Get())
-        {
-            cibleVie = static_cast<int>(cible->GetHealthPct());
-            distance = static_cast<int>(bot->GetExactDist2d(cible));
-        }
-    }
-
-    size_t assaillants = 0;
-    if (Value<GuidVector>* valeur = context->GetValue<GuidVector>("attackers"))
-        assaillants = valeur->Get().size();
-
-    char tampon[320];
-    snprintf(tampon, sizeof(tampon),
-             "Vie du bot: %d%%. Ressource: %d%%. Niveau %u. "
-             "Cible a %d%% de vie, a %d metres. %zu assaillants. En combat: %s.",
-             vie, ressource, static_cast<unsigned>(bot->GetLevel()), cibleVie, distance, assaillants,
-             bot->IsInCombat() ? "oui" : "non");
-    return std::string(tampon);
+    // Un seul constructeur d'etat pour les deux canaux : voir CoaLayaEtat.h.
+    // La version qui vivait ici decrivait six faits ; la campagne de duels a
+    // montre que c'etait trop peu pour que le modele puisse arbitrer quoi que
+    // ce soit. Elle est remplacee, pas doublee : deux descriptions divergentes
+    // etaient deja le defaut qu'on vient de payer.
+    return CoaDecrireEtatLaya(botAI, bot, nullptr);
 }
 
 // Appele une fois par tour par Engine::DoNextAction, avec la file COMPLETE des
@@ -483,8 +502,30 @@ void CoaLayaMultiplier::ObserveQueue(std::list<ActionBasket*> const& candidats)
     if (!oracle.Actif() || candidats.size() < 2)
         return;
 
+    // NE PAS CONSULTER QUAND RIEN NE PEUT PARTIR.
+    //
+    // PlayerbotAI::CanCastSpell (PlayerbotAI.cpp:3526) refuse TOUT sort des que
+    // le bot porte UNIT_STATE_LOST_CONTROL — etourdi, confus, en fuite, en saut
+    // ou en charge. Demander au modele d'arbitrer pendant ces fenetres, c'est
+    // lui faire choisir entre des actions dont aucune ne partira : la reponse
+    // encombre le cache, elle sera lue au tour suivant, et elle dilue le signal
+    // sans jamais rien changer.
+    //
+    // Ce n'est pas une micro-optimisation. Mesure de la session voisine sur
+    // l'echantillon complet des refus du coeur : SPELL_FAILED_STUNNED pese
+    // 41 549 refus, de loin le premier poste. Une part notable du temps de
+    // combat se passe donc sous controle.
+    //
+    // Le bot mort est ecarte pour la meme raison, et par prudence : le moteur
+    // de combat ne devrait pas tourner, mais rien ne le garantit ici.
+    if (!bot->IsAlive() || bot->HasUnitState(UNIT_STATE_LOST_CONTROL))
+    {
+        oracle.CompterMuet();
+        return;
+    }
+
     uint64 const guid = bot->GetGUID().GetRawValue();
-    if (!oracle.PeutRedemander(guid))
+    if (!oracle.PeutRedemander(guid, CoaLayaOracle::CANAL_ACTION))
         return;
 
     std::vector<std::pair<std::string, float>> lot;
@@ -507,7 +548,7 @@ void CoaLayaMultiplier::ObserveQueue(std::list<ActionBasket*> const& candidats)
     std::sort(lot.begin(), lot.end(),
               [](auto const& a, auto const& b) { return a.second > b.second; });
 
-    oracle.Demander(guid, DecrireEtat(), lot);
+    oracle.Demander(guid, CoaLayaOracle::CANAL_ACTION, DecrireEtat(), lot);
 }
 
 float CoaLayaMultiplier::GetValue(Action* action)
@@ -527,10 +568,10 @@ float CoaLayaMultiplier::GetValue(Action* action)
 
     // Lire le cache, et rien que le cache. L'emission a lieu dans ObserveQueue.
     uint64 const guid = bot->GetGUID().GetRawValue();
-    float const proba = oracle.Probabilite(guid, action->getName());
+    float const proba = oracle.Probabilite(guid, CoaLayaOracle::CANAL_ACTION, action->getName());
     if (proba < 0.0f)
         return 1.0f;
-    float const meilleure = oracle.MeilleureProbabilite(guid);
+    float const meilleure = oracle.MeilleureProbabilite(guid, CoaLayaOracle::CANAL_ACTION);
     if (meilleure <= 0.0f)
         return 1.0f;
 

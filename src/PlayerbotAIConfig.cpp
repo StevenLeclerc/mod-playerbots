@@ -711,6 +711,17 @@ bool PlayerbotAIConfig::Initialize()
     layaVetoMax = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.VetoMax", 2);
     if (layaVetoRatio > 100)
         layaVetoRatio = 100;
+
+    // Les deux points d'accroche, separes parce qu'ils ne valent pas la meme
+    // chose. Le veto a ete mesure deux jours durant sans effet decelable
+    // (P-085, P-089) : eteint par defaut. Le choix du sort le remplace.
+    layaVeto = sConfigMgr->GetOption<bool>("AiPlayerbot.Laya.Veto", false);
+    layaSorts = sConfigMgr->GetOption<bool>("AiPlayerbot.Laya.Sorts", true);
+    // Defaut 100 : la greffe du tirage au sort est SANS EFFET tant qu'on ne
+    // l'arme pas. Au-dela de 100 le pourcentage n'a pas de sens, on le ramene.
+    layaTirageAuSort = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.TirageAuSort", 100);
+    if (layaTirageAuSort > 100)
+        layaTirageAuSort = 100;
     if (wildPvpMercenaryPercent > 100)
         wildPvpMercenaryPercent = 100;
 

@@ -3053,7 +3053,22 @@ std::vector<EquipmentSlots> const* RandomItemMgr::GetViableSlots(InventoryType i
 
 uint32 RandomItemMgr::NormalizeLevel(uint32 level) const
 {
-    uint32 const levelCap = std::min(sPlayerbotAIConfig.randomBotMaxLevel,
-                                     static_cast<uint32>(DEFAULT_MAX_LEVEL));
-    return std::min(level, levelCap);
+    // CoA, 2026-09-23 — P-112. Cette fonction bornait la recherche d'objets par
+    // `AiPlayerbot.RandomBotMaxLevel`, qui vaut **1** dans la conf de ce serveur.
+    // Ce reglage est la pour neutraliser la montee de niveau automatique
+    // (`IncreaseLevel` plafonne alors a 1 et ne fait rien) ; il n'a rien a dire
+    // sur le CHOIX DES OBJETS, et il le bridait pourtant.
+    //
+    // Consequence mesuree sur les 494 bots en ligne : niveau d'objet moyen de
+    // l'equipement porte 5,9 en tranche 1-9, 11,6 en 10-19, 13,0 en 20-29,
+    // 10,3 en 30-39. Un bot monte a 60 et re-equipe ressortait avec dix-sept
+    // pieces de niveau requis 1, et deux bots de niveau 60 finissaient un duel
+    // de 110 secondes tous les deux a 100 % de vie.
+    //
+    // Le cache `equipCacheNew` contient bien tous les niveaux : il est rempli
+    // par `proto->RequiredLevel`. Seule la LECTURE etait bridee.
+    //
+    // On borne donc par le niveau maximum du royaume, qui est la seule limite
+    // qui ait un sens pour un objet.
+    return std::min(level, sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL));
 }

@@ -4,8 +4,10 @@
  * or (at your option) any later version.
  */
 
+#include "CoaLayaEtat.h"
 #include "CoaLayaOracle.h"
 #include "CoaAiObjectContext.h"
+#include "CoaRegistreCombat.h"
 
 #include "Action.h"
 #include "CoaSpecialization.h"
@@ -1008,7 +1010,15 @@ void ReportUsage(time_t now)
     // choses. A zero, on a monte un pont reseau pour rien, et il faut pouvoir
     // le constater plutot que de le supposer.
     if (sPlayerbotAIConfig.layaEnabled)
+    {
         LOG_INFO("playerbots.coa", "coa laya: {}", CoaLayaOracle::Instance().Compteurs());
+        // Le tirage par rencontre se verifie ici, et nulle part ailleurs : la
+        // part pilotee des rencontres OUVERTES doit valoir le seuil de la conf.
+        // Si elle le vaut et que la part pilotee des rencontres JOURNALISEES ne
+        // le vaut pas, la selection est en aval, et ces compteurs disent
+        // laquelle. Voir l'en-tete de CoaRegistreCombat.h.
+        LOG_INFO("playerbots.coa", "coa registre: {}", CoaRegistreCombat::Instance().Compteurs());
+    }
 
     std::lock_guard<std::mutex> guard(UsageSpellsLock);
     // Attacks and heals list more spells: they show which rank of each spell the bots cast.
@@ -1170,6 +1180,178 @@ Unit* FindCaster(PlayerbotAI* botAI, Player* bot)
     return nullptr;
 }
 
+/*
+ * L'ORACLE CHOISIT LE SORT — et le tourniquet reste le repli exact.
+ *
+ * Ce que remplace cette fonction : `std::rotate`, qui fait tourner la liste des
+ * sorts utilisables pour repartir apres le dernier qui a marche. Ce tourniquet
+ * n'est pas une decision, c'est un tour de role. Il garantit que le bot use
+ * tout son arsenal, rien de plus.
+ *
+ * Pourquoi ce point d'accroche plutot que le multiplicateur. Deux journees de
+ * mesure sur le veto n'ont rien donne (P-085, P-089) : un multiplicateur est
+ * appele APRES que le moteur a choisi, il ne peut que refuser, et refuser dans
+ * une file deja triee n'ouvre aucun choix. Ici le choix existe vraiment — cinq
+ * a huit sorts lancables, dans un ordre que personne n'a jamais optimise — et
+ * les libelles sont des noms de sorts, que le modele lit.
+ *
+ * POURQUOI C'EST SANS RISQUE. On ne fait que REORDONNER un vecteur que
+ * `CastFirst` parcourt de toute facon en entier : il saute ce qui est en
+ * recharge, au ban ou impossible, et lance le premier qui passe. Le modele
+ * decide donc par quoi on essaie, jamais ce qui est permis. S'il se trompe, le
+ * cout est d'essayer un sort avant un autre.
+ *
+ * LE REPLI. Pas de reponse fraiche, oracle injoignable, bot non elite, option
+ * eteinte, rencontre tiree hors du bras pilote : la fonction rend `false` et
+ * l'appelant joue le tourniquet d'origine, bit pour bit. La demande part pour
+ * le tour SUIVANT — attendre la reponse ici bloquerait le thread monde.
+ *
+ * LE TIRAGE AU SORT PAR RENCONTRE. Le registre decide a l'ouverture de chaque
+ * combat si l'oracle a le droit de le piloter (voir Ai/Coa/CoaRegistreCombat.h
+ * pour le biais que cela supprime). Sur le bras non pilote on sort ICI, avant
+ * meme d'emettre la demande : charger l'oracle pour une reponse qu'on
+ * n'utilisera pas fausserait sa cadence et son cout sans rien apporter.
+ */
+bool OrdonnerParLaya(PlayerbotAI* botAI, Player* bot, Unit* target, std::vector<Usable>& usable)
+{
+    if (!sPlayerbotAIConfig.layaSorts || usable.size() < 2)
+        return false;
+    uint64 const guid = bot->GetGUID().GetRawValue();
+    if (!sPlayerbotAIConfig.IsLayaElite(guid))
+        return false;
+
+    // A 100 — le defaut — on n'interroge PAS le registre : ni verrou pris, ni
+    // comportement change. C'est ce qui garantit que la greffe est inerte tant
+    // qu'on ne l'arme pas, y compris pour les sorts lances avant que le coeur
+    // n'ait marque le bot en combat, pour lesquels aucune rencontre n'est
+    // encore ouverte.
+    //
+    // En dessous, une rencontre non ouverte vaut « non pilotee » : le
+    // tourniquet reprend la main. Le cas se produit pour les incantations
+    // emises avant l'entree en combat ; il dilue le bras pilote sans le
+    // melanger au temoin, donc il sous-estime l'effet au lieu de le fabriquer.
+    if (sPlayerbotAIConfig.layaTirageAuSort < 100 &&
+        !CoaRegistreCombat::Instance().EstPilotee(guid))
+        return false;
+
+    CoaLayaOracle& oracle = CoaLayaOracle::Instance();
+    if (!oracle.Actif())
+        return false;
+
+    // Ne pas consulter quand rien ne peut partir : CanCastSpell refuse tout
+    // sort sous UNIT_STATE_LOST_CONTROL (etourdi, confus, en fuite, en saut, en
+    // charge). Meme raison que dans le multiplicateur.
+    if (!bot->IsAlive() || bot->HasUnitState(UNIT_STATE_LOST_CONTROL))
+    {
+        oracle.CompterMuet();
+        return false;
+    }
+
+    // 1. Demander, pour le tour suivant. La cadence est celle de la conf.
+    if (oracle.PeutRedemander(guid, CoaLayaOracle::CANAL_SORT))
+    {
+        std::vector<std::pair<std::string, float>> lot;
+        std::vector<std::string> descriptions;
+        lot.reserve(usable.size());
+        descriptions.reserve(usable.size());
+        for (Usable const& sort : usable)
+        {
+            if (!sort.info || !sort.info->SpellName[0])
+                continue;
+            std::string const nom = sort.info->SpellName[0];
+            // La description ne pretend rien savoir de plus que le coeur : le
+            // nom du sort, que le modele lit, et la nature que le catalogue CoA
+            // lui a deja reconnue. Inventer un effet serait une regle de plus a
+            // maintenir, et fausse le jour ou un sort est retouche.
+            std::string nature;
+            if (sort.kind & KIND_AOE)       nature += " Degats de zone.";
+            if (sort.kind & KIND_DAMAGE)    nature += " Degats.";
+            if (sort.kind & KIND_INTERRUPT) nature += " Interrompt l'incantation.";
+            if (sort.kind & KIND_CONTROL)   nature += " Neutralise la cible.";
+            if (sort.kind & KIND_TAUNT)     nature += " Force la cible a m'attaquer.";
+            if (sort.kind & KIND_DEFENSIVE) nature += " Reduit les degats subis.";
+            if (nature.empty())             nature = " Attaque.";
+
+            // Les trois faits que le moteur connait deja sur chaque sort et
+            // qu'il ne disait pas : incantation, portee, recharge. Ils ne sont
+            // pas decoratifs, ce sont les conditions d'emploi elles-memes — un
+            // sort a incantation ne part pas d'un bot en mouvement, et l'etat
+            // dit maintenant au modele s'il se deplace et a quelle distance est
+            // sa cible. Sans ces trois-la, cette moitie de l'etat ne sert a rien.
+            char faits[128];
+            uint32 const msIncantation = sort.info->CalcCastTime(bot);
+            if (msIncantation >= 100)
+                snprintf(faits, sizeof(faits), " Incantation %.1f s.", msIncantation / 1000.0f);
+            else
+                snprintf(faits, sizeof(faits), " Instantane.");
+            nature += faits;
+
+            float const portee = sort.info->GetMaxRange(false, bot);
+            if (portee >= 6.0f)
+                snprintf(faits, sizeof(faits), " Portee %d m.", int(portee));
+            else
+                snprintf(faits, sizeof(faits), " Au contact.");
+            nature += faits;
+
+            uint32 const msRecharge = std::max(sort.info->RecoveryTime, sort.info->CategoryRecoveryTime);
+            if (msRecharge >= 1500)
+            {
+                snprintf(faits, sizeof(faits), " Recharge %u s.", msRecharge / 1000u);
+                nature += faits;
+            }
+
+            lot.emplace_back(nom, 0.0f);
+            descriptions.push_back(nom + "." + nature);
+        }
+        if (lot.size() >= 2)
+        {
+            // Meme description que le canal action, construite au meme endroit
+            // (CoaLayaEtat.h). Celle qui vivait ici ecrivait « Ressource: 0% »
+            // a toute classe sans mana et « Cible a 0% de vie, a 0 metres »
+            // quand il n'y avait pas de cible : deux faits faux, servis au
+            // modele a chaque tour, sur le canal meme qu'on cherchait a mesurer.
+            std::string const etat = CoaDecrireEtatLaya(botAI, bot, target);
+            // Pas de question annexe sur ce canal : elle doublerait le cout
+            // d'inference (27 ms contre 14 mesures sur M1) sans rien apporter
+            // au choix du sort.
+            oracle.Demander(guid, CoaLayaOracle::CANAL_SORT, etat, lot, descriptions, false);
+        }
+    }
+
+    // 2. Lire le cache, et rien que le cache.
+    float const meilleure = oracle.MeilleureProbabilite(guid, CoaLayaOracle::CANAL_SORT);
+    if (meilleure <= 0.0f)
+        return false;
+
+    // RELEVER LES PROBABILITES UNE FOIS, PUIS TRIER SUR CE RELEVE.
+    //
+    // Les interroger depuis le comparateur serait un defaut grave et pas une
+    // maladresse : le thread receveur ecrit le cache a tout moment, donc deux
+    // comparaisons du meme couple pourraient rendre des reponses differentes.
+    // Un comparateur incoherent, dans std::sort, n'est pas une approximation :
+    // c'est un comportement indefini, qui deborde du conteneur. Le releve
+    // prealable supprime la question, et economise au passage une prise de
+    // verrou par comparaison.
+    std::vector<std::pair<float, Usable>> classees;
+    classees.reserve(usable.size());
+    for (Usable const& sort : usable)
+    {
+        float const p = sort.info && sort.info->SpellName[0]
+            ? oracle.Probabilite(guid, CoaLayaOracle::CANAL_SORT, sort.info->SpellName[0])
+            : -1.0f;
+        // Un sort absent de la reponse garde -1 : il part en fin de liste sans
+        // etre retire. CastFirst pourra toujours l'atteindre si tout le reste
+        // echoue, ce qui garde l'arsenal complet accessible.
+        classees.emplace_back(p, sort);
+    }
+    std::stable_sort(classees.begin(), classees.end(),
+        [](auto const& a, auto const& b) { return a.first > b.first; });
+    for (size_t i = 0; i < classees.size(); ++i)
+        usable[i] = classees[i].second;
+    oracle.CompterChoix();
+    return true;
+}
+
 class CoaAttackAction : public Action
 {
 public:
@@ -1208,10 +1390,16 @@ public:
         if (usable.empty())
             return RecordUsage(USAGE_ATTACK, nullptr);
 
-        // Rotate through the abilities, starting after the last one that went off, so a
-        // bot uses its whole kit instead of spamming the first ability that works.
-        size_t const start = next % usable.size();
-        std::rotate(usable.begin(), usable.begin() + start, usable.end());
+        // L'oracle ordonne la liste s'il a une reponse fraiche ; sinon on joue
+        // le tourniquet d'origine, inchange. Voir OrdonnerParLaya.
+        size_t start = 0;
+        if (!OrdonnerParLaya(botAI, bot, target, usable))
+        {
+            // Rotate through the abilities, starting after the last one that went off, so a
+            // bot uses its whole kit instead of spamming the first ability that works.
+            start = next % usable.size();
+            std::rotate(usable.begin(), usable.begin() + start, usable.end());
+        }
 
         // The cast goes through CastFirst rather than through a second loop of its own. The one
         // written here judged every refusal by PlayerbotAI::CastSpell to be the spell's fault and
@@ -1757,7 +1945,8 @@ public:
     void InitMultipliers(std::vector<Multiplier*>& multipliers) override
     {
         CombatStrategy::InitMultipliers(multipliers);
-        if (sPlayerbotAIConfig.IsLayaElite(botAI->GetBot()->GetGUID().GetRawValue()))
+        if (sPlayerbotAIConfig.layaVeto
+            && sPlayerbotAIConfig.IsLayaElite(botAI->GetBot()->GetGUID().GetRawValue()))
             multipliers.push_back(new CoaLayaMultiplier(botAI));
     }
 

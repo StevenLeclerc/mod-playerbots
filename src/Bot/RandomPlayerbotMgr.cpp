@@ -2354,6 +2354,45 @@ CachedEvent* RandomPlayerbotMgr::FindEvent(uint32 bot, std::string const& event)
     return &e;
 }
 
+// CoA, 2026-09-23 — remettre un bot dans la population geree.
+//
+// POURQUOI CETTE FONCTION EXISTE, ET CE QU'ELLE CORRIGE
+//
+// Un banc de mesure a besoin de bots precis, en jeu, en meme temps. La
+// premiere tentative appelait `AddPlayerBot` directement : le bot se
+// connectait, se tenait au bon endroit, et NE SE BATTAIT JAMAIS.
+//
+// La cause est `IsRandomBot`, qui exige `currentBots.contains(bot)`. Un bot
+// connecte hors de cet ensemble n'est donc pas un bot aleatoire ; il n'est pas
+// non plus un mercenaire, puisque `MercenaryRewards::EstMercenaire` le demande.
+// Le choix de cible PvP sauvage l'ecarte, le registre de combat l'ignore, et
+// rien dans les journaux ne dit pourquoi. Mesure du 2026-09-23 : sept paires de
+// duellistes sur quatorze, posees au meme metre, points de vie pleins, sans un
+// coup echange pendant cinq manches.
+//
+// L'ensemble `currentBots` est prive et la boucle de connexion ne peut pas
+// servir ici : elle ecarte tout bot dont l'evenement « add » est pose, et
+// n'ouvre de toute facon que `MaxRandomBots` moins sa propre taille — deux
+// places sur ce serveur, disputees par cinq cents candidats.
+//
+// On fait donc, dans l'ordre, ce que `ProcessBot` ferait : lever l'interdiction
+// de reconnexion, connecter, inscrire dans la population geree, puis poser
+// l'evenement « add » pour que le prochain tour ne le ressorte pas.
+bool RandomPlayerbotMgr::CoaEnroler(ObjectGuid guid)
+{
+    uint32 const bas = guid.GetCounter();
+
+    SetEventValue(bas, "logout", 0, 0);
+
+    if (!GetPlayerBot(guid))
+        AddPlayerBot(guid, 0);
+
+    currentBots.insert(bas);
+    SetEventValue(bas, "add", 1, sPlayerbotAIConfig.maxRandomBotInWorldTime);
+
+    return GetPlayerBot(guid) != nullptr;
+}
+
 bool RandomPlayerbotMgr::IsSpecPvp(uint32 bot, uint8 cls)
 {
     uint32 stored = GetValue(bot, "specNo");

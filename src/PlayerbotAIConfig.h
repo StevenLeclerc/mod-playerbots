@@ -368,6 +368,14 @@ public:
     uint32 layaVetoRatio;         // en %, du favori du modele ; en dessous, veto
     uint32 layaVetoMaxRelevance;  // au-dessus, l'action est hors d'atteinte du veto
     uint32 layaVetoMax;           // refus au maximum par fenetre de layaPeriodMs
+    bool layaVeto;                // canal action : le multiplicateur-veto (mesure sans effet)
+    bool layaSorts;               // canal sort : l'oracle ordonne les sorts d'attaque
+    // Part des RENCONTRES de combat que l'oracle a le droit de piloter, en %.
+    // Le tirage se fait a l'ouverture de la rencontre, dans CoaRegistreCombat,
+    // et ne depend de rien de ce qui precede : c'est ce qui fait passer la
+    // mesure de l'observation a l'experience. 100 = comportement d'avant la
+    // greffe, 0 = l'oracle ne pilote plus rien.
+    uint32 layaTirageAuSort;
 
     // Un bot est mercenaire ou non de facon STABLE dans le temps : la decision
     // derive de son GUID, pas d'un tirage. Sans cela un bot changerait de camp

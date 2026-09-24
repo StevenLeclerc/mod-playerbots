@@ -4,6 +4,7 @@
  * or (at your option) any later version.
  */
 
+#include "CoaRegistreCombat.h"
 #include "PlayerbotAI.h"
 #include "CoaSpecialization.h"
 #include "AiFactory.h"
@@ -246,7 +247,16 @@ PlayerbotAI::~PlayerbotAI()
         delete aiObjectContext;
 
     if (bot)
+    {
+        // Le registre des rencontres garde un etat par bot. Sans cet oubli, une
+        // rencontre ouverte au moment de la deconnexion restait dans la table
+        // pour toujours : a la reconnexion, le bot heritait de son debutMs, de
+        // ses points de vie de depart et de son bras de tirage, et produisait
+        // une ligne de journal fausse avant d'etre clos en « enlisee ».
+        // Oublier() etait declare et appele par personne.
+        CoaRegistreCombat::Instance().Oublier(bot->GetGUID().GetRawValue());
         PlayerbotsMgr::instance().RemovePlayerBotData(bot->GetGUID(), true);
+    }
 }
 
 void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
@@ -261,6 +271,11 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     if (!bot || !bot->GetSession() || !bot->IsInWorld() || bot->IsBeingTeleported() ||
         bot->GetSession()->isLogingOut() || bot->IsDuringRemoveFromWorld())
         return;
+
+    // Registre des rencontres de combat (CoA). Un test booleen par tick tant
+    // que l'etat de combat ne change pas ; sans effet si l'oracle n'est pas
+    // arme ou si le bot n'est pas mercenaire. Voir Ai/Coa/CoaRegistreCombat.h.
+    CoaRegistreCombat::Instance().Observer(bot, this);
 
     // --- PvP mercenaire (CoA) ---------------------------------------------
     // Un bot mercenaire porte en permanence le drapeau FFA : c'est la seule
