@@ -298,9 +298,9 @@ void CoaLayaOracle::Demander(uint64 guid, uint32 canal, std::string const& etat,
     {
         std::lock_guard<std::mutex> tenu(_verrou);
         Entree& entree = _cache[cle];
-        // Le compteur avance de deux en deux pour laisser le bit du canal
-        // intact ; la monotonie du seq reste donc vraie canal par canal.
-        seq = (++entree.seqEmis << 1) | (canal & 1u);
+        // Le compteur avance de quatre en quatre pour laisser les deux bits du
+        // canal intacts ; la monotonie du seq reste donc vraie canal par canal.
+        seq = (++entree.seqEmis << 2) | (canal & 3u);
         entree.msEmission = getMSTime();
 
         // Un bot qui se deconnecte laisse son entree derriere lui, et les bots
@@ -473,6 +473,7 @@ std::string CoaLayaOracle::Compteurs() const
     sortie += " vetos=" + std::to_string(_vetos.load(std::memory_order_relaxed));
     sortie += " muets=" + std::to_string(_muets.load(std::memory_order_relaxed));
     sortie += " choix_sorts=" + std::to_string(_choix.load(std::memory_order_relaxed));
+    sortie += " cibles_changees=" + std::to_string(_ciblesChangees.load(std::memory_order_relaxed));
     sortie += " lectures_servies=" + std::to_string(_lecturesServies.load(std::memory_order_relaxed));
     sortie += " lectures_vides=" + std::to_string(_lecturesVides.load(std::memory_order_relaxed));
     sortie += " bots_suivis=" + std::to_string(suivis);

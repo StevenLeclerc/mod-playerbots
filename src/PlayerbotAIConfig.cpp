@@ -717,6 +717,10 @@ bool PlayerbotAIConfig::Initialize()
     // (P-085, P-089) : eteint par defaut. Le choix du sort le remplace.
     layaVeto = sConfigMgr->GetOption<bool>("AiPlayerbot.Laya.Veto", false);
     layaSorts = sConfigMgr->GetOption<bool>("AiPlayerbot.Laya.Sorts", true);
+    // Defaut FAUX : la greffe du choix de cible est inerte tant qu'on ne l'arme
+    // pas. Trois campagnes sur le choix du sort n'ont rien donne ; celle-ci se
+    // mesure avant d'etre allumee pour tout le monde.
+    layaCibles = sConfigMgr->GetOption<bool>("AiPlayerbot.Laya.Cibles", false);
     // Defaut 100 : la greffe du tirage au sort est SANS EFFET tant qu'on ne
     // l'arme pas. Au-dela de 100 le pourcentage n'a pas de sens, on le ramene.
     layaTirageAuSort = sConfigMgr->GetOption<uint32>("AiPlayerbot.Laya.TirageAuSort", 100);

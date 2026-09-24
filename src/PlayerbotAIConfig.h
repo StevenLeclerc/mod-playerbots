@@ -370,6 +370,7 @@ public:
     uint32 layaVetoMax;           // refus au maximum par fenetre de layaPeriodMs
     bool layaVeto;                // canal action : le multiplicateur-veto (mesure sans effet)
     bool layaSorts;               // canal sort : l'oracle ordonne les sorts d'attaque
+    bool layaCibles;              // canal cible : l'oracle choisit qui frapper, a l'acquisition
     // Part des RENCONTRES de combat que l'oracle a le droit de piloter, en %.
     // Le tirage se fait a l'ouverture de la rencontre, dans CoaRegistreCombat,
     // et ne depend de rien de ce qui precede : c'est ce qui fait passer la

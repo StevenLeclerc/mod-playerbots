@@ -5,6 +5,7 @@
  */
 
 #include "AttackAction.h"
+#include "CoaChoixCible.h"
 #include "CreatureAI.h"
 #include "Event.h"
 #include "LastMovementValue.h"
@@ -24,6 +25,12 @@ bool AttackAction::Execute(Event /*event*/)
 
     if (!target->IsInWorld())
         return false;
+
+    // CoA : l'oracle peut substituer une autre cible, parmi des candidats que
+    // le moteur jugeait deja attaquables, et seulement a l'acquisition. Inerte
+    // tant que `AiPlayerbot.Laya.Cibles` n'est pas arme, et le repli rend
+    // `target` inchangee. Voir Ai/Coa/CoaChoixCible.h.
+    target = CoaChoisirCibleParLaya(botAI, bot, target);
 
     return Attack(target);
 }

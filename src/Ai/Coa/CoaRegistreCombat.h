@@ -172,6 +172,13 @@ private:
         // Sans ces deux champs, une moyenne melange des lieux ou la mecanique
         // peut fonctionner et des lieux ou elle ne peut pas : deux populations,
         // une seule moyenne.
+        // CE QUE « capitale » RECOUVRE, ET CE N'EST PAS CE QUE LE MOT EVOQUE.
+        // 31 zones portent AREA_FLAG_CAPITAL dans le DBC de ce royaume, pas
+        // huit : les huit capitales de faction, plus Shattrath, Dalaran,
+        // Twisting Nether, Dun Kazad, Unused Monastery et une vingtaine de
+        // zones custom Ascension (10000-10331). Plus 125 sous-aires qui
+        // portent aussi le bit, sans etre des zones.
+        // Ecarter « les capitales » d'un depouillement ecarte donc tout cela.
         uint32 aire = 0;
         uint32 aireFlags = 0;
         uint32 zone = 0;

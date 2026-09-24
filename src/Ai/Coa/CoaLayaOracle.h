@@ -24,14 +24,19 @@
  *   ans <guid> <seq>|<opt>=<proba>;...|<proba>;<proba>
  *   err <guid> <seq>|<raison>
  *
- * DEUX CANAUX DANS UN SEUL PROTOCOLE. Un bot pose deux questions de nature
- * differente : quelle ACTION jouer, et quel SORT lancer dans l'action d'attaque.
- * Les reponses ne doivent pas s'ecraser l'une l'autre dans le cache.
+ * PLUSIEURS CANAUX DANS UN SEUL PROTOCOLE. Un bot pose des questions de nature
+ * differente — quelle ACTION jouer, quel SORT lancer, quelle CIBLE frapper — et
+ * les reponses ne doivent pas s'ecraser l'une l'autre dans le cache.
  *
- * Le canal voyage dans le BIT DE POIDS FAIBLE du `seq`, qui nous appartient :
- * seq = (compteur << 1) | canal. L'oracle le renvoie tel quel sans le lire, le
- * format de fil ne change pas, et le controle de monotonie continue de valoir
- * canal par canal puisque le compteur d'un canal avance de deux en deux.
+ * Le canal voyage dans les DEUX BITS DE POIDS FAIBLE du `seq`, qui nous
+ * appartient : seq = (compteur << 2) | canal. L'oracle le renvoie tel quel sans
+ * le lire, le format de fil ne change pas, et le controle de monotonie continue
+ * de valoir canal par canal puisque le compteur d'un canal avance de quatre en
+ * quatre.
+ *
+ * Deux bits parce qu'un seul ne suffisait plus. Les quatre places sont un choix
+ * delibere : au-dela, ce n'est plus un canal qu'il faut ajouter mais un champ
+ * dans le protocole.
  */
 
 #ifndef PLAYERBOTS_COALAYAORACLE_H
@@ -58,6 +63,8 @@ public:
     {
         CANAL_ACTION = 0,   // quelle action jouer (multiplicateur, historique)
         CANAL_SORT   = 1,   // quel sort lancer dans l'action d'attaque
+        CANAL_CIBLE  = 2,   // qui frapper, au moment de l'acquisition
+        CANAL_MAX    = 4,   // les deux bits du seq : quatre places, pas plus
     };
 
     static CoaLayaOracle& Instance();
@@ -101,6 +108,11 @@ public:
     // tourniquet. C'est LE chiffre qui dit si le canal sort sert a quelque chose.
     void CompterChoix() { _choix.fetch_add(1, std::memory_order_relaxed); }
 
+    // Une acquisition ou le modele a designe une AUTRE cible que le moteur.
+    // C'est LE chiffre qui dit si le canal cible sert a quelque chose : a zero,
+    // la greffe est branchee et sans effet, et il faut pouvoir le constater.
+    void CompterCibleChangee() { _ciblesChangees.fetch_add(1, std::memory_order_relaxed); }
+
     void Oublier(uint64 guid);
 
     // Le nettoyage que subit tout libelle avant de partir sur le fil.
@@ -130,7 +142,7 @@ private:
     void Integrer(char const* datagramme, size_t taille);
 
     // Cle du cache : le guid et le canal, puisqu'un bot pose deux questions.
-    static uint64 Cle(uint64 guid, uint32 canal) { return (guid << 1) | (canal & 1u); }
+    static uint64 Cle(uint64 guid, uint32 canal) { return (guid << 2) | (canal & 3u); }
 
     int _sock = -1;
     std::thread _receveur;
@@ -150,6 +162,7 @@ private:
     std::atomic<uint64> _vetos{0};
     std::atomic<uint64> _muets{0};
     std::atomic<uint64> _choix{0};
+    std::atomic<uint64> _ciblesChangees{0};
     // mutable : Probabilite() est const — elle ne touche que le cache — mais
     // doit pouvoir compter ce qu'elle sert. fetch_add n'est pas const.
     mutable std::atomic<uint64> _lecturesServies{0};
