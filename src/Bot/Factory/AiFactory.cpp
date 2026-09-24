@@ -720,6 +720,40 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
             {
                 nonCombatEngine->addStrategy("pvp", false);
                 nonCombatEngine->addStrategy("move random", false);
+
+                // LA CHASSE (lot 2, Ai/Coa/CoaChasse.h). "move random" reste
+                // en dessous d'elle, a 1,5 : c'est le repli quand la chasse
+                // rend false. Elle ne le remplace donc pas, elle le prime.
+                //
+                // LE GARDE DE CLASSE EST INDISPENSABLE. Le createur de "coa
+                // chasse" n'est enregistre que dans CoaAiObjectContext, qui
+                // n'est monte que pour les classes CoA. Un nom de strategie
+                // sans createur ne produit RIEN -- ni erreur, ni journal
+                // (Engine::addStrategy, Engine.cpp:366-381) : le poser sur un
+                // bot de classe vanille serait une ligne morte qu'une relecture
+                // croirait vivante. C'est deja le sort de "nc" et "buff"
+                // (ligne 650 de ce fichier), et il a fallu le port 8888 pour
+                // s'en apercevoir.
+                //
+                // L'INTERRUPTEUR DE CONF N'EST PAS TESTE ICI, A DESSEIN. Les
+                // strategies sont posees une fois pour toutes (voir plus haut,
+                // "Limite assumee") : un test ici exigerait de reconnecter les
+                // 500 bots a chaque coup de levier. Il est porte par
+                // CoaChasseAction::isUseful, donc relu a chaque tick, et
+                // "playerbots rndbot reload" suffit.
+                //
+                // ET CETTE POSE NE DOIT RIEN RETIRER. Engine::addStrategy
+                // retire du moteur TOUS les freres de la strategie posee avant
+                // de l'ajouter (Engine.cpp:365-379). « coa chasse » a donc sa
+                // propre fabrique, sans support des freres
+                // (CoaChasseStrategyFactoryInternal, CoaAiObjectContext.cpp) :
+                // sans cela elle emporterait « coa buff », posee sur CE MEME
+                // moteur non-combat une centaine de lignes plus haut, et avec
+                // elle le declencheur « coa ambush » -> « coa stealth ».
+                // Verification : la commande « strategy » du port 8888 doit
+                // rendre les deux noms.
+                if (IsAscensionCustomClassId(player->getClass()))
+                    nonCombatEngine->addStrategy("coa chasse", false);
             }
             else
             {

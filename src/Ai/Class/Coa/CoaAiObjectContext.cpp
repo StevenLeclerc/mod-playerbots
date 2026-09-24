@@ -7,6 +7,7 @@
 #include "CoaLayaEtat.h"
 #include "CoaLayaOracle.h"
 #include "CoaAiObjectContext.h"
+#include "CoaChasse.h"
 #include "CoaRegistreCombat.h"
 
 #include "Action.h"
@@ -953,13 +954,111 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
 enum UsageKind : uint8
 {
     USAGE_ATTACK, USAGE_AOE, USAGE_HEAL, USAGE_GROUP_HEAL, USAGE_HOT, USAGE_TAUNT,
-    USAGE_DEFENSIVE, USAGE_DISPEL, USAGE_INTERRUPT, USAGE_BUFF, USAGE_STEALTH, USAGE_MAX
+    USAGE_DEFENSIVE, USAGE_DISPEL, USAGE_INTERRUPT, USAGE_BUFF, USAGE_STEALTH,
+    USAGE_POSTE_PRIS, USAGE_POSTE_ATTEINT,
+    USAGE_TRAQUE, USAGE_RETOUR, USAGE_DECROCHAGE,
+    USAGE_POSTE_CATALOGUE,
+    USAGE_POSTE_AUBERGE, USAGE_POSTE_VOLERIE, USAGE_POSTE_CIMETIERE, USAGE_POSTE_ROUTE,
+    USAGE_POSTE_PEUPLE,
+    USAGE_MAX
 };
 
+// Les cinq derniers ne comptent aucun sort : ce sont les jalons de la chasse
+// (Ai/Coa/CoaChasse.h). « poste pris » monte quand un poste de guet est retenu,
+// « poste atteint » quand le bot y arrive ; l'ecart entre les deux est la mesure
+// du voyage, et c'est la seule preuve que le lot 2 tourne.
+//
+// Le lot 3 en ajoute trois. « traque » monte a chaque passage GUET -> TRAQUE,
+// « retour » a chaque poste RETROUVE apres une traque, « decrochage » a chaque
+// rupture de combat PvE. Ce qu'ils disent, lus ensemble : traque contre poste
+// atteint donne le rendement d'un poste ; retour contre traque, la part des
+// traques qui se terminent sans que le bot soit mort ou parti ailleurs.
+//
+// CE QU'ILS NE DISENT PAS, et l'en-tete de ReportUsage le dit deja : ils sont
+// GLOBAUX AU PROCESSUS (piege 36). Ils prouvent qu'une traque a eu lieu, jamais
+// qu'un bot donne a traque.
+//
+// Le lot 4 en ajoute un dernier. « poste catalogue » monte en MEME TEMPS que
+// « poste pris », et seulement quand le poste vient de la table
+// playerbots_coa_poste_guet (Ai/Coa/CoaPostes.h). L'ecart entre les deux est
+// donc exactement le nombre de postes tires par le repli du lot 2, hubs ou
+// cellules de grind -- et c'est la seule facon de savoir, sans ouvrir la base,
+// si le catalogue a ete applique et s'il sert.
+//
+// ET LA CLASSE DU POSTE, en quatre compteurs de plus : « poste auberge »,
+// « poste volerie », « poste cimetiere », « poste route ». Leur somme vaut
+// « poste catalogue ».
+//
+// POURQUOI L'AGREGE NE SUFFISAIT PAS. Il monte pareil pour une auberge, dont le
+// dossier mesure l'enrichissement a x18, et pour un carrefour, mesure a x1 --
+// c'est-a-dire au niveau du temoin. La metrique de preuve que le lot 4 se donne
+// est « la part des rencontres a moins de N yd d'un poste catalogue » : si elle
+// baisse, seul le detail par classe permet de dire si c'est le catalogue qui ne
+// sert pas ou le tirage qui prend des carrefours a la place des auberges. Sans
+// eux, la mesure que ce lot devait rendre possible etait precisement celle qu'il
+// rendait impossible.
+//
+// Le lot 5 en ajoute un seul : « poste peuple ». Il monte quand le poste
+// FINALEMENT RETENU -- catalogue, hub ou cellule de grind -- est dans un bloc
+// 2x2 ou l'index des proies (CoaIndexProies, Bot/MercenaryRewards.h) avait vu
+// au moins une proie NON MERCENAIRE dont le palier n'est pas categoriquement
+// refuse par le filtre de niveau de ce bot.
+//
+// SON DENOMINATEUR N'EST PAS « poste pris », et le dire ainsi etait faux. Ce
+// dernier monte pour TOUS les postes retenus (RetenirUnPoste, Ai/Coa/CoaChasse.h),
+// y compris les deux replis de sortie de lieu sans PvP -- qui ne sont
+// DELIBEREMENT pas ponderes, un bot en sanctuaire cherchant la sortie et non la
+// meilleure chasse, et qui ne peuvent donc jamais faire monter « poste
+// peuple ». Le ratio se lit contre les TIRAGES ORDINAIRES, c'est-a-dire
+// « poste pris » moins les replis : catalogue ordinaire, hubs ordinaires et
+// cellule de grind ordinaire, les trois chemins qui consultent l'index. Les
+// trois y sont, depuis que le troisieme a ete ajoute -- il manquait, et c'est
+// aujourd'hui le plus frequent, le catalogue n'etant pas applique en base.
+//
+// CE QU'IL NE DIT PAS, et ce sont les reserves qui comptent :
+//   - il compte ce que l'index CROYAIT il y a moins de 30 s, pas ce que le bot
+//     a trouve en arrivant plusieurs minutes plus tard ;
+//   - « attaquable » y est un raccourci. L'index ignore le quota
+//     MaxAttackersPerTarget (EnemyPlayerValue.cpp:217) : trois proies deja
+//     engagees chacune par un attaquant comptent pour trois et n'en valent
+//     aucune. La treve de TruceAfterDeathSec, elle, est filtree a l'ecriture
+//     (CoaIndexProies::Compter) et ne fausse donc plus ce compte ;
+//   - il ne compte QUE les proies non mercenaires. C'est ce qui le rend
+//     falsifiable : avec les mercenaires dedans, il montait parce que la chasse
+//     y avait envoye des chasseurs, et nul n'aurait pu dire si c'etait l'index
+//     qui avait raison ou la boucle qui se refermait sur elle-meme.
+// La preuve que le lot sert, c'est « traque » contre « poste atteint » -- le
+// rendement d'un poste -- et ce compteur-ci ne sert qu'a savoir si l'index
+// avait de la matiere a donner.
+//
+// AVEC AiPlayerbot.WildPvp.IndexProies = 0 -- OU WildPvp.Enabled = 0 -- IL
+// RESTE A ZERO, par construction : CoaChasseAction::IndexProiesActif exige les
+// deux, et ProiesAutour rend alors 0 partout. Un compteur a zero alors que les
+// deux interrupteurs sont a 1 veut donc dire que l'index est vide, ou qu'il ne
+// contient que des mercenaires -- et la ligne « [CoA index] » de CoaBots.log,
+// qui publie « proies N (dont mercenaires N) », dit alors laquelle des deux.
+//
+// ILS SONT ADDITIFS pour tools/dashboard/serveur_dashboard.py comme pour la vue
+// mercenaires du panneau : ce sont des noms nouveaux en minuscules et espaces,
+// et aucun nom existant ne bouge.
+//
+// IL EST AJOUTE EN FIN D'ENUM, ET C'EST VOULU. Les compteurs sont lus par
+// position nulle part -- ni RecordUsage ni ReportUsage n'indexent autrement que
+// par la valeur nommee -- mais UsageNames est un tableau de taille USAGE_MAX :
+// un ajout au milieu decalerait silencieusement tous les noms suivants si les
+// deux listes n'etaient pas modifiees ensemble. En fin de liste, l'erreur
+// devient une erreur de compilation.
+//
+// LES NOMS SONT UN CONTRAT. tools/dashboard/serveur_dashboard.py:52 lit cette
+// ligne avec COUNT_RE = ([a-z ]+?) (\d+)/(\d+) : minuscules et espaces, rien
+// d'autre. Pas d'accent, pas de chiffre, pas de tiret.
 constexpr char const* UsageNames[USAGE_MAX] =
 {
     "attack", "aoe", "heal", "group heal", "hot", "taunt", "defensive", "dispel", "interrupt", "buff",
-    "stealth"
+    "stealth", "poste pris", "poste atteint", "traque", "retour", "decrochage",
+    "poste catalogue",
+    "poste auberge", "poste volerie", "poste cimetiere", "poste route",
+    "poste peuple"
 };
 
 bool PreemptsAttackCast(uint8 usage)
@@ -2080,6 +2179,47 @@ private:
     static Strategy* coa_buff(PlayerbotAI* botAI) { return new CoaBuffStrategy(botAI); }
 };
 
+/*
+ * « coa chasse » A SA PROPRE FABRIQUE, ET ELLE NE SUPPORTE PAS LES FRERES.
+ *
+ * CE QUE LA PLACER DANS CoaStrategyFactoryInternal CASSAIT. Cette fabrique-la
+ * est construite en NamedObjectContext<Strategy>(false, true) (juste au-dessus) :
+ * le second parametre est supportsSiblings (NamedObjectContext.h:90). Or
+ * Engine::addStrategy demande GetSiblingStrategy(nom) et RETIRE du moteur chaque
+ * frere avant de poser la nouvelle (Engine.cpp:365-379), et GetSiblings rend
+ * supports() du contexte entier moins le nom demande, pour le PREMIER contexte
+ * qui supporte les freres et qui porte ce nom (NamedObjectContext.h:213-229).
+ * Poser « coa chasse » comme 6e cle du groupe faisait donc retirer ses cinq
+ * freres -- dont « coa buff », posee sur le MEME moteur non-combat cent lignes
+ * plus haut dans AddDefaultNonCombatStrategies (AiFactory.cpp:640-642, contre
+ * :745). Le mercenaire perdait ses buffs hors combat ET le declencheur
+ * « coa ambush » -> « coa stealth » (InitTriggers de CoaBuffStrategy, seul
+ * endroit du module qui arme « coa stealth »), sans erreur ni journal : un
+ * simple LogAction « S:-coa buff », invisible hors debug.
+ *
+ * L'exclusivite mutuelle voulue reste entiere entre « coa », « coa ranged »,
+ * « coa tank » et « coa heal » : elles n'ont pas bouge de fabrique.
+ *
+ * GetSiblings saute les contextes dont IsSupportsSiblings() est faux
+ * (NamedObjectContext.h:215-217) : construite par defaut, celle-ci rend donc un
+ * ensemble vide pour « coa chasse », et rien n'est plus retire.
+ *
+ * PREUVE ATTENDUE APRES COMPILATION : la commande « strategy » du port 8888 sur
+ * un mercenaire de classe CoA hors combat doit rendre A LA FOIS « coa buff » et
+ * « coa chasse ».
+ */
+class CoaChasseStrategyFactoryInternal : public NamedObjectContext<Strategy>
+{
+public:
+    CoaChasseStrategyFactoryInternal()
+    {
+        creators["coa chasse"] = &CoaChasseStrategyFactoryInternal::coa_chasse;
+    }
+
+private:
+    static Strategy* coa_chasse(PlayerbotAI* botAI) { return new CoaChasseStrategy(botAI); }
+};
+
 class CoaActionFactoryInternal : public NamedObjectContext<Action>
 {
 public:
@@ -2096,6 +2236,8 @@ public:
         creators["coa interrupt"] = &CoaActionFactoryInternal::coa_interrupt;
         creators["coa buff"] = &CoaActionFactoryInternal::coa_buff;
         creators["coa stealth"] = &CoaActionFactoryInternal::coa_stealth;
+        creators["coa chasse"] = &CoaActionFactoryInternal::coa_chasse;
+        creators["coa decrochage"] = &CoaActionFactoryInternal::coa_decrochage;
     }
 
 private:
@@ -2116,6 +2258,12 @@ private:
     static Action* coa_interrupt(PlayerbotAI* botAI) { return new CoaInterruptAction(botAI); }
     static Action* coa_buff(PlayerbotAI* botAI) { return new CoaBuffAction(botAI); }
     static Action* coa_stealth(PlayerbotAI* botAI) { return new CoaStealthAction(botAI); }
+    static Action* coa_chasse(PlayerbotAI* botAI) { return new CoaChasseAction(botAI); }
+    // Lot 3. Elle est dans la MEME fabrique que les autres actions, et non dans
+    // une fabrique a part comme « coa chasse » cote strategies : le mecanisme
+    // des freres (Engine::addStrategy -> GetSiblingStrategy, Engine.cpp:365-379)
+    // ne concerne QUE les strategies. Les fabriques d'actions ne retirent rien.
+    static Action* coa_decrochage(PlayerbotAI* botAI) { return new CoaDecrochageAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -2135,6 +2283,49 @@ private:
 };
 
 }  // namespace
+
+/*
+ * Le pont entre la chasse et les compteurs UsageKind, declare dans
+ * Ai/Coa/CoaChasse.h. Il est ICI et pas la-bas parce que l'enum USAGE_* et
+ * RecordUsage vivent dans l'espace de noms anonyme ouvert plus haut dans ce
+ * fichier : un en-tete inclus avant lui ne peut pas les nommer. Une fonction
+ * definie a la portee du fichier, elle, les voit.
+ *
+ * RecordUsage incremente `tried` a chaque appel et `cast` seulement sur un sort
+ * non nul (CoaAiObjectContext.cpp, corps de RecordUsage). Aucun sort n'est lance
+ * ici : ces deux compteurs ne renseignent donc que la colonne `tried`, et la
+ * ligne de journal dira « poste pris 0/N ». C'est N qui compte.
+ */
+void CoaChasseComptePostePris() { RecordUsage(USAGE_POSTE_PRIS, nullptr); }
+void CoaChasseComptePosteAtteint() { RecordUsage(USAGE_POSTE_ATTEINT, nullptr); }
+void CoaChasseCompteTraque() { RecordUsage(USAGE_TRAQUE, nullptr); }
+void CoaChasseCompteRetour() { RecordUsage(USAGE_RETOUR, nullptr); }
+void CoaChasseCompteDecrochage() { RecordUsage(USAGE_DECROCHAGE, nullptr); }
+void CoaChasseComptePosteCatalogue() { RecordUsage(USAGE_POSTE_CATALOGUE, nullptr); }
+void CoaChasseComptePostePeuple() { RecordUsage(USAGE_POSTE_PEUPLE, nullptr); }
+
+/*
+ * La classe du poste tire. `classe` est un CoaSourcePoste (Ai/Coa/CoaPostes.h) :
+ * l'enum y est declare, mais l'aiguillage est ECRIT A LA MAIN plutot que calcule
+ * par « USAGE_POSTE_AUBERGE + classe ». Une addition sur deux enums qui vivent
+ * dans deux fichiers different rendrait toute insertion dans l'un silencieuse
+ * dans l'autre ; un switch sans default force le compilateur a signaler une
+ * valeur nouvelle.
+ *
+ * COA_POSTE_SOURCES est la valeur « aucune classe », celle que
+ * TirerPosteCatalogue pose quand rien n'est retenu : elle ne compte rien.
+ */
+void CoaChasseComptePosteClasse(uint8 classe)
+{
+    switch (classe)
+    {
+        case COA_POSTE_AUBERGE:   RecordUsage(USAGE_POSTE_AUBERGE, nullptr);   break;
+        case COA_POSTE_VOLERIE:   RecordUsage(USAGE_POSTE_VOLERIE, nullptr);   break;
+        case COA_POSTE_CIMETIERE: RecordUsage(USAGE_POSTE_CIMETIERE, nullptr); break;
+        case COA_POSTE_ROUTE:     RecordUsage(USAGE_POSTE_ROUTE, nullptr);     break;
+        default:                  break;
+    }
+}
 
 SharedNamedObjectContextList<Strategy> CoaAiObjectContext::sharedStrategyContexts;
 SharedNamedObjectContextList<Action> CoaAiObjectContext::sharedActionContexts;
@@ -2159,6 +2350,12 @@ void CoaAiObjectContext::BuildSharedStrategyContexts(SharedNamedObjectContextLis
 {
     AiObjectContext::BuildSharedStrategyContexts(strategyContexts);
     strategyContexts.Add(new CoaStrategyFactoryInternal());
+    // Contexte SEPARE, et non une cle de plus dans le precedent : voir l'en-tete
+    // de CoaChasseStrategyFactoryInternal. SharedNamedObjectContextList::Add
+    // fusionne les createurs dans une seule table (NamedObjectContext.h:148-153),
+    // donc « coa chasse » reste trouvable par create() ; seule GetSiblings, qui
+    // parcourt les contextes un par un, voit la difference.
+    strategyContexts.Add(new CoaChasseStrategyFactoryInternal());
 }
 
 void CoaAiObjectContext::BuildSharedActionContexts(SharedNamedObjectContextList<Action>& actionContexts)

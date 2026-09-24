@@ -102,6 +102,10 @@ public:
     bool IsInPvpProhibitedZone(uint32 id);
     bool IsInPvpProhibitedArea(uint32 id);
 
+    // Vrai quand le PvP ne peut PAS avoir lieu a cet endroit -- les deux sources
+    // reunies : les drapeaux du DBC et les listes de conf. Voir la definition.
+    bool CoaLieuSansPvp(uint32 zoneId, uint32 areaId);
+
     bool enabled;
     bool disabledWithoutRealPlayer;
     bool EnableICCBuffs;
@@ -357,6 +361,58 @@ public:
     // passe par "pvp", deja presente dans le jeu de base de tout bot.
     // Verifie en jeu par le port 8888, voir AiFactory.cpp et P-056.
     bool wildPvpMercenariesSkipPve;
+
+    // La chasse : le mercenaire choisit un poste de guet, y va, et l'y tient
+    // (strategie « coa chasse », Ai/Coa/CoaChasse.h). Sans elle il n'a que
+    // « move random », qui ne le deplace pas. Eteint par defaut : c'est le
+    // levier de montee en charge, le cout CPU de MoveFarTo a 250 mercenaires
+    // n'ayant jamais ete mesure. Lu a chaque tick par l'action : le changer a
+    // chaud prend effet sans reconnexion des bots.
+    bool wildPvpChasse;
+
+    // Lot 3. La TRAQUE : une proie deja dans « nearest enemy players » (75 yd)
+    // mais hors de portee d'engagement (60 yd, ou 20 s'il a moins de PV qu'elle,
+    // EnemyPlayerValue.cpp:315-317) -- le mercenaire va la chercher au lieu
+    // d'attendre qu'elle passe a portee. Separee de wildPvpChasse parce qu'elle
+    // coute autre chose : un balayage de grille de 75 yd par guetteur et par
+    // DelaiScanProieMs, la ou le voyage coute des calculs de chemin.
+    bool wildPvpTraque;
+
+    // Lot 3. Le DECROCHAGE PvE : le mercenaire rompt un combat contre une
+    // creature quand il le perd (PV sous le seuil ci-dessous) ou quand il
+    // n'aurait jamais du le prendre (ecart de niveau > 4 ou rang elite, le
+    // garde-fou de GrindTargetValue.cpp:95-101, que la riposte n'a pas). Il ne
+    // rompt JAMAIS contre un joueur. Eteint par defaut : le besoin lui-meme est
+    // une hypothese non mesuree (section 5 du dossier de conception).
+    bool wildPvpDecrochage;
+
+    // Le seuil, en POURCENTAGE de points de vie. Il sert a TROIS endroits, et
+    // c'est voulu : le decrochage PvE l'emploie pour rompre ; l'etat RETOUR de
+    // la chasse pour renoncer a rentrer au poste et en tirer un autre (le bot se
+    // restaure alors en route, « food » et « drink » etant a 4,1 et 4,2 contre
+    // 2,0 pour la chasse) ; et L'ENTREE EN TRAQUE, ou un guetteur sous le seuil
+    // ne part pas. Ce troisieme usage manquait ici avant le 2026-09-24.
+    //
+    // LE TROISIEME EST UN PIEGE DE MESURE : monte haut, ce reglage eteint la
+    // traque sans un mot, et le compteur « traque » reste a zero. A 100 -- le
+    // plafond impose plus bas dans Initialize() -- plus aucune traque ne part,
+    // points de vie pleins compris.
+    //
+    // A 0, aucun des trois ne se declenche sur les PV -- le garde-fou de niveau
+    // et de rang, lui, reste actif.
+    uint32 wildPvpDecrochagePct;
+
+    // Lot 5. L'INDEX << OU SONT LES PROIES >> (CoaIndexProies, Bot/MercenaryRewards.h).
+    // Une table de cellules de 250 yd par carte, rebatie toutes les 30 s dans le
+    // balayage que MercenaryRewards::RecomputeMedian fait deja, lue sans verrou
+    // par la chasse a l'etat CHOIX pour PONDERER le tirage du poste de guet vers
+    // les lieux ou il y avait du monde. Eteint par defaut, et l'interrupteur
+    // porte les DEUX cotes : eteint, le balayage ne remplit rien et le tirage se
+    // comporte exactement comme au lot 4.
+    //
+    // Ne fait rien si wildPvpChasse vaut 0 : il n'y a alors personne pour lire
+    // l'index. Le laisser a 1 dans ce cas ne coute que le remplissage.
+    bool wildPvpIndexProies;
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

@@ -8,6 +8,9 @@
 #include "BattleGroundTactics.h"
 #include "BattlefieldScript.h"
 #include "Channel.h"
+// Lot 4 du mercenaire chasseur : le catalogue de postes de guet, charge au
+// demarrage. Voir Ai/Coa/CoaPostes.h.
+#include "CoaPostes.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "DatabaseLoader.h"
@@ -359,6 +362,7 @@ class PlayerbotsWorldScript : public WorldScript
 public:
     PlayerbotsWorldScript() : WorldScript("PlayerbotsWorldScript", {
         WORLDHOOK_ON_BEFORE_WORLD_INITIALIZED,
+        WORLDHOOK_ON_STARTUP,
         WORLDHOOK_ON_UPDATE
     }) {}
 
@@ -392,6 +396,26 @@ public:
         PlayerbotSpellRepository::Instance().Initialize();
 
         LOG_INFO("server.loading", "Playerbots World Thread Processor initialized");
+    }
+
+    /*
+     * LOT 4 du mercenaire chasseur : chargement du catalogue de postes de guet.
+     *
+     * POURQUOI OnStartup ET PAS OnBeforeWorldInitialized. Ce hook-la est appele
+     * au TOUT DEBUT de World::SetInitialWorldSettings -- c'est la qu'est lue la
+     * conf du module, avant les stores. WORLDHOOK_ON_STARTUP, lui, est le point
+     * ou les donnees du monde sont chargees ; c'est celui que mod-coa-challenges
+     * emploie pour la meme chose (CoA.Challenges.Scripts.cpp:1894-1900 :
+     * WorldScript avec WORLDHOOK_ON_STARTUP, puis LoadChallengeDefinitions).
+     *
+     * CE CHARGEMENT NE PEUT PAS FAIRE ECHOUER LE DEMARRAGE. Table absente,
+     * vide, ou base injoignable : Charger() le dit dans le journal et laisse le
+     * catalogue non charge. La chasse retombe alors sur GetTravelHubs, qui est
+     * le comportement du lot 2 -- celui qui tourne aujourd'hui.
+     */
+    void OnStartup() override
+    {
+        CoaCataloguePostes::Instance().Charger();
     }
 
     void OnUpdate(uint32 diff) override

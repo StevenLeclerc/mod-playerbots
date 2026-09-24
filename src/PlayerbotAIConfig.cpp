@@ -739,6 +739,17 @@ bool PlayerbotAIConfig::Initialize()
     wildPvpLevelCapMedianOffset = sConfigMgr->GetOption<int32>("AiPlayerbot.WildPvp.LevelCapMedianOffset", 5);
     wildPvpNoTeleportOnLevelUp = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.NoTeleportOnLevelUp", true);
     wildPvpMercenariesSkipPve = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.MercenariesSkipPve", true);
+    wildPvpChasse = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.Chasse", false);
+    wildPvpTraque = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.Traque", false);
+    wildPvpDecrochage = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.Decrochage", false);
+    wildPvpDecrochagePct = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.DecrochagePct", 30);
+    wildPvpIndexProies = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.IndexProies", false);
+
+    // Au-dela de 100 le pourcentage n'a pas de sens : le bot decrocherait de
+    // TOUT combat des le premier coup recu, et l'etat RETOUR ne rentrerait
+    // jamais au poste. On le ramene plutot que de le subir.
+    if (wildPvpDecrochagePct > 100)
+        wildPvpDecrochagePct = 100;
 
     // Un offset negatif placerait le plafond SOUS la mediane : plus aucun
     // mercenaire ne gagnerait jamais rien, sans que rien ne le signale.
@@ -1080,6 +1091,60 @@ bool PlayerbotAIConfig::IsInPvpProhibitedZone(uint32 id)
 bool PlayerbotAIConfig::IsInPvpProhibitedArea(uint32 id)
 {
     return find(pvpProhibitedAreaIds.begin(), pvpProhibitedAreaIds.end(), id) != pvpProhibitedAreaIds.end();
+}
+
+// --- Lieu sans PvP (CoA) -----------------------------------------------------
+// Vrai quand le PvP ne peut PAS avoir lieu ici. Predicat UNIQUE, a employer
+// partout ou le module decide de poser un drapeau FFA ou de choisir une cible ou
+// une destination.
+//
+// LE SANCTUAIRE SE TESTE SUR L'AIRE, LA CAPITALE SUR LA ZONE. Ce sont deux
+// chemins distincts du coeur, et les confondre est le piege qui a coute le plus
+// cher sur ce chantier :
+//   Player::UpdateArea (PlayerUpdates.cpp:1277) : area->IsSanctuary()
+//                                                 -> pvpInfo.IsInNoPvPArea = true
+//   Player::UpdateZone (PlayerUpdates.cpp:1370-1375) : zone->flags & AREA_FLAG_CAPITAL
+//                                                 -> pvpInfo.IsInNoPvPArea = true
+// Mesure du 2026-09-24 : un filtrage porte sur la seule zone rend ZERO bot
+// interdit la ou il y en a 37 au niveau aire (P-101).
+//
+// POURQUOI ON NE LIT PAS pvpInfo.IsInNoPvPArea, QUI DIRAIT LA MEME CHOSE EN UN
+// ACCES. Parce qu'il est faux en capitale. Player::Update n'appelle UpdateZone
+// que si la ZONE change (PlayerUpdates.cpp:296-307) ; un simple changement
+// d'aire passe par UpdateArea seul, qui remet le champ a faux (:1276) et ne le
+// repose que pour un sanctuaire -- il ne lit JAMAIS AREA_FLAG_CAPITAL. Le
+// drapeau reste donc faux jusqu'au prochain changement de zone. Recense :
+// 33 sous-aires de capitale sont dans ce cas, dont 14 a Stormwind et 5 a
+// Orgrimmar (P-126). Recalculer depuis le DBC est immunise contre ce trou.
+//
+// ET LA LISTE DE CONF NE SUFFIT PAS. Le DBC marque 31 ZONES capitale, pas les
+// 8 capitales de faction : s'y ajoutent Shattrath (3703), Dalaran (4395),
+// Twisting Nether (4999), Dun Kazad (10306) et vingt zones custom Ascension
+// (10000-10331). Vingt-trois d'entre elles ne figurent dans AUCUNE liste de
+// conf. Allonger la liste ne pouvait donc pas remplacer la lecture du DBC.
+//
+// IsSanctuary() couvre aussi mapid == MAP_EBON_HOLD (DBCStructure.h:533-538) :
+// on ne le reecrit pas.
+//
+// COUT. Deux acces indexes dans sAreaTableStore, puis -- seulement si les deux
+// echouent -- les trois recherches lineaires de IsPvpProhibited. Les listes de
+// conf portent les 39 comptoirs neutres que le DBC ne marque pas (Gadgetzan,
+// Everlook, Area 52, Nighthaven...), donc on ne peut pas s'en passer.
+//
+// Un identifiant inconnu du DBC (0 compris) rend nullptr et ne conclut rien :
+// on retombe alors sur les listes, qui repondent faux. C'est le comportement
+// voulu -- ne pas interdire ce qu'on ne sait pas lire.
+bool PlayerbotAIConfig::CoaLieuSansPvp(uint32 zoneId, uint32 areaId)
+{
+    if (AreaTableEntry const* aire = sAreaTableStore.LookupEntry(areaId))
+        if (aire->IsSanctuary())
+            return true;
+
+    if (AreaTableEntry const* zone = sAreaTableStore.LookupEntry(zoneId))
+        if (zone->IsSanctuary() || (zone->flags & AREA_FLAG_CAPITAL))
+            return true;
+
+    return IsPvpProhibited(zoneId, areaId);
 }
 
 bool PlayerbotAIConfig::IsRestrictedHealerDPSMap(uint32 mapId) const

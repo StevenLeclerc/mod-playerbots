@@ -308,9 +308,15 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // demarrer (PlayerUpdates.cpp:1562-1568 ne l'arme que si IsInFFAPvPArea est
     // faux), ce qui est exactement voulu pour un mercenaire permanent.
     //
-    // Les capitales et les sanctuaires sont epargnes sans rien coder :
-    // UpdateFFAPvPState refuse de poser le drapeau quand IsInNoPvPArea est
-    // vrai, et le coeur le positionne deja pour ces zones.
+    // CE PARAGRAPHE ETAIT FAUX A MOITIE, ET IL A COUTE -- corrige le 2026-09-24.
+    // Il affirmait que << les capitales et les sanctuaires sont epargnes sans
+    // rien coder >>. VRAI POUR LES SANCTUAIRES : UpdateFFAPvPState refuse de
+    // poser le drapeau quand IsInNoPvPArea est vrai, et Player::UpdateArea le
+    // pose depuis l'AIRE. FAUX POUR LES CAPITALES : AREA_FLAG_CAPITAL n'est lu
+    // que par UpdateZone, qui ne tourne pas quand seule l'aire change ; le champ
+    // retombe alors a faux et y reste jusqu'au prochain changement de zone.
+    // 31 sous-aires de capitale sont dans ce cas (P-126). C'est pourquoi la
+    // condition ci-dessous porte desormais CoaLieuSansPvp, qui relit le DBC.
     //
     // CIBLE ET AGRESSEUR SONT DEUX CHOSES. Le drapeau rend attaquable ; il ne
     // rend pas chasseur. Avec WildPvp.AllBotsAreTargets, tout bot qui rode
@@ -394,12 +400,33 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // la POSE, pas l'eligibilite : le laisser dans la condition commune aurait
     // fait tomber le drapeau de tout mercenaire a chaque mort, puis revenir a
     // la resurrection.
+    //
+    // LE LIEU EST UNE CONDITION D'ELIGIBILITE, PAS UN CAS PARTICULIER. Le terme
+    // CoaLieuSansPvp ci-dessous est place EN DERNIER de la chaine, donc evalue
+    // seulement pour les bots que tout le reste a deja retenus : il coute deux
+    // acces DBC, et les trois recherches lineaires de IsPvpProhibited seulement
+    // si le DBC n'a rien dit.
+    //
+    // ET IL ARME LE RETRAIT SANS UNE LIGNE DE PLUS. Un bot qui entre dans un
+    // sanctuaire ou une capitale cesse de meriter le drapeau ; la branche
+    // `else if` ci-dessous, qui n'agissait jusqu'ici que sur une perte
+    // d'eligibilite (mort du camp, recrutement par un maitre), le lui retire
+    // donc au tick suivant. C'etait le trou : le module posait le drapeau, le
+    // coeur le refusait en silence, et rien ne le retirait quand le refus
+    // cessait -- voir P-126.
+    //
+    // ON NE LIT PAS pvpInfo.IsInNoPvPArea POUR CE TEST : il est faux dans les
+    // 31 sous-aires de capitale recensees (P-126). CoaLieuSansPvp recalcule
+    // depuis le DBC et y est immunise. GetZoneId()/GetAreaId() sont les valeurs
+    // rafraichies paresseusement par UpdatePositionData (Object.cpp:3166-3180),
+    // pas les m_zoneUpdateId/m_areaUpdateId du minuteur de zone.
     bool const meriteLeDrapeauFFA =
         sPlayerbotAIConfig.wildPvpEnabled &&
         bot->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
         ((sPlayerbotAIConfig.wildPvpAllBotsAreTargets && !GetMaster()) ||
          (!HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(bot) &&
-          sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue())));
+          sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))) &&
+        !sPlayerbotAIConfig.CoaLieuSansPvp(bot->GetZoneId(), bot->GetAreaId());
 
     if (meriteLeDrapeauFFA)
     {
@@ -5468,6 +5495,29 @@ std::string const PlayerbotAI::HandleRemoteCommand(std::string const command)
         if (AreaTableEntry const* zoneEntry = sAreaTableStore.LookupEntry(bot->GetZoneId()))
             out << " |" << zoneEntry->area_name[0] << "|";
 
+        return out.str();
+    }
+    else if (command == "aire")
+    {
+        // Rend ce qu'aucune interface n'exposait, et sans quoi le trou des
+        // capitales (P-126) restait deduit du code au lieu d'etre observe :
+        //   zone aire |nom de l aire| sanctuaire capitale noPvP ffa lieuSansPvp
+        // sanctuaire est lu sur l'AIRE, capitale sur la ZONE -- ce sont deux
+        // chemins distincts du coeur, et les confondre est le piege de P-101.
+        uint32 const zoneId = bot->GetZoneId();
+        uint32 const areaId = bot->GetAreaId();
+        AreaTableEntry const* aire = sAreaTableStore.LookupEntry(areaId);
+        AreaTableEntry const* zone = sAreaTableStore.LookupEntry(zoneId);
+
+        std::ostringstream out;
+        out << zoneId << " " << areaId
+            << " |" << (aire ? aire->area_name[0] : "?") << "|"
+            << " sanctuaire=" << ((aire && aire->IsSanctuary()) ? 1 : 0)
+            << " capitale=" << ((zone && (zone->flags & AREA_FLAG_CAPITAL)) ? 1 : 0)
+            << " noPvP=" << (bot->pvpInfo.IsInNoPvPArea ? 1 : 0)
+            << " ffa=" << (bot->IsFFAPvP() ? 1 : 0)
+            << " lieuSansPvp="
+            << (sPlayerbotAIConfig.CoaLieuSansPvp(zoneId, areaId) ? 1 : 0);
         return out.str();
     }
     else if (command == "tpos")
