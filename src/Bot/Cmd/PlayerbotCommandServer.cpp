@@ -5,6 +5,7 @@
  */
 
 #include "PlayerbotCommandServer.h"
+#include "CoaDirecteur.h"
 #include "IoContext.h"
 #include "RandomPlayerbotMgr.h"
 #include <boost/asio.hpp>
@@ -24,7 +25,9 @@ bool ReadLine(socket_ptr sock, std::string* buffer, std::string* line)
     {
         char buf[1025];
         boost::system::error_code error;
-        size_t n = sock->read_some(boost::asio::buffer(buf), error);
+        // sizeof(buf) - 1 : read_some pouvait remplir les 1025 octets, et
+        // buf[n] = 0 ecrivait alors un octet au-dela du tableau.
+        size_t n = sock->read_some(boost::asio::buffer(buf, sizeof(buf) - 1), error);
         if (n == static_cast<size_t>(-1) || error == boost::asio::error::eof)
             return false;
         else if (error)
@@ -46,7 +49,10 @@ void session(socket_ptr sock)
         std::string buffer, request;
         while (ReadLine(sock, &buffer, &request))
         {
-            std::string const response = RandomPlayerbotMgr::instance().HandleRemoteCommand(request) + "\n";
+            // P-137 : ce fil ne lit plus aucun objet de jeu. La requete est
+            // executee par le fil monde (CoaDirecteur::ViderRequetes, depuis
+            // WorldScript::OnUpdate) et ce fil attend la reponse, 2 s au plus.
+            std::string const response = CoaDirecteur::SoumettreRequete(request) + "\n";
             boost::asio::write(*sock, boost::asio::buffer(response.c_str(), response.size()));
             request = "";
         }

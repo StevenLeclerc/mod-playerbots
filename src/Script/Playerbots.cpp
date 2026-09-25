@@ -10,6 +10,7 @@
 #include "Channel.h"
 // Lot 4 du mercenaire chasseur : le catalogue de postes de guet, charge au
 // demarrage. Voir Ai/Coa/CoaPostes.h.
+#include "CoaDirecteur.h"
 #include "CoaPostes.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
@@ -416,10 +417,13 @@ public:
     void OnStartup() override
     {
         CoaCataloguePostes::Instance().Charger();
+        CoaDirecteur::ChargerArrets();
     }
 
     void OnUpdate(uint32 diff) override
     {
+        // Les requetes du port 8888 s'executent ici, sur le fil monde (P-137).
+        CoaDirecteur::ViderRequetes();
         PlayerbotWorldThreadProcessor::instance().Update(diff);
         sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
     }
@@ -576,6 +580,7 @@ void AddSC_mercenary_rewards();
 
 // Ai/Coa/CoaDuelCommandScript.cpp : `.coa plein <nom>`, pour le banc de duels.
 void AddSC_coa_duel_commandscript();
+void AddSC_coa_directeur();
 
 void AddPlayerbotsScripts()
 {
@@ -599,4 +604,5 @@ void AddPlayerbotsScripts()
     AddSC_randombot_level_mgr();
     AddSC_mercenary_rewards();
     AddSC_coa_duel_commandscript();
+    AddSC_coa_directeur();
 }
