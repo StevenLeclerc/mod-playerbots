@@ -1481,6 +1481,103 @@ private:
         return !sPlayerbotAIConfig.CoaLieuSansPvp(zone, aire);
     }
 
+    /*
+     * SORTIR D'UN LIEU SANS PvP, QUAND PLUS RIEN D'AUTRE NE MARCHE.
+     *
+     * LE DEFAUT QUE CECI FERME, mesure le 2026-09-25 sur les 246 mercenaires en
+     * service : 109 figes, dont 59 -- 54 % -- dans une aire sanctuaire ou
+     * capitale, la ou l'etat REPLI est precisement cense les sortir. Sonde
+     * ciblee sur ces bots, 503 ticks : « A:coa chasse - FAILED » sur 79,9 % des
+     * ticks. L'action etait poussee, jugee utile, et son Execute rendait faux.
+     *
+     * POURQUOI. TirerPoste epuise trois sources, et les trois echouent ensemble
+     * pour un bot en sanctuaire :
+     *   1. le catalogue de postes -- table absente en service ;
+     *   2. les hubs de GetTravelHubs -- ceux du palier d'un bas niveau sont dans
+     *      les zones de depart, qui sont TOUTES sanctuaires, donc EstChassable
+     *      les rejette tous ;
+     *   3. le repli SelectRandomGrindPos -- il ne retient que des cellules de la
+     *      MEME zone sauf en capitale (NewRpgBaseAction.cpp, garde
+     *      « !inCity && ... GetZoneId(...) != bot->GetZoneId() »), donc toutes
+     *      sanctuaires elles aussi.
+     * La premiere ecriture de ce lot avait VU ce cas et s'etait bornee a reculer
+     * le prochain essai a RepliEchecSecondes, en notant que SelectRandomGrindPos
+     * etait du code amont. Reculer un tirage qui ne peut pas aboutir ne le fait
+     * pas aboutir : le bot restait fige indefiniment.
+     *
+     * CE QUE CETTE FONCTION FAIT DE DIFFERENT, ET POURQUOI C'EST LA BONNE FORME.
+     * En REPLI, le but n'est PAS de trouver un poste de chasse : c'est de sortir
+     * de l'aire. On ne demande donc plus une destination a un cache indexe par
+     * palier -- dont le contenu est precisement le probleme -- on en cherche une
+     * par la GEOMETRIE, autour du bot, en s'eloignant par paliers. Franchir la
+     * frontiere d'un sanctuaire demande quelques centaines de yards ; aucun
+     * cache n'est necessaire pour cela.
+     *
+     * COUT, BORNE ET PAYE UNE SEULE FOIS. Au plus Directions x Rayons appels a
+     * EstChassable, soit 24, et on s'arrete au PREMIER point valide. Cette
+     * fonction n'est atteinte que lorsque les trois sources ont echoue, et
+     * RetenirUnPoste ne rejoue pas un tirage avant RepliChoixSecondes. Le cas
+     * courant -- un bot hors sanctuaire -- ne l'appelle jamais : le garde
+     * CoaLieuSansPvp en tete rend false en deux acces DBC.
+     *
+     * L'INVARIANT 3 EST TENU : le point rendu est passe par EstChassable, comme
+     * toute autre destination. On elargit la RECHERCHE, jamais le filtre.
+     */
+    WorldPosition TirerSortieDeLieuSansPvp()
+    {
+        uint32 zone = 0, aire = 0;
+        bot->GetZoneAndAreaId(zone, aire);
+        if (!sPlayerbotAIConfig.CoaLieuSansPvp(zone, aire))
+            return WorldPosition();
+
+        if (!bot->GetMap())
+            return WorldPosition();
+
+        // Huit directions, trois distances. Les rayons montent vite : une aire
+        // de depart fait quelques centaines de yards, une capitale davantage.
+        // 1200 yd reste tres en deca du plafond de voyage de TirerPoste.
+        static constexpr float Rayons[] = { 300.0f, 700.0f, 1200.0f };
+        static constexpr uint32 Directions = 8;
+
+        // Le point de depart de la rotation est tire, pour que deux bots au
+        // meme endroit ne sortent pas tous par le meme cote -- ce qui les
+        // ferait arriver en file sur le meme point et s'y empiler.
+        float const biais = float(urand(0, Directions - 1)) * (2.0f * float(M_PI) / Directions);
+
+        for (float rayon : Rayons)
+        {
+            for (uint32 i = 0; i < Directions; ++i)
+            {
+                float const angle = biais + float(i) * (2.0f * float(M_PI) / Directions);
+                float const x = bot->GetPositionX() + rayon * std::cos(angle);
+                float const y = bot->GetPositionY() + rayon * std::sin(angle);
+
+                // Z DE DEPART : le plus haut du Z du bot et du terrain brut.
+                // Map::GetHeight ne retient le terrain que s'il est SOUS le Z
+                // demande (Map.cpp, « fuzzyGe(z, gridHeight - ...) ») : partir du
+                // Z du bot rejetait toute sortie qui MONTE -- or une vallee de
+                // depart se quitte presque toujours en montant. Le terrain brut
+                // ignore les WMO ; le Z du bot, s'il est plus haut (une ville
+                // batie), les retrouve en cherchant vers le bas.
+                float const z = std::max(bot->GetPositionZ(), bot->GetMap()->GetGridHeight(x, y));
+                WorldPosition point(bot->GetMapId(), x, y, z);
+
+                // PoserSurLeSol AVANT EstChassable, et pas l'inverse : le Z brut
+                // d'un point calcule a plat peut etre sous terre ou en l'air, et
+                // EstChassable resout l'aire depuis la position -- donc depuis
+                // un Z qui doit etre le bon. Meme ordre que les deux autres
+                // tirages de ce fichier.
+                if (!PoserSurLeSol(point))
+                    continue;
+
+                if (EstChassable(point))
+                    return point;
+            }
+        }
+
+        return WorldPosition();
+    }
+
     // Rend true quand un poste a ete retenu. Compte « poste pris » a ce
     // moment-la, et seulement a ce moment-la.
     bool RetenirUnPoste(bool lePlusProche)
@@ -1521,6 +1618,21 @@ private:
             // On recule donc le prochain essai a RepliEchecSecondes. C'est la
             // borne dont ce lot dispose : la boucle interne de
             // SelectRandomGrindPos est du code amont, hors de ce mandat.
+            // DERNIERE CHANCE, ET ELLE NE VAUT QUE POUR UN LIEU SANS PvP.
+            // Les trois sources de TirerPoste viennent d'echouer ensemble ; si
+            // le bot est dans un sanctuaire ou une capitale, c'est le cas
+            // structurel decrit en tete de TirerSortieDeLieuSansPvp, et reculer
+            // le prochain essai ne le debloquera jamais. On cherche alors une
+            // sortie par la geometrie. Hors lieu sans PvP, ce garde rend
+            // WorldPosition() en deux acces DBC et on recule comme avant.
+            WorldPosition const sortie = TirerSortieDeLieuSansPvp();
+            if (sortie != WorldPosition())
+            {
+                poste = sortie;
+                CoaChasseComptePostePris();
+                return true;
+            }
+
             prochainChoix = maintenant + RepliEchecSecondes;
             return false;
         }
