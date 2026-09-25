@@ -5,6 +5,7 @@
  */
 
 #include "GrindTargetValue.h"
+#include "CoaDirecteur.h"
 #include "NewRpgInfo.h"
 #include "Playerbots.h"
 #include "ReputationMgr.h"
@@ -45,6 +46,18 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
             continue;
 
         return unit;
+    }
+
+    // CoA -- Directeur, lot D2b suite : TRAJET PACIFIQUE. En trajet d'une
+    // affectation du Directeur (option Directeur.TrajetPacifique), le bot ne
+    // CHOISIT aucune cible : ni creature, ni joueur. Place APRES la boucle des
+    // assaillants ci-dessus : qui l'attaque reste sa cible (riposte), et un
+    // combat deja engage ne passe pas par ici. Sans affectation : un
+    // chargement atomique, puis le code d'origine.
+    if (CoaDirecteur::EnTrajetPacifique(bot))
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTES_TRAJET);
+        return nullptr;
     }
 
     GuidVector targets = *context->GetValue<GuidVector>("possible targets");

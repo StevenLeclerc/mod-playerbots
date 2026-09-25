@@ -10,6 +10,7 @@
 
 #include "RandomBotLevelMgr.h"
 #include "ArenaTeamMgr.h"
+#include "CoaDirecteur.h"
 #include "DatabaseEnv.h"
 #include "LFGMgr.h"
 #include "Log.h"
@@ -409,7 +410,21 @@ void RandomBotLevelMgr::AdjustBotToRange(Player* bot, int targetRangeIndex, Team
     if (freshStart && !start)
         start = sObjectMgr->GetPlayerInfo(bot->getRace(), bot->getClass());
     if (start)
-        bot->TeleportTo(start->mapId, start->positionX, start->positionY, start->positionZ, start->orientation);
+    {
+        // CoA -- Directeur, lot D2b (SPEC § 6.3) : seule teleportation
+        // aleatoire qui ne passe pas par RandomTeleport, d'ou la meme garde.
+        // Cette branche est celle du FreshStart (start n'est non nul qu'avec
+        // lui). Si le NIVEAU CHANGE, la destination du Directeur n'est plus de
+        // la tranche du bot et le suivi leve l'affectation a la seconde
+        // suivante (raison `niveau`, SPEC § 6.2) : on laisse donc partir le bot
+        // vers sa zone de depart, sinon plus rien ne l'y ramenerait (revue D2).
+        // On ne garde le bot en place que s'il est DEJA a ce niveau : sa
+        // destination reste alors de sa tranche, et l'affectation continue.
+        if (newLevel == botOriginalLevel && CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), nullptr))
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_SUSPENDUS);
+        else
+            bot->TeleportTo(start->mapId, start->positionX, start->positionY, start->positionZ, start->orientation);
+    }
     else if (newLevel != botOriginalLevel && sPlayerbotAIConfig.levelBracketsFreshStart)
         sRandomPlayerbotMgr.RandomTeleportForLevel(bot); // a level 45 bot has no business in Elwynn
 

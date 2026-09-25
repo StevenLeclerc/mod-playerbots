@@ -5,6 +5,7 @@
  */
 
 #include "ReviveFromCorpseAction.h"
+#include "CoaDirecteur.h"
 #include "Corpse.h"
 #include "Event.h"
 #include "FleeManager.h"
@@ -57,6 +58,13 @@ bool ReviveFromCorpseAction::Execute(Event event)
 
         if (dCount >= 5)
             return botAI->DoSpecificAction("spirit healer");
+
+        // CoA -- Directeur, lot D2b suite : RELEVE AU CIMETIERE. Mort en
+        // trajet d'une affectation du Directeur (etat pose par le fil monde,
+        // option Directeur.ReleveCimetiere) : ne pas se relever au cadavre, au
+        // milieu de ce qui l'a tue. Sans etat : un chargement atomique.
+        if (CoaDirecteur::MortEnTrajet(bot->GetGUID().GetCounter()))
+            return botAI->DoSpecificAction("spirit healer");
     }
 
     LOG_DEBUG("playerbots", "Bot {} {}:{} <{}> revives at body", bot->GetGUID().ToString().c_str(),
@@ -90,6 +98,14 @@ bool FindCorpseAction::Execute(Event /*event*/)
     // }
 
     uint32 dCount = AI_VALUE(uint32, "death count");
+
+    // CoA -- Directeur, lot D2b suite : RELEVE AU CIMETIERE. Mort en trajet
+    // d'une affectation du Directeur : le fantome ne retourne pas au cadavre,
+    // il va a l'esprit-guerisseur (meme action que le repli plus bas). Avant
+    // la branche « 5 morts » : c'est la premiere mort qu'on veut detourner.
+    // Sans etat : un chargement atomique, puis le code d'origine.
+    if (!botAI->HasGameClientMaster() && CoaDirecteur::MortEnTrajet(bot->GetGUID().GetCounter()))
+        return botAI->DoSpecificAction("spirit healer", Event(), true);
 
     if (!botAI->HasGameClientMaster())
     {
@@ -303,8 +319,22 @@ bool SpiritHealerAction::Execute(Event /*event*/)
     uint32 dCount = AI_VALUE(uint32, "death count");
     int64 deadTime = time(nullptr) - corpse->GetGhostTime();
 
+    // CoA -- Directeur, lot D2b suite : mort en trajet d'une affectation du
+    // Directeur (etat pose par le fil monde, option Directeur.ReleveCimetiere) :
+    // le cimetiere le plus proche, jamais celui de la zone de depart, que
+    // choisirait sinon le profil d'un bot mort plusieurs fois en route (morts
+    // > 10, mort > 15 min, durabilite < 10 %). Sans etat : un chargement
+    // atomique, puis le choix d'origine.
+    bool const mortEnTrajet = CoaDirecteur::MortEnTrajet(bot->GetGUID().GetCounter());
     GraveyardStruct const* ClosestGrave =
-        GetGrave(dCount > 10 || deadTime > 15 * MINUTE || AI_VALUE(uint8, "durability") < 10);
+        GetGrave(!mortEnTrajet && (dCount > 10 || deadTime > 15 * MINUTE || AI_VALUE(uint8, "durability") < 10));
+
+    // CoA -- garde anti-plantage : l'amont dereferencait ClosestGrave avant son
+    // test de nullite (plus bas). Chemin amont aussi hors trajet ; sans
+    // cimetiere, l'amont rendait deja false, sauf a trouver un esprit-guerisseur
+    // a portee de vue d'un pointeur nul (comportement indefini).
+    if (!ClosestGrave)
+        return false;
 
     if (bot->GetDistance2d(ClosestGrave->x, ClosestGrave->y) < sPlayerbotAIConfig.sightDistance)
     {
@@ -329,11 +359,6 @@ bool SpiritHealerAction::Execute(Event /*event*/)
                 return true;
             }
         }
-    }
-
-    if (!ClosestGrave)
-    {
-        return false;
     }
 
     bool moved = false;

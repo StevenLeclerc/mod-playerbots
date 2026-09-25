@@ -5,6 +5,7 @@
  */
 
 #include "EnemyPlayerValue.h"
+#include "CoaDirecteur.h"
 #include "CombatManager.h"
 #include "GameTime.h"
 #include "MercenaryRewards.h"
@@ -284,7 +285,16 @@ Unit* EnemyPlayerValue::Calculate()
 
     // 2. Find enemy player in range.
 
-    GuidVector players = AI_VALUE(GuidVector, "nearest enemy players");
+    // CoA -- Directeur, lot D2b suite : TRAJET PACIFIQUE. En trajet d'une
+    // affectation du Directeur, aucun joueur n'est CONVOITE : cette etape 2
+    // est sautee (liste vide). L'etape 1 (references de combat PvP : qui l'a
+    // frappe, ou qu'il frappe deja) et l'etape 3 (assaillants d'un membre du
+    // groupe) restent : ce sont des ripostes. Sans affectation : un chargement
+    // atomique, puis le code d'origine.
+    bool const trajetPacifique = CoaDirecteur::EnTrajetPacifique(bot);
+    if (trajetPacifique)
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTES_TRAJET);
+    GuidVector players = trajetPacifique ? GuidVector() : AI_VALUE(GuidVector, "nearest enemy players");
     float const maxAggroDistance = GetMaxAttackDistance();
     for (auto const& gTarget : players)
     {

@@ -414,6 +414,29 @@ public:
     // l'index. Le laisser a 1 dans ce cas ne coute que le remplissage.
     bool wildPvpIndexProies;
 
+    // Directeur, lot D2a (Ai/Coa/CoaDirecteur.cpp, SPEC-directeur-D2.md § 2.3).
+    // TOUT EST ETEINT PAR DEFAUT : absentes de la conf en service, ces options
+    // valent leur defaut et le bus ne lit rien. Lues par le fil monde seul.
+    bool directeurBus;                        // interrupteur general
+    std::string directeurVerbes;              // "treve,..." ; lever toujours accepte si bus
+    uint32 directeurBusIntervalleMs;          // cadence de sondage de la file
+    uint32 directeurMaxCommandesParMinute;    // seau a jetons
+    uint32 directeurMaxTreves;                // treves actives au plus
+    // Lot D2c (SPEC § 5) : inertes tant que `suspendre_mercenaire` n'est pas
+    // dans directeurVerbes.
+    uint32 directeurMaxSuspensions;           // suspensions actives au plus
+    bool directeurSuspensionModeRpg;          // 0 : garde sa chasse ; 1 : mode RPG
+    // Lot D2b (SPEC § 6) : inertes tant que `reaffecter` ou `alleger` n'est
+    // pas dans directeurVerbes.
+    uint32 directeurMaxAffectations;          // affectations actives au plus
+    uint32 directeurTrajetMaxSecondes;        // trajet non arrive : abandonne au-dela
+    // Lot D2b, suite (25/09) : trois comportements qui ne valent QUE sous une
+    // affectation en TRAJET, tous eteints par defaut (Ai/Coa/CoaDirecteur.h).
+    bool directeurTrajetPacifique;            // en trajet : aucune cible choisie, riposte seule
+    bool directeurReleveCimetiere;            // mort en trajet : releve a l'esprit-guerisseur
+    uint32 directeurReleveSecondes;           // duree de l'etat mort_en_trajet (plafond)
+    bool directeurEtapes;                     // action `E-...` : etape d'itineraire, pas de sejour
+
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.
     bool layaEnabled;

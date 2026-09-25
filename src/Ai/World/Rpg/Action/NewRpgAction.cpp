@@ -8,6 +8,7 @@
 #include "AreaDefines.h"
 #include "BroadcastHelper.h"
 #include "ChatHelper.h"
+#include "CoaDirecteur.h"
 #include "DBCStores.h"
 #include "GossipDef.h"
 #include "IVMapMgr.h"
@@ -234,12 +235,57 @@ bool StartRpgDoQuestAction::Execute(Event event)
 bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
 {
     NewRpgInfo& info = botAI->rpgInfo;
+
+    // CoA -- Directeur, lot D2b (SPEC-directeur-D2.md § 6.3) : LA LAISSE. En
+    // TRAJET, hors du disque et pas en vol, le bot va au disque et nulle part
+    // ailleurs : aucun statut neuf n'est tire (le switch ci-dessous, seul
+    // appelant de RandomChangeStatus, n'est pas atteint). C'est cette action,
+    // proprietaire de rpgInfo, qui l'ecrit : pas de second ecrivain (P-134).
+    // Dans le disque, ou en SEJOUR : rien, le parcours est normal.
+    {
+        CoaDirecteur::Affectation aff;
+        if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
+            aff.phase == CoaDirecteur::CoaDirPhase::Trajet && aff.carte == bot->GetMapId() && !bot->IsInFlight() &&
+            !CoaDirecteur::DansLeDisque(aff, bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY()))
+        {
+            auto const* allerA = std::get_if<NewRpgInfo::GoGrind>(&info.data);
+            bool const dejaVersLeDisque =
+                allerA && CoaDirecteur::DansLeDisque(aff, allerA->pos.GetMapId(), allerA->pos.GetPositionX(),
+                                                     allerA->pos.GetPositionY());
+            if (!dejaVersLeDisque)
+            {
+                float x = aff.x, y = aff.y, z = aff.z;
+                CoaDirecteur::TirerDansLeDisque(bot->GetMap(), aff, x, y, z);
+                info.ChangeToGoGrind(WorldPosition(aff.carte, x, y, z));
+                // RPG_REST l'a assis (NewRpgBaseAction.cpp, RandomChangeStatus) :
+                // assis, il ne marcherait pas.
+                if (bot->getStandState() != UNIT_STAND_STATE_STAND)
+                    bot->SetStandState(UNIT_STAND_STATE_STAND);
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LAISSES_RPG);
+                return true;
+            }
+        }
+    }
+
     NewRpgStatus status = info.GetStatus();
     switch (status)
     {
         case RPG_IDLE:
+        {
+            // CoA -- Directeur, lot D2b suite : ETAPE D'ITINERAIRE atteinte.
+            // La laisse ci-dessus n'a pas mordu (le bot est dans le disque) et
+            // l'etape ne passe jamais en SEJOUR : le bot attend l'etape
+            // suivante SUR PLACE. Pas de camp, de grind lointain, de quete, de
+            // vol ni de PvP exterieur, qui l'emmeneraient loin du disque ;
+            // errance ou repos seulement. Sans affectation : un chargement
+            // atomique, puis le tirage d'origine.
+            CoaDirecteur::Affectation aff;
+            if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.etape &&
+                aff.phase == CoaDirecteur::CoaDirPhase::Trajet && aff.carte == bot->GetMapId())
+                return RandomChangeStatus({RPG_WANDER_RANDOM, RPG_REST});
             return RandomChangeStatus({RPG_GO_CAMP, RPG_GO_GRIND, RPG_WANDER_RANDOM, RPG_WANDER_NPC, RPG_DO_QUEST,
                                        RPG_TRAVEL_FLIGHT, RPG_REST, RPG_OUTDOOR_PVP});
+        }
 
         case RPG_GO_GRIND:
         {
@@ -334,7 +380,16 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
 
 bool NewRpgGoGrindAction::Execute(Event /*event*/)
 {
-    if (SearchQuestGiverAndAcceptOrReward())
+    // CoA -- Directeur, lot D2b (SPEC § 6.3) : en TRAJET, pas de quete en route.
+    // Le bot va droit au disque ; il prendra et rendra ses quetes en SEJOUR.
+    // Sans affectation : un chargement atomique. `quetes_trajet_evitees` compte
+    // les RECHERCHES sautees (une par tick de GO_GRIND en trajet), pas des
+    // quetes : le seul usage de la mesure est d'etre > 0 (§ 6.5).
+    CoaDirecteur::Affectation aff;
+    if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
+        aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_QUETES_TRAJET_EVITEES);
+    else if (SearchQuestGiverAndAcceptOrReward())
         return true;
     if (auto* data = std::get_if<NewRpgInfo::GoGrind>(&botAI->rpgInfo.data))
     {
@@ -366,7 +421,17 @@ bool NewRpgGoCampAction::Execute(Event /*event*/)
 
 bool NewRpgWanderRandomAction::Execute(Event /*event*/)
 {
-    if (SearchQuestGiverAndAcceptOrReward())
+    // CoA -- Directeur, lot D2b suite : ETAPE d'itineraire en TRAJET (une
+    // etape atteinte, qui erre dans son disque en attendant la suivante), pas
+    // de quete, comme NewRpgGoGrindAction. `aff.etape` n'est vrai que si
+    // Directeur.Etapes = 1 a la pose : option a 0, une affectation ordinaire
+    // garde la recherche de quetes du binaire D2. Sans affectation : un
+    // chargement atomique, puis le code d'origine.
+    CoaDirecteur::Affectation aff;
+    if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.etape &&
+        aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_QUETES_TRAJET_EVITEES);
+    else if (SearchQuestGiverAndAcceptOrReward())
         return true;
 
     return MoveRandomNear();

@@ -27,6 +27,7 @@
 #include "SharedDefines.h"
 #include "SpellInfo.h"
 #include "CoaAiObjectContext.h"
+#include "CoaDirecteur.h"
 #include "SpellMgr.h"
 #include "WarlockAiObjectContext.h"
 #include "WarriorAiObjectContext.h"
@@ -714,7 +715,15 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
             bool const mercenaireSansPve =
                 sPlayerbotAIConfig.wildPvpEnabled && sPlayerbotAIConfig.wildPvpMercenariesSkipPve &&
                 player->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
-                sPlayerbotAIConfig.IsMercenary(player->GetGUID().GetRawValue());
+                sPlayerbotAIConfig.IsMercenary(player->GetGUID().GetRawValue()) &&
+                // CoA -- Directeur, lot D2c (SPEC-directeur-D2.md § 5.2) : un
+                // mercenaire SUSPENDU EN MODE RPG recoit la composition d'un bot
+                // ordinaire (branche else). La fabrique reste seule proprietaire
+                // de la composition : elle LIT la consigne, et le Directeur ne
+                // fait qu'appeler ResetStrategies a la pose et a la levee. Rien
+                // n'est ajoute ni retire par nom (P-130). IsMercenary, lui, ne
+                // change pas : drapeau FFA et recompenses restent les siens.
+                !CoaDirecteur::MercenaireEnRpg(player->GetGUID().GetCounter());
 
             if (mercenaireSansPve)
             {

@@ -3269,3 +3269,134 @@ AiPlayerbot.WildPvp.DecrochagePct = 30
 #        Default: 0 (eteint - le tirage se comporte exactement comme au lot 4)
 #                 1 - le tirage du poste de guet est pondere par la presence reelle de proies
 AiPlayerbot.WildPvp.IndexProies = 0
+
+###################################################################################################
+###################################################################################################
+#    DIRECTEUR -- BUS DE COMMANDES (lot D2a)
+#
+#    Le service externe `coa-directeur` depose des commandes dans la table
+#    acore_characters.coa_dir_commande ; le fil monde les lit en asynchrone, les controle
+#    (echeance, epoque, verbe allume, arret du joueur, budget, bornes, plafond, cible en ligne),
+#    pose SES consignes et les acquitte (colonnes statut, raison, vu_le).
+#    Specification : coa-project/docs/SPEC-directeur-D2.md, § 3 et § 4.
+#
+#    TOUT EST ETEINT PAR DEFAUT. Absentes de la conf, ces options valent leur defaut : le bus ne
+#    lit rien et aucune consigne n'existe. La table vient de la migration
+#    data/sql/characters/updates/2026_09_25_01_coa_directeur_bus.sql, A APPLIQUER AVANT le
+#    binaire (P-131) ; absente, le bus reste inerte et le dit une fois au demarrage.
+#
+#    Rechargement : .reload config PUIS playerbots rndbot reload, dans cet ordre (P-125).
+#
+###################################################################################################
+
+###################################################################################################
+#    AiPlayerbot.Directeur.Bus
+#        Interrupteur general. A 0 : aucune lecture de la file, toute consigne en cours est levee
+#        (statut `leve`, raison `bus_eteint`), aucune ligne de bilan `coa directeur bus:`, et la
+#        requete `lieux` du port 8888 rend `invalid` sans lire le terrain (aucune grille creee).
+#        Default: 0 (eteint)
+#                 1 - la file est lue toutes les BusIntervalleMs
+AiPlayerbot.Directeur.Bus = 0
+
+###################################################################################################
+#    AiPlayerbot.Directeur.Verbes
+#        Verbes acceptes, separes par des virgules, parmi : treve, suspendre_mercenaire,
+#        reaffecter, alleger. `lever` est toujours accepte quand Bus = 1.
+#        Ce binaire porte `treve` (D2a), `suspendre_mercenaire` (D2c), `reaffecter` et `alleger`
+#        (D2b) : un autre verbe liste ici est refuse `verbe_eteint`.
+#        Default: "" (aucun)
+AiPlayerbot.Directeur.Verbes = ""
+
+###################################################################################################
+#    AiPlayerbot.Directeur.BusIntervalleMs
+#        Cadence de sondage de la file, en millisecondes. Une seule lecture en vol a la fois.
+#        En dessous de 100, la valeur est ramenee a 100.
+#        Default: 1000
+AiPlayerbot.Directeur.BusIntervalleMs = 1000
+
+###################################################################################################
+#    AiPlayerbot.Directeur.MaxCommandesParMinute
+#        Seau a jetons : commandes executables par minute (refus `budget` au-dela). `lever` n'en
+#        consomme pas. A 0, toute commande autre que `lever` est refusee.
+#        Default: 60
+AiPlayerbot.Directeur.MaxCommandesParMinute = 60
+
+###################################################################################################
+#    AiPlayerbot.Directeur.MaxTreves
+#        Treves actives au plus (refus `plafond` au-dela). Une treve reposee sur une cible deja
+#        couverte ne compte pas en plus.
+#        Default: 100
+AiPlayerbot.Directeur.MaxTreves = 100
+
+###################################################################################################
+#    AiPlayerbot.Directeur.MaxSuspensions
+#        Verbe `suspendre_mercenaire` (lot D2c) : suspensions actives au plus (refus `plafond`
+#        au-dela). Une suspension reposee sur un bot deja suspendu la remplace et ne compte pas
+#        en plus. Duree acceptee : 60 a 1800 s.
+#        Default: 30
+AiPlayerbot.Directeur.MaxSuspensions = 30
+
+###################################################################################################
+#    AiPlayerbot.Directeur.SuspensionModeRpg
+#        Ce que fait un mercenaire suspendu. Dans les deux modes il ne convoite AUCUN joueur
+#        (riposte permise), garde son drapeau FFA et reste mercenaire (recompenses, proie).
+#        Le mode est fige a la pose : changer l'option ne bascule pas les suspensions en cours.
+#        Default: 0 - il garde sa composition de mercenaire (chasse, move random)
+#                 1 - mode RPG : la fabrique lui compose celle d'un bot ordinaire (grind, new rpg,
+#                     quetes) jusqu'a la levee ; les strategies sont reconstruites a la pose et a
+#                     la levee (ResetStrategies), jamais ajoutees ou retirees par nom (P-130)
+AiPlayerbot.Directeur.SuspensionModeRpg = 0
+
+###################################################################################################
+#    AiPlayerbot.Directeur.MaxAffectations
+#        Verbes `reaffecter` et `alleger` (lot D2b) : affectations actives au plus (refus `plafond`
+#        au-dela). Une affectation reposee sur un bot deja affecte la remplace et ne compte pas en
+#        plus. Duree acceptee : 60 a 3600 s ; rayon du disque : 40 a 300 yd. Sous affectation, le
+#        bot n'est plus teleporte au hasard ; il marche jusqu'au disque SANS prendre de quete
+#        (trajet), puis reprend son parcours normal (sejour).
+#        Default: 60
+AiPlayerbot.Directeur.MaxAffectations = 60
+
+###################################################################################################
+#    AiPlayerbot.Directeur.TrajetMaxSecondes
+#        Au-dela, un trajet qui n'a pas atteint son disque est abandonne (statut `leve`, raison
+#        `trajet_abandonne`) et la teleportation aleatoire reprend. En dessous de 60, ramene a 60.
+#        Default: 900
+AiPlayerbot.Directeur.TrajetMaxSecondes = 900
+
+###################################################################################################
+#    AiPlayerbot.Directeur.TrajetPacifique
+#        Lot D2b, suite. Ne vaut QUE pour un bot en TRAJET d'une affectation du Directeur, sur la
+#        carte de son disque. Il ne CHOISIT plus de cible : ni creature a grinder, ni joueur a
+#        convoiter, ni proie a traquer. Il se defend seulement : ce qui l'attaque (liste des
+#        assaillants, references de combat PvP) et un combat deja engage restent intacts. En
+#        sejour, sans affectation ou a 0 : comportement d'origine.
+#        Default: 0
+AiPlayerbot.Directeur.TrajetPacifique = 0
+
+###################################################################################################
+#    AiPlayerbot.Directeur.ReleveCimetiere
+#        Un bot mort en TRAJET voit son affectation levee (raison `mort`). A 1, le Directeur pose en
+#        plus un etat `mort_en_trajet` : l'esprit de ce bot ne retourne pas a son cadavre (au milieu
+#        de ce qui l'a tue) mais se releve a l'esprit-guerisseur du cimetiere. L'etat tombe a la
+#        resurrection, a la deconnexion, ou apres ReleveSecondes. A 0 : comportement d'origine.
+#        Default: 0
+AiPlayerbot.Directeur.ReleveCimetiere = 0
+
+###################################################################################################
+#    AiPlayerbot.Directeur.ReleveSecondes
+#        Duree maximale de l'etat `mort_en_trajet`. Ramenee entre 60 et 3600.
+#        Default: 600
+AiPlayerbot.Directeur.ReleveSecondes = 600
+
+###################################################################################################
+#    AiPlayerbot.Directeur.Etapes
+#        A 1, une affectation dont la colonne `action` de coa_dir_commande commence par `E-`
+#        (forme `E-<nombre>`, admise par l'emetteur) est une ETAPE d'itineraire : arrive dans son
+#        disque, le bot ne passe PAS en sejour ; il reste en trajet (pacifique si TrajetPacifique,
+#        sans teleportation aleatoire, sans quete) jusqu'a ce que l'affectation suivante le
+#        remplace ou que l'echeance tombe. Arrivee : ligne `coa directeur etape: ... arrivee=1`,
+#        et le 12e champ de `consignes` (port 8888) passe de 0 a 1. A 0 : `E-` est une affectation
+#        ordinaire.
+#        Default: 0
+AiPlayerbot.Directeur.Etapes = 0

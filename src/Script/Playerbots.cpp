@@ -418,12 +418,17 @@ public:
     {
         CoaCataloguePostes::Instance().Charger();
         CoaDirecteur::ChargerArrets();
+        CoaDirecteur::DemarrerBus();   // D2a : table absente -> bus inerte
     }
 
     void OnUpdate(uint32 diff) override
     {
         // Les requetes du port 8888 s'executent ici, sur le fil monde (P-137).
         CoaDirecteur::ViderRequetes();
+        // D2a : bus de commandes (inerte si AiPlayerbot.Directeur.Bus = 0) ;
+        // puis les arrets en base, cadences, MEME bus eteint (correctif C2).
+        CoaDirecteur::TraiterBus(diff);
+        CoaDirecteur::Persister();
         PlayerbotWorldThreadProcessor::instance().Update(diff);
         sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
     }

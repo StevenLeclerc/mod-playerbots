@@ -7,6 +7,7 @@
 #include "NewRpgBaseAction.h"
 #include "BroadcastHelper.h"
 #include "ChatHelper.h"
+#include "CoaDirecteur.h"
 #include "Creature.h"
 #include "GameObject.h"
 #include "GossipDef.h"
@@ -108,6 +109,31 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         // its RPG objective instead of oscillating indefinitely.
         botAI->rpgInfo.stuckTs = getMSTime();
         botAI->rpgInfo.stuckAttempts = 0;
+
+        // CoA -- Directeur, lot D2b (SPEC-directeur-D2.md § 6.3) : ENLISEMENT EN
+        // TRAJET. Le saut ne part jamais sous les yeux d'un humain (150 yd, le
+        // seuil de RandomPlayerbotMgr::RandomTeleport), ni vers un point hors
+        // du disque : le bot retentera sa marche (compteurs deja remis a zero
+        // ci-dessus, prochain essai dans stuckTime). Sinon le saut est garde --
+        // il arrive DANS le disque, que le service a choisi loin des humains --
+        // et il est journalise. C'est cette action qui lit la consigne : aucun
+        // ecrivain de plus (P-134). Hors trajet : comportement amont inchange.
+        CoaDirecteur::Affectation aff;
+        if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
+            aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
+        {
+            if (!CoaDirecteur::DansLeDisque(aff, dest.GetMapId(), dest.GetPositionX(), dest.GetPositionY()) ||
+                dest.GetMapId() != bot->GetMapId() || botAI->HasPlayerNearby(150.0f))
+            {
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_RETENUS);
+                return false;
+            }
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_DIRIGES);
+            LOG_INFO("playerbots", "coa directeur enlisement: guid={} carte={} de_x={:.1f} de_y={:.1f} a_x={:.1f} a_y={:.1f}",
+                     bot->GetGUID().GetCounter(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(),
+                     dest.GetPositionX(), dest.GetPositionY());
+        }
+
         AreaTableEntry const* entry = sAreaTableStore.LookupEntry(bot->GetZoneId());
         std::string zone_name = PlayerbotAI::GetLocalizedAreaName(entry);
         LOG_DEBUG(

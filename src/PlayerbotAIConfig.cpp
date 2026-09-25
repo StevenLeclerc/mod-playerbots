@@ -745,6 +745,31 @@ bool PlayerbotAIConfig::Initialize()
     wildPvpDecrochagePct = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.DecrochagePct", 30);
     wildPvpIndexProies = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.IndexProies", false);
 
+    // Directeur, lot D2a : inerte par defaut (SPEC-directeur-D2.md § 2.3).
+    directeurBus = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Bus", false);
+    directeurVerbes = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.Verbes", "");
+    directeurBusIntervalleMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.BusIntervalleMs", 1000);
+    directeurMaxCommandesParMinute = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxCommandesParMinute", 60);
+    directeurMaxTreves = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxTreves", 100);
+    directeurMaxSuspensions = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxSuspensions", 30);
+    directeurSuspensionModeRpg = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.SuspensionModeRpg", false);
+    directeurMaxAffectations = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxAffectations", 60);
+    directeurTrajetMaxSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.TrajetMaxSecondes", 900);
+    directeurTrajetPacifique = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.TrajetPacifique", false);
+    directeurReleveCimetiere = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ReleveCimetiere", false);
+    directeurReleveSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.ReleveSecondes", 600);
+    directeurEtapes = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Etapes", false);
+    // Sous 60 s, un trajet de 600 yd a pied serait abandonne avant d'arriver.
+    if (directeurTrajetMaxSecondes < 60)
+        directeurTrajetMaxSecondes = 60;
+    if (directeurReleveSecondes < 60)
+        directeurReleveSecondes = 60;
+    if (directeurReleveSecondes > 3600)
+        directeurReleveSecondes = 3600;
+    // Sous 100 ms, le fil monde enverrait une requete a presque chaque tick.
+    if (directeurBusIntervalleMs < 100)
+        directeurBusIntervalleMs = 100;
+
     // Au-dela de 100 le pourcentage n'a pas de sens : le bot decrocherait de
     // TOUT combat des le premier coup recu, et l'etat RETOUR ne rentrerait
     // jamais au poste. On le ramene plutot que de le subir.

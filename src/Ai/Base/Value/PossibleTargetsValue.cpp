@@ -7,6 +7,7 @@
 #include "PossibleTargetsValue.h"
 #include "AreaDefines.h"
 #include "AttackersValue.h"
+#include "CoaDirecteur.h"
 #include "CellImpl.h"
 #include "DBCStructure.h"
 #include "GridNotifiers.h"
@@ -62,6 +63,37 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
                 if (petOwner && petOwner == unit)
                     return true;  // Enemy's pet attacking
             }
+        }
+
+        // CoA -- Directeur, lot D2a : verbe `treve` (SPEC-directeur-D2.md § 4.3).
+        // Place APRES l'autodefense (la riposte reste permise, un combat deja
+        // engage n'est pas interrompu) et AVANT les exemptions champ de
+        // bataille, duel et capitales, qui rendent true : placee apres, la
+        // treve ne mordrait pas en ville. Champ de bataille, arene et duel sont
+        // donc testes ici.
+        // SousTreve d'abord : sans treve, c'est un seul chargement atomique.
+        if (CoaDirecteur::SousTreve(unit->GetGUID().GetCounter()) && !bot->InBattleground() &&
+            !bot->InArena() && !(bot->duel && bot->duel->Opponent == unit))
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_TREVE);
+            return false;
+        }
+
+        // CoA -- Directeur, lot D2c : verbe `suspendre_mercenaire` (SPEC § 5.2,
+        // point 1). La garde porte sur le BOT, pas sur le candidat : un
+        // mercenaire suspendu ne convoite AUCUN joueur. Placee dans le parent,
+        // elle couvre « nearest enemy players » (donc la chasse et l'embuscade)
+        // ET le grind du mode RPG, qui sinon proposerait des joueurs FFA.
+        // Meme place que la treve, pour les memes raisons : apres
+        // l'autodefense (qui a deja rendu true pour qui l'attaque), avant les
+        // exemptions qui rendent true. Champ de bataille, arene et duel restent
+        // permis : ce n'est pas de la convoitise.
+        // MercenaireSuspendu d'abord : sans suspension, un chargement atomique.
+        if (CoaDirecteur::MercenaireSuspendu(bot->GetGUID().GetCounter()) && !bot->InBattleground() &&
+            !bot->InArena() && !(bot->duel && bot->duel->Opponent == unit))
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_SUSPENSION);
+            return false;
         }
 
         // Skip restrictions in BG/Arena

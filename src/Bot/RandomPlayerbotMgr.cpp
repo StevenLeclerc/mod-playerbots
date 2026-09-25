@@ -11,6 +11,7 @@
 #include "Cell.h"
 #include "CellImpl.h"
 #include "ChannelMgr.h"
+#include "CoaDirecteur.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
 #include "DatabaseEnv.h"
@@ -220,7 +221,10 @@ void RandomPlayerbotMgr::LogPlayerLocation()
                 }
 
                 out << (bot->IsInCombat() ? "combat" : "safe") << ",";
-                out << (bot->isDead() ? (bot->GetCorpse() ? "ghost" : "dead") : "alive");
+                // CoA, correctif C1 : GetCorpse() ne cherche que sur la carte
+                // courante ; un fantome dont le corps est dans une instance
+                // sortait "dead". Le drapeau de fantome est sur le joueur.
+                out << (bot->isDead() ? (bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? "ghost" : "dead") : "alive");
 
                 sPlayerbotAIConfig.log("player_location.csv", out.str().c_str());
             }
@@ -264,7 +268,10 @@ void RandomPlayerbotMgr::LogPlayerLocation()
                 }
 
                 out << (bot->IsInCombat() ? "combat" : "safe") << ",";
-                out << (bot->isDead() ? (bot->GetCorpse() ? "ghost" : "dead") : "alive");
+                // CoA, correctif C1 : GetCorpse() ne cherche que sur la carte
+                // courante ; un fantome dont le corps est dans une instance
+                // sortait "dead". Le drapeau de fantome est sur le joueur.
+                out << (bot->isDead() ? (bot->HasPlayerFlag(PLAYER_FLAGS_GHOST) ? "ghost" : "dead") : "alive");
 
                 sPlayerbotAIConfig.log("player_location.csv", out.str().c_str());
             }
@@ -1576,6 +1583,18 @@ void RandomPlayerbotMgr::Revive(Player* player)
 
 void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>& locs, bool hearth)
 {
+    // CoA -- Directeur, lot D2b (SPEC-directeur-D2.md § 6.3) : un bot affecte
+    // (trajet ou sejour) n'est pas teleporte au hasard. Toutes les
+    // teleportations aleatoires finissent ici (periodique, Revive, montee de
+    // niveau, ChangeStrategy, RandomizeFirst, RandomTeleportForRpg,
+    // ConcentrateInPlayerZone) ; la seule exception, AdjustBotToRange, porte
+    // la meme garde. Sans affectation : un chargement atomique.
+    if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), nullptr))
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_SUSPENDUS);
+        return;
+    }
+
     // ignore when alrdy teleported or not in the world yet.
     if (bot->IsBeingTeleported() || !bot->IsInWorld())
         return;

@@ -8,6 +8,7 @@
 #define _PLAYERBOT_COACHASSE_H
 
 #include "AttackersValue.h"
+#include "CoaDirecteur.h"
 #include "CoaPostes.h"
 #include "Creature.h"
 #include "GridTerrainData.h"
@@ -1125,6 +1126,24 @@ private:
             return false;
         }
 
+        // CoA -- Directeur, D2a/D2c (revue D2) : treve sur la proie, ou chasseur
+        // suspendu. Ces consignes ne sont lues que par AcceptUnit, donc au CHOIX
+        // de la proie ; sans ce test, une traque lancee avant la consigne se
+        // poursuivait jusqu'a DureeTraqueMaxMs. Une traque n'est pas un combat
+        // engage (decision 5) : on l'abandonne. Sans consigne, deux chargements
+        // atomiques. Pas de test champ de bataille/arene/duel ici : la chasse
+        // ne traque qu'en monde ouvert.
+        // Lot D2b suite : meme regle pour le TRAJET PACIFIQUE (option
+        // Directeur.TrajetPacifique) -- une traque lancee avant l'affectation
+        // est abandonnee, le bot suit sa route. Sans affectation : un
+        // chargement atomique de plus.
+        if (CoaDirecteur::SousTreve(cible->GetGUID().GetCounter()) ||
+            CoaDirecteur::MercenaireSuspendu(bot->GetGUID().GetCounter()) || CoaDirecteur::EnTrajetPacifique(bot))
+        {
+            AbandonnerLaTraque();
+            return false;
+        }
+
         float const distance = bot->GetExactDist(cible);
         if (distance > PorteeDetection())
         {
@@ -1307,6 +1326,13 @@ private:
      */
     ObjectGuid ChoisirProie()
     {
+        // CoA -- Directeur, lot D2b suite : TRAJET PACIFIQUE. En trajet d'une
+        // affectation du Directeur, aucune traque neuve ne part (une traque
+        // deja lancee est abandonnee dans Traquer). Sans affectation : un
+        // chargement atomique.
+        if (CoaDirecteur::EnTrajetPacifique(bot))
+            return ObjectGuid::Empty;
+
         // P-035 : sur un nom inconnu, GetValue rend nullptr. On ne dereference
         // jamais sans garde, meme pour un nom du contexte de base.
         Value<GuidVector>* valeurProches = context->GetValue<GuidVector>("nearest enemy players");
@@ -1416,6 +1442,15 @@ private:
             return false;
 
         if (poste.GetMapId() != bot->GetMapId())
+            return false;
+
+        // CoA -- Directeur, lot D2b (SPEC-directeur-D2.md § 6.3) : sous
+        // affectation (trajet et sejour), un poste hors du disque ne vaut plus.
+        // RetenirUnPoste en tirera un dedans. Sans affectation : un chargement
+        // atomique.
+        CoaDirecteur::Affectation aff;
+        if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
+            !CoaDirecteur::DansLeDisque(aff, poste.GetMapId(), poste.GetPositionX(), poste.GetPositionY()))
             return false;
 
         return bot->GetExactDist(poste) <= DistanceMax;
@@ -1592,6 +1627,40 @@ private:
             return false;
 
         prochainChoix = maintenant + RepliChoixSecondes;
+
+        // CoA -- Directeur, lot D2b (SPEC § 6.3) : sous affectation, le poste
+        // est un point du disque, APRES le verrou prochainChoix ci-dessus (sans
+        // quoi on contournerait la protection contre le balayage a chaque tick,
+        // plus bas). Un echec ne retombe pas sur TirerPoste -- un poste hors du
+        // disque serait aussitot rejete par PosteEncoreValable -- et ne se
+        // rejoue pas avant RepliEchecSecondes. Au plus TIRAGES_DISQUE (6)
+        // lectures de terrain et un EstChassable par essai.
+        {
+            CoaDirecteur::Affectation aff;
+            if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff))
+            {
+                if (aff.carte == bot->GetMapId())
+                {
+                    // Le trajet est borne au CENTRE (1 400 yd), pas au disque :
+                    // un point tire jusqu'a 1 400 + rayon serait aussitot rejete
+                    // par PosteEncoreValable (GetExactDist <= DistanceMax). On ne
+                    // tire donc qu'a DistanceMax du bot, et le repli (le centre)
+                    // est reverifie ici, en 3D comme PosteEncoreValable.
+                    float x = aff.x, y = aff.y, z = aff.z;
+                    CoaDirecteur::TirerDansLeDisque(bot->GetMap(), aff, x, y, z, bot, DistanceMax);
+                    WorldPosition const dansLeDisque(aff.carte, x, y, z);
+                    if (bot->GetExactDist(dansLeDisque) <= DistanceMax && EstChassable(dansLeDisque))
+                    {
+                        poste = dansLeDisque;
+                        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_POSTES_AFFECTES);
+                        CoaChasseComptePostePris();
+                        return true;
+                    }
+                }
+                prochainChoix = maintenant + RepliEchecSecondes;
+                return false;
+            }
+        }
 
         WorldPosition const tire = TirerPoste(lePlusProche);
         if (tire == WorldPosition())
