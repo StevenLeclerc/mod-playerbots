@@ -389,6 +389,28 @@ struct MortTrajet
 std::unordered_map<uint32, MortTrajet> mortsEnTrajet;   // cle : guid bas du bot
 std::atomic<uint32> nbMortsEnTrajet{0};
 
+// Correctif du 26/09 (bot 195, E-1 Orgrimmar) : TRAJETS LEVES. Meme verrou,
+// meme patron. UN SEUL ECRIVAIN, le fil monde : pose par FinirAffectation pour
+// toute affectation qui finit EN TRAJET, retire a l'echeance par
+// SuivreTrajetsLeves (bus allume ou eteint). Lu par l'IA du bot
+// (TrajetLeveVers), qui remet elle-meme son GO_GRIND a IDLE : l'etat rpgInfo
+// n'a qu'un proprietaire (P-134). Sans ce relais, un bot dont l'affectation
+// tombe garde le point tire pour elle, y marche sans fin (GO_GRIND n'a pas
+// d'echeance) et finit par y sauter (NewRpgBaseAction::MoveFarTo, enlisement).
+struct TrajetLeve
+{
+    uint32 id;       // affectation levee
+    uint32 carte;
+    float x, y, rayon;
+    uint32 finS;     // Maintenant() + TRAJET_LEVE_S
+    uint32 leveMs;   // getMSTime() a la levee, meme horloge que rpgInfo.startT
+};
+// Borne le temps pendant lequel un bot mort, en combat ou hors new rpg a la
+// levee peut encore appliquer la remise a zero en revenant a son parcours.
+constexpr uint32 TRAJET_LEVE_S = 900;
+std::unordered_map<uint32, TrajetLeve> trajetsLeves;   // cle : guid bas du bot
+std::atomic<uint32> nbTrajetsLeves{0};
+
 uint32 Maintenant()
 {
     return static_cast<uint32>(GameTime::GetGameTime().count());
@@ -1079,6 +1101,29 @@ bool SolSec(Map* map, float x, float y, float z, float& sol)
     return true;
 }
 
+// Laisse de hauteur (P-145), partagee par la pose (ExecuterAffectation) et le
+// tirage (TirerDansLeDisque) : voir le commentaire de TirerDansLeDisque.
+constexpr float TIRAGE_ECART_Z = 6.0f;
+constexpr float TIRAGE_PENTE_MAX = 1.0f;       // 45 degres, en moyenne depuis le centre
+constexpr float TIRAGE_SONDE_HAUTE = DEFAULT_HEIGHT_SEARCH;   // 50 : la portee du rayon vmap
+constexpr float TIRAGE_TOIT_YD = 2.0f;
+// Convention du service : `z` inconnu = -5000 (Z_INCONNU, destinations.py et
+// itineraire.py, destinations de quete). Aucun sol du monde ouvert n'est si bas.
+constexpr float POSE_Z_INCONNU_MAX = -4000.0f;
+
+// Sonde de toit (P-145) : une surface existe-t-elle au-dessus de `sol`, a plus
+// de TIRAGE_TOIT_YD ? Le rayon part de max(sol, zRef) + 50 et descend jusqu'a
+// `sol` : un plancher plus haut que zRef (le centre) est vu meme si `sol` est
+// le terrain brut 33 yd plus bas (Orgrimmar), ce que sol + 50 ratait au-dela de
+// 50 yd. Sans aucune surface lue (ni grille ni vmap) : toit suppose. PIEGE :
+// tout modele a collision compte, un arbre compris -- c'est le prix du refus.
+bool ToitAuDessus(Map* map, float x, float y, float sol, float zRef)
+{
+    float const depart = std::max(sol, zRef) + TIRAGE_SONDE_HAUTE;
+    float const haut = map->GetHeight(x, y, depart, true, depart - sol);
+    return !(haut > INVALID_HEIGHT) || haut > sol + TIRAGE_TOIT_YD;
+}
+
 char const* NomPhase(CoaDirecteur::CoaDirPhase p)
 {
     return p == CoaDirecteur::CoaDirPhase::Sejour ? "sejour" : "trajet";
@@ -1112,6 +1157,16 @@ void JournaliserFinAffectation(AffectationInterne const& f, char const* motif)
 void FinirAffectation(AffectationInterne const& f, char const* statut, char const* raison, char const* motif)
 {
     JournaliserFinAffectation(f, motif);
+    // Toute fin EN TRAJET (lever, remplace, echue, abandon, mort, stop, bus
+    // eteint...) : l'IA du bot abandonnera le point tire pour ce disque. Fil
+    // monde, verrou non tenu par les appelants (hors verrou, voir plus haut).
+    if (f.a.phase == CoaDirecteur::CoaDirPhase::Trajet)
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+        trajetsLeves[f.guid] = TrajetLeve{f.a.id, f.a.carte, f.a.x, f.a.y, f.a.rayon, Maintenant() + TRAJET_LEVE_S,
+                                     getMSTime()};
+        nbTrajetsLeves.store(static_cast<uint32>(trajetsLeves.size()), std::memory_order_relaxed);
+    }
     if (statut)
     {
         LOG_INFO("playerbots", "coa directeur cmd: id={} verbe={} cible={} joueur={} statut={} raison={}", f.a.id,
@@ -1483,6 +1538,25 @@ void SuivreMortsEnTrajet()
     }
 }
 
+// Trajets leves (correctif du 26/09), chaque seconde, bus allume ou eteint :
+// seule l'echeance les retire. PAS de purge au bus eteint : c'est justement
+// la levee `bus_eteint` qui en pose, et les bots doivent encore les lire.
+void SuivreTrajetsLeves()
+{
+    if (!nbTrajetsLeves.load(std::memory_order_relaxed))
+        return;
+    uint32 const maintenant = Maintenant();
+    std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+    for (auto it = trajetsLeves.begin(); it != trajetsLeves.end();)
+    {
+        if (it->second.finS <= maintenant)
+            it = trajetsLeves.erase(it);
+        else
+            ++it;
+    }
+    nbTrajetsLeves.store(static_cast<uint32>(trajetsLeves.size()), std::memory_order_relaxed);
+}
+
 // Purge sans condition (bus eteint) : plus aucun etat, les lecteurs retombent
 // sur leur chargement atomique.
 void PurgerMortsEnTrajet()
@@ -1510,6 +1584,7 @@ void Entretien(uint32 diff)
     SuivreAffectations();
     // APRES le suivi : une mort constatee a cette seconde y a pose son etat.
     SuivreMortsEnTrajet();
+    SuivreTrajetsLeves();
     if (!aReconstruire.empty())
         Reconstruire();
     filetMs += IN_MILLISECONDS;
@@ -1790,10 +1865,42 @@ void ExecuterAffectation(CoaDirCommande const& c)
         return;
     }
     Map* map = bot->GetMap();
+    // Sol du CENTRE, laisse de hauteur a la pose (P-145, revue du 26/09). Le
+    // centre est le repli de TirerDansLeDisque, la reference de sa fenetre
+    // (a.z +- 6) et une cible admise du saut d'enlisement dirige : un centre
+    // pose sur le terrain brut SOUS une ville les fausse tous les trois.
+    //  - z connu : depart a z + 2 (Z_OFFSET_FIND_HEIGHT, la marge du coeur : un
+    //    rayon parti EXACTEMENT du plancher peut le manquer), puis z + 6 si le
+    //    sol sort de la fenetre ; dans la fenetre, garde sans autre sonde (un
+    //    centre sous un arbre, un auvent : c'est le point demande).
+    //  - z inconnu (Z_INCONNU, destinations de quete) : SolSec part du terrain
+    //    brut ; tout ce qui est au-dessus est une structure.
+    //  - hors fenetre ou z inconnu : REFUS `sol_sous_structure` si une surface
+    //    existe au-dessus (ToitAuDessus). On ne releve PAS le centre sur cette
+    //    surface : rien ne dit qu'elle est un plancher joignable (toit, rempart,
+    //    branche) et le verifier demanderait un chemin mmap ici, au fil monde.
+    //    Le service choisit une autre destination ; le refus se voit au compte
+    //    `refus_jeu` de l'emetteur.
+    // LIMITE CONNUE (non corrigee) : une ville SOUS le terrain (Undercity,
+    // Ironforge) n'est jamais visable -- SolSec part toujours de max(z, terrain
+    // brut), donc au-dessus d'elle, et rend la surface (ou la refuse).
     float sol = 0.0f;
-    if (!map || map->GetId() != c.carte || !SolSec(map, c.x, c.y, c.z, sol))
+    bool const zConnu = std::isfinite(c.z) && c.z > POSE_Z_INCONNU_MAX;
+    if (!map || map->GetId() != c.carte ||
+        !SolSec(map, c.x, c.y, zConnu ? c.z + Z_OFFSET_FIND_HEIGHT : c.z, sol))
     {
         Refuser(c, "sol");
+        return;
+    }
+    if (zConnu && std::fabs(sol - c.z) > TIRAGE_ECART_Z)
+    {
+        float solHaut = 0.0f;
+        if (SolSec(map, c.x, c.y, c.z + TIRAGE_ECART_Z, solHaut) && std::fabs(solHaut - c.z) <= TIRAGE_ECART_Z)
+            sol = solHaut;
+    }
+    if ((!zConnu || std::fabs(sol - c.z) > TIRAGE_ECART_Z) && ToitAuDessus(map, c.x, c.y, sol, zConnu ? c.z : sol))
+    {
+        Refuser(c, "sol_sous_structure");
         return;
     }
     // Mercenaire EN CHASSE (pas en mode RPG) : un centre sans PvP ferait
@@ -1958,6 +2065,11 @@ void Bilan()
             if (s.rpg)
                 ++enRpg;
     }
+    // `tirages_refuses_hauteur` compte les essais refuses par la laisse de
+    // hauteur de TirerDansLeDisque pour ses DEUX appelants : la laisse new rpg
+    // (NewRpgAction.cpp) ET la chasse (CoaChasse.h, poste affecte). La part rpg
+    // se lit dans les lignes `coa directeur laisse:` (champ refus_hauteur) ; la
+    // chasse n'a pas de ligne propre : chasse = bilan - somme des laisse:.
     LOG_INFO("playerbots",
              "coa directeur bus: epoque={} recues={} executees={} refusees={} expirees={} levees={} remplacees={}"
              " treves={} affectations={} suspensions={} en_rpg={} ecartes_treve={} ecartes_suspension={}"
@@ -1967,7 +2079,7 @@ void Bilan()
              " affectations_levees_mort={} affectations_levees_hors_ligne={}"
              " affectations_levees_fin_suspension={} enlisements_retenus={} echues={}"
              " ecartes_trajet={} morts_en_trajet={} releves_ressuscites={} releves_loin_du_corps={}"
-             " etapes_arrivees={} en_releve={}",
+             " etapes_arrivees={} en_releve={} tirages_refuses_hauteur={} rpg_remis_idle={} trajets_leves={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -1981,7 +2093,9 @@ void Bilan()
              Lire(COA_DIR_AFFECTATIONS_LEVEES_HORS_LIGNE), Lire(COA_DIR_AFFECTATIONS_LEVEES_FIN_SUSPENSION),
              Lire(COA_DIR_ENLISEMENTS_RETENUS), Lire(COA_DIR_ECHUES), Lire(COA_DIR_ECARTES_TRAJET),
              Lire(COA_DIR_MORTS_EN_TRAJET), Lire(COA_DIR_RELEVES_RESSUSCITES), Lire(COA_DIR_RELEVES_LOIN_DU_CORPS),
-             Lire(COA_DIR_ETAPES_ARRIVEES), nbMortsEnTrajet.load(std::memory_order_relaxed));
+             Lire(COA_DIR_ETAPES_ARRIVEES), nbMortsEnTrajet.load(std::memory_order_relaxed),
+             Lire(COA_DIR_TIRAGES_REFUSES_HAUTEUR), Lire(COA_DIR_RPG_REMIS_IDLE),
+             nbTrajetsLeves.load(std::memory_order_relaxed));
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -2373,17 +2487,77 @@ bool CoaDirecteur::DansLeDisque(Affectation const& a, uint32 carte, float x, flo
     return dx * dx + dy * dy <= a.rayon * a.rayon;
 }
 
-void CoaDirecteur::TirerDansLeDisque(Map* carte, Affectation const& a, float& x, float& y, float& z,
-                                     Position const* depuis, float distanceMax)
+bool CoaDirecteur::TrajetLeveVers(uint32 guidLow, uint32 carte, float x, float y, uint32 debutMs)
 {
+    // LA QUESTION D'ABORD : ni trajet leve ni affectation, deux chargements atomiques.
+    if (!nbTrajetsLeves.load(std::memory_order_relaxed) && !nbAffectations.load(std::memory_order_relaxed))
+        return false;
+    uint32 const maintenant = Maintenant();
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    bool leve = false;
+    auto en = affectations.find(guidLow);
+    if (en != affectations.end())
+    {
+        Affectation const& a = en->second.a;
+        if (a.finS > maintenant)
+        {
+            // Affectation en cours : son disque la gouverne (laisse, sejour).
+            if (DansLeDisque(a, carte, x, y))
+                return false;
+        }
+        // Echue, pas encore levee (le suivi passe chaque seconde) : deja
+        // levee pour ses lecteurs (AffectationDe rend faux), donc ici aussi.
+        else if (a.phase == CoaDirPhase::Trajet && DansLeDisque(a, carte, x, y))
+            leve = true;
+    }
+    if (!leve)
+    {
+        auto it = trajetsLeves.find(guidLow);
+        if (it == trajetsLeves.end() || it->second.finS <= maintenant || it->second.carte != carte)
+            return false;
+        // GO_GRIND ecrit apres la levee : un choix du bot, pas le point tire
+        // pour l'affectation. Difference signee : getMSTime reboucle a 49 j.
+        if (static_cast<int32>(it->second.leveMs - debutMs) < 0)
+            return false;
+        float const dx = x - it->second.x;
+        float const dy = y - it->second.y;
+        leve = dx * dx + dy * dy <= it->second.rayon * it->second.rayon;
+    }
+    return leve;
+}
+
+// Laisse de hauteur (correctif du 26/09, bot 195 a Orgrimmar). SolSec part de
+// max(z, terrain brut) et le rayon vmap descend EXACTEMENT de ce z : si le vrai
+// sol du point tire est un peu plus haut que a.z (ville en pente sous WMO), le
+// rayon demarre sous lui, ne le trouve pas, et GetHeight rend le terrain brut
+// de la tuile (8.8, 33 yd sous la ville) -- un point injoignable. D'ou :
+//   1. depart a a.z + 2, puis a a.z + TIRAGE_ECART_Z si le premier sol sort de
+//      la fenetre : tout sol de [a.z - 6, a.z + 6] est vu (au second depart, un
+//      plafond plus bas que a.z + 6 peut etre pris pour le sol : un etage
+//      voisin, joignable par ses escaliers ; c'est le prix de la marge) ;
+//   2. sol dans la fenetre : garde ;
+//   3. hors fenetre : garde seulement si RIEN n'est au-dessus (sonde depuis
+//      max(sol, a.z) + 50 jusqu'a sol, ToitAuDessus : la premiere surface
+//      rencontree est ce sol, a 2 yd pres) ET si
+//      la pente moyenne depuis le centre est d'au plus TIRAGE_PENTE_MAX. Le
+//      terrain brut sous une ville, un pont, une grotte a un toit : refuse.
+//      Une colline a ciel ouvert (pente naturelle > 6 yd sur 40) : gardee.
+// (Constantes TIRAGE_* et sonde ToitAuDessus : pres de SolSec, la pose s'en sert.)
+// Le centre lui-meme (repli) a passe la meme laisse a la pose : `sol_sous_structure`.
+
+CoaDirecteur::TirageDisque CoaDirecteur::TirerDansLeDisque(Map* carte, Affectation const& a, float& x, float& y,
+                                                          float& z, Position const* depuis, float distanceMax)
+{
+    TirageDisque t;
     // Repli : le centre, dont le sol a ete trouve a la pose (a.z).
     x = a.x;
     y = a.y;
     z = a.z;
     if (!carte || carte->GetId() != a.carte)
-        return;
+        return t;
     for (int essai = 0; essai < TIRAGES_DISQUE; ++essai)
     {
+        ++t.essais;
         // Uniforme sur le disque : rayon en racine carree.
         float const angle = frand(0.0f, 2.0f * static_cast<float>(M_PI));
         float const r = a.rayon * std::sqrt(static_cast<float>(rand_norm()));
@@ -2398,15 +2572,41 @@ void CoaDirecteur::TirerDansLeDisque(Map* carte, Affectation const& a, float& x,
             if (ex * ex + ey * ey > distanceMax * distanceMax)
                 continue;
         }
+        // Deux departs : d'abord a.z + 2 (Z_OFFSET_FIND_HEIGHT, la marge du
+        // coeur), qui garde le rez-de-chaussee sous un plafond bas ; puis, si le
+        // sol trouve sort de la fenetre, a.z + 6, qui voit un sol un peu plus
+        // haut que le centre (le cas d'Orgrimmar). Le second n'est lu que si le
+        // premier echoue a la fenetre.
         float sol = 0.0f;
-        if (SolSec(carte, px, py, a.z, sol))
+        if (!SolSec(carte, px, py, a.z + Z_OFFSET_FIND_HEIGHT, sol))
+            continue;
+        float ecart = std::fabs(sol - a.z);
+        if (ecart > TIRAGE_ECART_Z)
         {
-            x = px;
-            y = py;
-            z = sol;
-            return;
+            float solHaut = 0.0f;
+            if (SolSec(carte, px, py, a.z + TIRAGE_ECART_Z, solHaut) && std::fabs(solHaut - a.z) <= TIRAGE_ECART_Z)
+            {
+                sol = solHaut;
+                ecart = std::fabs(sol - a.z);
+            }
         }
+        if (ecart > TIRAGE_ECART_Z)
+        {
+            // Revue P-145 : la sonde part de max(sol, a.z) + 50, pas de sol + 50.
+            if (ToitAuDessus(carte, px, py, sol, a.z) || ecart > TIRAGE_PENTE_MAX * r)
+            {
+                ++t.refusesHauteur;
+                Compter(COA_DIR_TIRAGES_REFUSES_HAUTEUR);
+                continue;
+            }
+        }
+        x = px;
+        y = py;
+        z = sol;
+        t.repli = false;
+        return t;
     }
+    return t;
 }
 
 void CoaDirecteur::Compter(CoaDirCompteur c)

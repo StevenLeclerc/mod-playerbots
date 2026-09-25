@@ -255,8 +255,15 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
             if (!dejaVersLeDisque)
             {
                 float x = aff.x, y = aff.y, z = aff.z;
-                CoaDirecteur::TirerDansLeDisque(bot->GetMap(), aff, x, y, z);
+                CoaDirecteur::TirageDisque const t = CoaDirecteur::TirerDansLeDisque(bot->GetMap(), aff, x, y, z);
                 info.ChangeToGoGrind(WorldPosition(aff.carte, x, y, z));
+                // Une ligne par tirage (la laisse ne retire que si le GO_GRIND
+                // ne va pas deja au disque) : borne comme `laisses_rpg`.
+                LOG_INFO("playerbots",
+                         "coa directeur laisse: guid={} id={} x={:.1f} y={:.1f} z={:.1f} centre_z={:.1f} essais={}"
+                         " refus_hauteur={} repli={}",
+                         bot->GetGUID().GetCounter(), aff.id, x, y, z, aff.z, t.essais, t.refusesHauteur,
+                         t.repli ? 1 : 0);
                 // RPG_REST l'a assis (NewRpgBaseAction.cpp, RandomChangeStatus) :
                 // assis, il ne marcherait pas.
                 if (bot->getStandState() != UNIT_STAND_STATE_STAND)
@@ -264,6 +271,24 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
                 CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LAISSES_RPG);
                 return true;
             }
+        }
+    }
+
+    // CoA -- Directeur, correctif du 26/09 : TRAJET LEVE. L'affectation qui
+    // avait tire ce GO_GRIND est tombee (lever, remplace, echeance, abandon,
+    // mort...) : le point ne vaut plus rien, et GO_GRIND n'a pas d'echeance --
+    // le bot y marcherait sans fin, puis y sauterait (MoveFarTo, enlisement),
+    // sous Orgrimmar le 26/09. Le fil monde a pose l'etat ; c'est ici, chez le
+    // proprietaire de rpgInfo, qu'il est applique (P-134). Sans etat pose :
+    // un chargement atomique, puis le code d'origine.
+    if (auto const* allerA = std::get_if<NewRpgInfo::GoGrind>(&info.data))
+    {
+        if (CoaDirecteur::TrajetLeveVers(bot->GetGUID().GetCounter(), allerA->pos.GetMapId(),
+                                         allerA->pos.GetPositionX(), allerA->pos.GetPositionY(), info.startT))
+        {
+            info.ChangeToIdle();
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_RPG_REMIS_IDLE);
+            return true;
         }
     }
 

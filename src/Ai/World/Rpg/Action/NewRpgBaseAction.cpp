@@ -133,6 +133,24 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
                      bot->GetGUID().GetCounter(), bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(),
                      dest.GetPositionX(), dest.GetPositionY());
         }
+        // CoA -- Directeur, correctif du 26/09 : jamais de saut vers le point
+        // d'une affectation levee en TRAJET (sous Orgrimmar, bot 195). Ceinture :
+        // NewRpgStatusUpdateAction remet deja ce GO_GRIND a IDLE ; ici, si une
+        // action plus prioritaire l'a devance, c'est le meme proprietaire de
+        // rpgInfo qui le fait. Sans etat pose : un chargement atomique.
+        else if (auto const* allerA = std::get_if<NewRpgInfo::GoGrind>(&botAI->rpgInfo.data);
+                 allerA && allerA->pos == dest &&
+                 CoaDirecteur::TrajetLeveVers(bot->GetGUID().GetCounter(), dest.GetMapId(), dest.GetPositionX(),
+                                              dest.GetPositionY(), botAI->rpgInfo.startT))
+        {
+            botAI->rpgInfo.ChangeToIdle();
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_RPG_REMIS_IDLE);
+            // true, comme les autres ChangeToIdle de l'amont : le seul appelant
+            // possible ici est NewRpgGoGrindAction (rpgInfo.data est un GoGrind
+            // de meme pos), qui sur false ferait MoveRandomNear(10) -- un pas
+            // vers le point leve. Le tick est consomme ; le suivant choisit.
+            return true;
+        }
 
         AreaTableEntry const* entry = sAreaTableStore.LookupEntry(bot->GetZoneId());
         std::string zone_name = PlayerbotAI::GetLocalizedAreaName(entry);

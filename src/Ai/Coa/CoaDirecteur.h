@@ -142,15 +142,40 @@ bool AffectationDe(uint32 guidLow, Affectation* sortie);
 bool DansLeDisque(Affectation const& a, uint32 carte, float x, float y);
 
 // Tire un point dans le disque, sol trouve et hors de l'eau (P-132), 6 essais,
-// sinon le centre (valide a la pose). `carte` : la carte DU BOT, lue depuis son
+// sinon le centre (valide a la pose). LAISSE DE HAUTEUR (26/09) : le sol est
+// cherche depuis a.z + 2, puis a.z + 6 ; un point dont le sol s'ecarte de plus de 6 yd de a.z
+// n'est garde que sous le ciel ouvert (sonde depuis max(sol, a.z) + 50) et en pente d'au plus 1 depuis le centre
+// (sinon c'est le terrain brut sous une ville ou un pont : essai perdu, compte
+// dans `tirages_refuses_hauteur`, qui cumule la laisse new rpg ET la chasse). `carte` : la carte DU BOT, lue depuis son
 // propre fil de carte (ou le fil monde) ; nulle ou autre carte : le centre.
 // `depuis` non nul : un point a plus de `distanceMax` (plan x, y) de `depuis`
 // est rejete comme un point sans sol, dans la meme limite d'essais. La chasse
 // s'en sert : le trajet est borne au CENTRE (1 400 yd), un point du disque peut
 // en etre a 1 400 + rayon, au-dela de CoaChasseAction::DistanceMax. Le repli
 // (le centre) n'est PAS reverifie : a l'appelant de le faire.
-void TirerDansLeDisque(Map* carte, Affectation const& a, float& x, float& y, float& z,
-                       Position const* depuis = nullptr, float distanceMax = 0.0f);
+struct TirageDisque
+{
+    uint8 essais = 0;           // tirages faits (hors portee compris)
+    uint8 refusesHauteur = 0;   // ... dont refuses par la laisse de hauteur
+    bool repli = true;          // aucun point garde : le centre
+};
+TirageDisque TirerDansLeDisque(Map* carte, Affectation const& a, float& x, float& y, float& z,
+                               Position const* depuis = nullptr, float distanceMax = 0.0f);
+
+// Tout fil, chemin chaud : le point (carte, x, y) est-il dans le disque d'une
+// affectation levee EN TRAJET depuis moins de TRAJET_LEVE_S secondes (ou en
+// TRAJET et echue, pas encore levee), et hors du disque de l'affectation en
+// cours s'il y en a une ? Le fil monde pose l'etat a chaque fin d'affectation
+// en TRAJET (toutes raisons : lever, remplace, echeance, abandon, mort, stop,
+// bus eteint) et le retire a l'echeance ; il n'ecrit JAMAIS rpgInfo (P-134).
+// C'est l'IA du bot, proprietaire de rpgInfo, qui lit et remet son GO_GRIND a
+// IDLE (NewRpgStatusUpdateAction::Execute, NewRpgBaseAction::MoveFarTo). Sans
+// etat pose : un chargement atomique.
+// `debutMs` : rpgInfo.startT du GO_GRIND (getMSTime a son ecriture). Seul un
+// GO_GRIND ecrit AVANT la levee est vise : celui qu'un bot choisit ensuite, meme
+// dans l'ancien disque, est le sien (sans cela, un bot arrive a une etape y
+// serait remis a IDLE en boucle pendant TRAJET_LEVE_S).
+bool TrajetLeveVers(uint32 guidLow, uint32 carte, float x, float y, uint32 debutMs);
 
 // ------------------------------------------------------------------ lot D2b, suite
 //
@@ -211,6 +236,8 @@ enum CoaDirCompteur : uint8
     COA_DIR_RELEVES_RESSUSCITES,     // ... tombes parce que le bot est de nouveau en vie
     COA_DIR_RELEVES_LOIN_DU_CORPS,   // ... et relevees a plus de RELEVE_LOIN_YD du lieu de la mort
     COA_DIR_ETAPES_ARRIVEES,         // etapes d'itineraire atteintes (sans sejour)
+    COA_DIR_TIRAGES_REFUSES_HAUTEUR, // points du disque refuses par la laisse de hauteur
+    COA_DIR_RPG_REMIS_IDLE,          // GO_GRIND vers un trajet leve remis a IDLE par l'IA
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);
