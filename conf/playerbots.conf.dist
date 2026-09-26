@@ -3400,3 +3400,30 @@ AiPlayerbot.Directeur.ReleveSecondes = 600
 #        ordinaire.
 #        Default: 0
 AiPlayerbot.Directeur.Etapes = 0
+
+#
+#    DIRECTEUR -- LOT D3 (coa-project/docs/SPEC-directeur-D3.md, § 8)
+#
+#    Verbes neufs : repondre, peupler, faire_parler, heure_du_jour, meteo. Chacun reste INERTE tant
+#    qu'il n'est pas dans AiPlayerbot.Directeur.Verbes. Migration
+#    data/sql/characters/updates/2026_09_26_01_coa_directeur_d3.sql, A APPLIQUER AVANT le binaire
+#    (P-131) : sans elle, le jeu l'ecrit au demarrage (`colonnes D3 absentes, verbes D3 inertes`),
+#    les verbes D2 fonctionnent comme avant et tout verbe D3 est refuse `colonnes_d3`.
+#
+#    AiPlayerbot.Directeur.MaxParolesParMinute
+#        faire_parler : paroles acceptees par minute, tous bots confondus (refus `plafond` au-dela) ;
+#        une parole par bot et par 30 s au plus (refus `cadence`).
+#        Default: 6
+AiPlayerbot.Directeur.MaxParolesParMinute = 6
+
+#    AiPlayerbot.Directeur.MeteoReaffirmationSecondes
+#        meteo : le paquet est renvoye au joueur toutes les N secondes tant qu'il reste dans la zone
+#        de la pose (une regeneration du temps de la zone peut l'ecraser). Minimum 5.
+#        Default: 30
+AiPlayerbot.Directeur.MeteoReaffirmationSecondes = 30
+
+#    AiPlayerbot.Directeur.PresenceLaisseYd
+#        peupler : en SEJOUR, un bot de presence a plus de N yd du centre de son disque y est ramene
+#        (sinon new rpg peut l'emmener a une auberge hors de la scene). 0 = pas de laisse ; minimum 60.
+#        Default: 250
+AiPlayerbot.Directeur.PresenceLaisseYd = 250

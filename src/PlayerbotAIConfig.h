@@ -436,6 +436,11 @@ public:
     bool directeurReleveCimetiere;            // mort en trajet : releve a l'esprit-guerisseur
     uint32 directeurReleveSecondes;           // duree de l'etat mort_en_trajet (plafond)
     bool directeurEtapes;                     // action `E-...` : etape d'itineraire, pas de sejour
+    // Lot D3 (SPEC-directeur-D3.md § 8) : inertes tant que le verbe concerne
+    // n'est pas dans directeurVerbes.
+    uint32 directeurMaxParolesParMinute;      // faire_parler : paroles acceptees par minute, tous bots
+    uint32 directeurMeteoReaffirmationSecondes; // meteo : renvoi du paquet au joueur
+    uint32 directeurPresenceLaisseYd;         // peupler : laisse de sejour (0 = aucune)
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

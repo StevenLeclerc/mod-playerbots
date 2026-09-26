@@ -274,6 +274,46 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
         }
     }
 
+    // CoA -- Directeur, lot D3 (SPEC-directeur-D3.md § 4.2, decision n° 7) :
+    // LAISSE DE SEJOUR d'un bot de PRESENCE (`peupler`). Arrive, il reprend son
+    // parcours normal ; mais RPG_GO_CAMP (aubergiste a 50-2 500 yd) peut
+    // l'emmener hors de la scene en une minute. Au-dela de PresenceLaisseYd du
+    // centre (0 : pas de laisse), meme geste que la laisse de trajet, chez le
+    // meme proprietaire de rpgInfo (P-134). Sans affectation : un chargement
+    // atomique.
+    if (uint32 const laisse = sPlayerbotAIConfig.directeurPresenceLaisseYd)
+    {
+        CoaDirecteur::Affectation aff;
+        if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.presence &&
+            aff.phase == CoaDirecteur::CoaDirPhase::Sejour && aff.carte == bot->GetMapId() && !bot->IsInFlight())
+        {
+            float const dx = bot->GetPositionX() - aff.x;
+            float const dy = bot->GetPositionY() - aff.y;
+            auto const* allerA = std::get_if<NewRpgInfo::GoGrind>(&info.data);
+            bool const dejaVersLeDisque =
+                allerA && CoaDirecteur::DansLeDisque(aff, allerA->pos.GetMapId(), allerA->pos.GetPositionX(),
+                                                     allerA->pos.GetPositionY());
+            // Jamais plus courte que le rayon : un point tire dans un disque plus
+            // large que la laisse la redeclencherait a chaque arrivee.
+            float const bout = std::max(static_cast<float>(laisse), aff.rayon);
+            if (dx * dx + dy * dy > bout * bout && !dejaVersLeDisque)
+            {
+                float x = aff.x, y = aff.y, z = aff.z;
+                CoaDirecteur::TirageDisque const t = CoaDirecteur::TirerDansLeDisque(bot->GetMap(), aff, x, y, z);
+                info.ChangeToGoGrind(WorldPosition(aff.carte, x, y, z));
+                LOG_INFO("playerbots",
+                         "coa directeur laisse: guid={} id={} x={:.1f} y={:.1f} z={:.1f} centre_z={:.1f} essais={}"
+                         " refus_hauteur={} repli={} sejour=1",
+                         bot->GetGUID().GetCounter(), aff.id, x, y, z, aff.z, t.essais, t.refusesHauteur,
+                         t.repli ? 1 : 0);
+                if (bot->getStandState() != UNIT_STAND_STATE_STAND)
+                    bot->SetStandState(UNIT_STAND_STATE_STAND);
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LAISSES_PRESENCE);
+                return true;
+            }
+        }
+    }
+
     // CoA -- Directeur, correctif du 26/09 : TRAJET LEVE. L'affectation qui
     // avait tire ce GO_GRIND est tombee (lever, remplace, echeance, abandon,
     // mort...) : le point ne vaut plus rien, et GO_GRIND n'a pas d'echeance --

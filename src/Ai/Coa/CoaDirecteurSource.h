@@ -37,7 +37,26 @@ enum class CoaDirVerbe : uint8
     Alleger,
     SuspendreMercenaire,
     Lever,
+    // Lot D3 (SPEC-directeur-D3.md § 3.3), AVANT Inconnu :
+    Peupler,        // affectation « de presence » pres du joueur qui demande (§ 4.2)
+    FaireParler,    // une parole d'un bot, en file sur le fil monde (§ 5.2)
+    Repondre,       // une ligne systeme au joueur, prefixee [Directeur] (§ 2.8)
+    HeureDuJour,    // le ciel d'un seul joueur (§ 6.2)
+    Meteo,          // la meteo d'un seul joueur, reaffirmee (§ 6.3)
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
+};
+
+// Colonne `canal` (migration D3). Vide ou NULL : Aucun ; valeur que ce binaire
+// ne connait pas : Inconnu (refus `bornes`).
+enum class CoaDirCanal : uint8
+{
+    Aucun,
+    Systeme,
+    Dire,
+    Crier,
+    Chuchoter,
+    Zone,
+    Inconnu
 };
 
 struct CoaDirCommande
@@ -52,6 +71,17 @@ struct CoaDirCommande
     uint32 epoqueMonde = 0;  // epoque du monde lue par l'emetteur
     bool expiree = false;    // expire_le deja passe au moment de la lecture
     std::string action;      // colonne `action` (A-xxxx du service, E-xxxx : etape), vide si NULL
+    // Colonne `origine` (migration D2 : regle, ask, arc, manuel), lue depuis D3
+    // pour le refus `occupe` (SPEC-directeur-D3.md § 3.6).
+    std::string origine;
+    // Colonnes D3 (migration 2026_09_26_01_coa_directeur_d3.sql), lues seulement
+    // si la garde de colonnes les a vues au demarrage (§ 3.2) ; sinon a leur
+    // valeur par defaut, et tout verbe D3 est refuse `colonnes_d3`.
+    std::string texte;                         // repondre, faire_parler : UTF-8
+    CoaDirCanal canal = CoaDirCanal::Aucun;    // faire_parler
+    int32 valeur = 0;                          // heure_du_jour : minute du ciel ; meteo : WeatherState
+    float intensite = 0.0f;                    // meteo : ]0, 1[
+    uint32 delaiS = 0;                         // faire_parler : livraison apres execution
 };
 
 class CoaDirSource
@@ -85,6 +115,11 @@ public:
 
     // Fil monde. L'interrupteur general vient de changer (rechargement de conf).
     virtual void SignalerBus(bool /*bus*/) { }
+
+    // Fil monde, apres Demarrer. Les colonnes du lot D3 (texte, canal, valeur,
+    // intensite, delai_s) ET l'ENUM de `verbe` a dix valeurs sont-ils en base ?
+    // Faux : les verbes D3 sont refuses `colonnes_d3`, les verbes D2 passent.
+    virtual bool ColonnesD3() const { return false; }
 };
 
 #endif

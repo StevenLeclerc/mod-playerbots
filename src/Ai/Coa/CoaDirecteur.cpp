@@ -5,6 +5,8 @@
 #include "CoaDirecteur.h"
 #include "CoaDirecteurSource.h"
 
+#include "Channel.h"
+#include "ChannelMgr.h"
 #include "Chat.h"
 #include "Corpse.h"
 #include "DatabaseEnv.h"
@@ -16,7 +18,9 @@
 #include "Map.h"
 #include "MapMgr.h"
 #include "MercenaryRewards.h"
+#include "MiscPackets.h"
 #include "ObjectAccessor.h"
+#include "Opcodes.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
@@ -24,7 +28,10 @@
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
+#include "Timer.h"
 #include "TravelMgr.h"
+#include "Weather.h"
+#include "WorldPacket.h"
 #include "WorldSession.h"
 
 #include <algorithm>
@@ -131,6 +138,7 @@ bool photoMondeValide = false;
 
 std::string Consignes();                      // plus bas, avec le magasin
 std::string Lieux(std::string const& texte);  // plus bas
+std::string Joueur(std::string const& texte); // plus bas (lot D3, § 3.4)
 
 std::string Executer(std::string const& texte)
 {
@@ -138,6 +146,10 @@ std::string Executer(std::string const& texte)
         return Consignes();
     if (texte.rfind("lieux,", 0) == 0)
         return Lieux(texte);
+    // Lot D3 : intercepte AVANT HandleRemoteCommand, qui rendait `invalid guid`
+    // pour un humain (binaire D2).
+    if (texte.rfind("joueur,", 0) == 0)
+        return Joueur(texte);
     if (texte == "monde" || texte.rfind("monde,", 0) == 0)
     {
         uint32 const maintenant = getMSTime();
@@ -184,7 +196,21 @@ std::string Nettoyer(char const* args)
     while (!t.empty() && t.front() == ' ')
         t.erase(t.begin());
     if (t.size() > TEXTE_MAX)
+    {
+        // Lot D3 (SPEC-directeur-D3.md § 3.3) : la coupe est en OCTETS, et elle
+        // pouvait tomber au milieu d'un caractere accentue -- la ligne partait
+        // en base avec un octet de tete orphelin. On remonte au debut du dernier
+        // caractere ; s'il annonce plus d'octets qu'il n'en reste, il est retire.
         t.resize(TEXTE_MAX);
+        size_t debut = t.size() - 1;
+        while (debut > 0 && (static_cast<unsigned char>(t[debut]) & 0xC0) == 0x80)
+            --debut;
+        unsigned char const tete = static_cast<unsigned char>(t[debut]);
+        size_t const longueur = tete < 0x80 ? 1 : (tete & 0xE0) == 0xC0 ? 2 : (tete & 0xF0) == 0xE0 ? 3
+                                : (tete & 0xF8) == 0xF0 ? 4 : 1;
+        if ((tete & 0xC0) == 0x80 || debut + longueur > t.size())
+            t.resize(debut);
+    }
     return t;
 }
 
@@ -351,7 +377,11 @@ std::atomic<uint32> nbSuspensions{0};
 struct AffectationInterne
 {
     CoaDirecteur::Affectation a;
-    CoaDirVerbe verbe;       // reaffecter ou alleger (audit, `consignes`)
+    CoaDirVerbe verbe;       // reaffecter, alleger ou peupler (audit, `consignes`)
+    // Lot D3 (§ 3.6) : `origine` de la commande qui l'a posee (regle, ask, arc,
+    // manuel), figee a la pose. Avec `joueur`, c'est le PROPRIETAIRE du bot
+    // affecte : un autre proprietaire est refuse `occupe`.
+    std::string origine;
     uint32 guid;             // bot affecte
     uint32 joueur;           // humain autour duquel elle a ete posee, 0 = aucun
     uint32 poseS;            // pour TrajetMaxSecondes
@@ -435,6 +465,11 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Alleger:             return "alleger";
         case CoaDirVerbe::SuspendreMercenaire: return "suspendre_mercenaire";
         case CoaDirVerbe::Lever:               return "lever";
+        case CoaDirVerbe::Peupler:             return "peupler";
+        case CoaDirVerbe::FaireParler:         return "faire_parler";
+        case CoaDirVerbe::Repondre:            return "repondre";
+        case CoaDirVerbe::HeureDuJour:         return "heure_du_jour";
+        case CoaDirVerbe::Meteo:               return "meteo";
         default:                               return "inconnu";
     }
 }
@@ -446,16 +481,53 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "alleger")              return CoaDirVerbe::Alleger;
     if (nom == "suspendre_mercenaire") return CoaDirVerbe::SuspendreMercenaire;
     if (nom == "lever")                return CoaDirVerbe::Lever;
+    if (nom == "peupler")              return CoaDirVerbe::Peupler;
+    if (nom == "faire_parler")         return CoaDirVerbe::FaireParler;
+    if (nom == "repondre")             return CoaDirVerbe::Repondre;
+    if (nom == "heure_du_jour")        return CoaDirVerbe::HeureDuJour;
+    if (nom == "meteo")                return CoaDirVerbe::Meteo;
     return CoaDirVerbe::Inconnu;
 }
 
+// Verbes du lot D3 : ils exigent les colonnes de la migration D3 (§ 3.2).
+bool VerbeD3(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Peupler || v == CoaDirVerbe::FaireParler || v == CoaDirVerbe::Repondre ||
+           v == CoaDirVerbe::HeureDuJour || v == CoaDirVerbe::Meteo;
+}
+
+CoaDirCanal CanalDe(std::string const& nom)
+{
+    if (nom.empty())       return CoaDirCanal::Aucun;
+    if (nom == "systeme")  return CoaDirCanal::Systeme;
+    if (nom == "dire")     return CoaDirCanal::Dire;
+    if (nom == "crier")    return CoaDirCanal::Crier;
+    if (nom == "chuchoter") return CoaDirCanal::Chuchoter;
+    if (nom == "zone")     return CoaDirCanal::Zone;
+    return CoaDirCanal::Inconnu;
+}
+
+char const* NomCanal(CoaDirCanal c)
+{
+    switch (c)
+    {
+        case CoaDirCanal::Systeme:   return "systeme";
+        case CoaDirCanal::Dire:      return "dire";
+        case CoaDirCanal::Crier:     return "crier";
+        case CoaDirCanal::Chuchoter: return "chuchoter";
+        case CoaDirCanal::Zone:      return "zone";
+        case CoaDirCanal::Aucun:     return "-";
+        default:                     return "inconnu";
+    }
+}
+
 // Verbes dont CE binaire porte l'effet : treve (D2a), suspendre_mercenaire
-// (D2c), reaffecter et alleger (D2b). Un verbe allume dans la conf mais sans
-// effet ici est refuse `verbe_eteint`.
+// (D2c), reaffecter et alleger (D2b), et les cinq verbes du lot D3. Un verbe
+// allume dans la conf mais sans effet ici est refuse `verbe_eteint`.
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger;
+           v == CoaDirVerbe::Alleger || VerbeD3(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -525,6 +597,33 @@ public:
             LOG_INFO("playerbots", "coa directeur : table coa_dir_commande absente, bus inerte");
             return false;
         }
+        // GARDE DE COLONNES (lot D3, SPEC-directeur-D3.md § 3.2, P-131). Les cinq
+        // colonnes ET l'ENUM exact de `verbe` : tester `texte` seul laisserait
+        // passer une migration a moitie appliquee, et l'egalite stricte de l'ENUM
+        // refuse aussi une migration future que ce binaire ne connait pas (elle
+        // se relit). Sans cette garde, un binaire D3 installe avant la migration
+        // ferait echouer CHAQUE lecture du bus (colonne inconnue, rappel sans
+        // ligne), treves comprises, et rien au journal du module. Requete
+        // SYNCHRONE, au demarrage seulement ; relue au prochain demarrage.
+        _colonnesD3 = false;
+        QueryResult colonnes = CharacterDatabase.Query(
+            "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
+            " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
+            " IFNULL((SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
+            " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME = 'verbe'), '')");
+        uint64 nbColonnes = 0;
+        std::string typeVerbe;
+        if (colonnes)
+        {
+            nbColonnes = (*colonnes)[0].Get<uint64>();
+            typeVerbe = (*colonnes)[1].Get<std::string>();
+        }
+        _colonnesD3 = nbColonnes == 5 && typeVerbe == ENUM_VERBE_D3;
+        if (_colonnesD3)
+            LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes D3 absentes, verbes D3 inertes (colonnes={}/5, verbe={})",
+                     nbColonnes, typeVerbe.empty() ? std::string("?") : typeVerbe);
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -563,16 +662,22 @@ public:
         _attenteMs = 0;
         _enVol = true;
 
+        // `origine` (colonne D2, NOT NULL) dans les DEUX formes : le refus
+        // `occupe` en a besoin (§ 3.6). Les colonnes D3 seulement si la garde
+        // les a vues : sinon, la forme D2 inchangee.
         std::string const sql = Acore::StringFormat(
             "SELECT id, verbe, cible, IFNULL(joueur, 0), duree_s, IFNULL(carte, 0), IFNULL(x, 0), IFNULL(y, 0),"
-            " IFNULL(z, 0), IFNULL(rayon, 0), epoque_monde, IF(expire_le < NOW(), 1, 0), IFNULL(action, '')"
+            " IFNULL(z, 0), IFNULL(rayon, 0), epoque_monde, IF(expire_le < NOW(), 1, 0), IFNULL(action, ''),"
+            " origine{}"
             " FROM coa_dir_commande WHERE statut = 'en_attente' AND id > {} ORDER BY id LIMIT 32",
+            _colonnesD3 ? ", IFNULL(texte, ''), IFNULL(canal, ''), IFNULL(valeur, 0), IFNULL(intensite, 0), delai_s" : "",
             _dernierId);
+        bool const d3 = _colonnesD3;
 
         // `this` : l'objet est une statique de ce fichier, qui vit autant que
         // son processeur de rappels (membre).
         _queries.AddCallback(CharacterDatabase.AsyncQuery(sql).WithCallback(
-            [this](QueryResult r)
+            [this, d3](QueryResult r)
             {
                 _enVol = false;
                 if (!r)
@@ -594,6 +699,15 @@ public:
                     c.epoqueMonde = f[10].Get<uint32>();
                     c.expiree = f[11].Get<uint32>() != 0;
                     c.action = f[12].Get<std::string>();
+                    c.origine = f[13].Get<std::string>();
+                    if (d3)
+                    {
+                        c.texte = f[14].Get<std::string>();
+                        c.canal = CanalDe(f[15].Get<std::string>());
+                        c.valeur = f[16].Get<int32>();
+                        c.intensite = f[17].Get<float>();
+                        c.delaiS = f[18].Get<uint32>();
+                    }
                     // Avance ICI, avant toute nouvelle requete : la suivante ne
                     // part qu'une fois _enVol retombe, donc apres ce rappel.
                     _dernierId = std::max(_dernierId, c.id);
@@ -626,6 +740,8 @@ public:
         CharacterDatabase.Execute("UPDATE coa_dir_instance SET bus = {} WHERE id = 1", bus ? 1 : 0);
     }
 
+    bool ColonnesD3() const override { return _colonnesD3; }
+
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
     // d'echappement a faire, seulement NULL ou une chaine entre apostrophes.
@@ -636,6 +752,11 @@ private:
 
     static constexpr uint32 BALAYAGE_MS = 60000;
     static constexpr uint32 BALAYAGE_MARGE_S = 60;
+    // COLUMN_TYPE attendu, forme MESUREE pour l'ENUM D2 le 26/09 (SPEC § 3.2) :
+    // minuscules, apostrophes, sans espace.
+    static constexpr char const* ENUM_VERBE_D3 =
+        "enum('treve','reaffecter','alleger','suspendre_mercenaire','lever','peupler','faire_parler','repondre',"
+        "'heure_du_jour','meteo')";
 
     QueryCallbackProcessor _queries;
     std::vector<CoaDirCommande> _pretes;
@@ -643,6 +764,7 @@ private:
     uint32 _attenteMs = 0;
     uint32 _balayageMs = 0;
     bool _enVol = false;
+    bool _colonnesD3 = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -1299,6 +1421,14 @@ void SuivreAffectations()
             lever(f, "maitre_humain", CoaDirecteur::COA_DIR_NB_COMPTEURS);
             continue;
         }
+        // Lot D3 : une presence n'a de sens qu'autour du joueur qui l'a
+        // demandee. Deconnecte (FindConnectedPlayer : une teleportation
+        // lointaine n'est pas une deconnexion), la presence tombe.
+        if (f.a.presence && (!f.joueur || !JoueurConnecte(f.joueur)))
+        {
+            lever(f, "joueur_hors_ligne", CoaDirecteur::COA_DIR_NB_COMPTEURS);
+            continue;
+        }
         // Rerandomisation (AdjustBotToRange) : la destination n'est plus de
         // sa tranche, et la teleportation periodique doit reprendre. Regle (b)
         // de la SPEC § 6.2 : seule une BAISSE ou un saut de plus d'un niveau
@@ -1370,6 +1500,7 @@ void SuivreAffectations()
     std::vector<AffectationInterne> etapes;
     std::vector<MortTrajet> mortsPosees;
     uint32 arrivees = 0;
+    uint32 arriveesPresence = 0;
     {
         std::unique_lock<std::shared_mutex> garde(verrouConsignes);
         for (Decision const& d : decisions)
@@ -1387,6 +1518,8 @@ void SuivreAffectations()
                 it->second.quetesRendues0 = d.rendues;
                 it->second.arriveeS = maintenant;
                 ++arrivees;
+                if (it->second.a.presence)
+                    ++arriveesPresence;
                 continue;
             }
             if (d.issue == Issue::Releve)
@@ -1428,6 +1561,8 @@ void SuivreAffectations()
     }
     for (uint32 i = 0; i < arrivees; ++i)
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TRAJETS_ARRIVES);
+    for (uint32 i = 0; i < arriveesPresence; ++i)
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ARRIVEES_PRESENCE);
     for (AffectationInterne const& r : releves)
         JournaliserFinAffectation(r, "arrivee_5min");
     for (AffectationInterne const& e : etapes)
@@ -1573,6 +1708,771 @@ void PurgerMortsEnTrajet()
     nbMortsEnTrajet.store(0, std::memory_order_relaxed);
 }
 
+// ------------------------------------------------------------------ lot D3 : aides communes
+
+// Un joueur HUMAIN : pas de moteur playerbots (meme forme que Monde(), type H),
+// et une session (ChatHandler l'exige).
+bool Humain(Player* p)
+{
+    return p && !GET_PLAYERBOT_AI(p) && p->GetSession();
+}
+
+// Proprietaire d'une affectation (SPEC-directeur-D3.md § 3.6, decision n° 15) :
+// son `origine` ; pour `ask` et `arc`, `origine` ET `joueur` (le joueur qui a
+// demande). Pour `regle`, `joueur` n'est que l'humain le plus proche, pose pour
+// que son `stop` leve la consigne : il ne dit pas a qui est le bot.
+bool MemeProprietaire(AffectationInterne const& f, CoaDirCommande const& c)
+{
+    if (f.origine != c.origine)
+        return false;
+    if (c.origine == "ask" || c.origine == "arc")
+        return f.joueur == c.joueur;
+    return true;
+}
+
+// `peupler` : un humain AUTRE que `exclu` a moins de `rayon` du centre ? Meme
+// boucle que PlayerbotAI::HasPlayerNearby (Bot/PlayerbotAI.cpp), qui ne sait
+// exempter personne : MJ invisibles ignores, point de vue compris.
+bool HumainProcheSauf(WorldPosition centre, uint32 carte, float rayon, uint32 exclu)
+{
+    float const carre = rayon * rayon;
+    for (Player* humain : sRandomPlayerbotMgr.GetPlayers())
+    {
+        if (!humain || humain->GetGUID().GetCounter() == exclu)
+            continue;
+        if (humain->IsGameMaster() && !humain->isGMVisible())
+            continue;
+        if (humain->GetMapId() != carte)
+            continue;
+        if (centre.sqDistance(WorldPosition(humain)) < carre)
+            return true;
+        WorldObject* vue = humain->GetViewpoint();
+        if (vue && vue != humain && centre.sqDistance(WorldPosition(vue)) < carre)
+            return true;
+    }
+    return false;
+}
+
+constexpr float PRESENCE_A_VUE_YD = 150.0f;       // visibilite 100 yd (worldserver.conf) + marge
+constexpr float PRESENCE_CENTRE_MIN_YD = 40.0f;   // centre du disque, depuis le joueur a la pose
+constexpr float PRESENCE_CENTRE_MAX_YD = 300.0f;
+
+// ------------------------------------------------------------------ lot D3 : repondre, paroles, ciel, meteo
+//
+// SPEC-directeur-D3.md § 2.8, § 5.2, § 6.2, § 6.3. TROIS ETATS NEUFS, TOUS AU
+// FIL MONDE SEUL, sans verrou : un seul ecrivain (Recevoir, Entretien,
+// HandleStop, la purge du bus eteint) et un seul lecteur (le meme fil :
+// Consignes et `joueur,<guid>` du 8888 y sont executes, P-137). Aucun fil de
+// carte ne les lit. Aucun etat du coeur n'est ecrit (P-134) : ni la meteo de
+// zone (WeatherMgr en reste seul proprietaire), ni l'heure du monde -- des
+// PAQUETS au seul joueur, rien d'autre. Aucune strategie touchee (P-130).
+
+// Prefixe de `repondre` (decision n° 18) : la SEULE chaine a codes `|` que le
+// Directeur envoie. Le texte venu du service ne peut en porter aucun
+// (TexteBusValide) : SendSysMessage ne les echappe pas (Chat.cpp, l'echappement
+// calcule `msg` puis envoie `str`, l'original).
+constexpr char const* PREFIXE_DIRECTEUR = "|cffc8a2ff[Directeur]|r ";
+constexpr size_t TEXTE_BUS_MAX = 255;             // octets, colonne `texte` VARCHAR(255)
+
+// Texte d'une commande : non vide, <= 255 octets, structure UTF-8 correcte
+// (octets de tete et de suite ; formes trop longues et surrogates NON testes :
+// l'encodeur du service n'en produit pas), caracteres de 1 a 3 octets seulement
+// (la connexion MySQL du coeur est en `utf8`, 3 octets : un caractere de 4 octets
+// -- emoji -- reviendrait en `?`), ni `|` ni caractere de controle (C0, 0x7F,
+// C1). Tout autre texte : refus `texte`.
+bool TexteBusValide(std::string const& t)
+{
+    if (t.empty() || t.size() > TEXTE_BUS_MAX)
+        return false;
+    size_t i = 0;
+    while (i < t.size())
+    {
+        unsigned char const o = static_cast<unsigned char>(t[i]);
+        if (o < 0x20 || o == 0x7F || o == '|')
+            return false;
+        size_t const n = o < 0x80 ? 1 : (o >= 0xC2 && o <= 0xDF) ? 2 : (o >= 0xE0 && o <= 0xEF) ? 3 : 0;
+        if (!n || i + n > t.size())
+            return false;
+        for (size_t k = 1; k < n; ++k)
+            if ((static_cast<unsigned char>(t[i + k]) & 0xC0) != 0x80)
+                return false;
+        // Controles C1 (U+0080 a U+009F : C2 80 a C2 9F) : des controles aussi.
+        if (n == 2 && o == 0xC2 && static_cast<unsigned char>(t[i + 1]) < 0xA0)
+            return false;
+        i += n;
+    }
+    return true;
+}
+
+// Commande qui vise UN joueur (repondre, heure_du_jour, meteo) : `cible` est
+// son guid, `joueur` vaut 0 ou le meme guid. Toute autre forme : `bornes`.
+bool CibleJoueurValide(CoaDirCommande const& c)
+{
+    return c.cible != 0 && (c.joueur == 0 || c.joueur == c.cible);
+}
+
+// Verbe `repondre` (§ 2.8). Une ligne systeme, prefixee, au seul joueur. Pas de
+// consigne, pas de levee : accusee `execute`, puis oubliee. Exemptee de l'arret
+// (decision n° 4) : c'est Recevoir qui l'en exempte.
+void ExecuterRepondre(CoaDirCommande const& c)
+{
+    if (!CibleJoueurValide(c))
+    {
+        Refuser(c, "bornes");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        Refuser(c, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        Refuser(c, "pas_humain");
+        return;
+    }
+    if (!TexteBusValide(c.texte))
+    {
+        Refuser(c, "texte");
+        return;
+    }
+    ChatHandler(p->GetSession()).SendSysMessage(std::string(PREFIXE_DIRECTEUR) + c.texte);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REPONSES);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur reponse: id={} joueur={} octets={}", c.id, c.cible, c.texte.size());
+    Accuser(c, "execute", nullptr);
+}
+
+// ---- paroles (§ 5.2)
+
+constexpr uint32 PAROLE_DELAI_MAX_S = 120;
+constexpr uint32 PAROLE_GRACE_MS = 60 * IN_MILLISECONDS;   // echue sans livraison : perdue
+constexpr uint32 PAROLE_PAR_BOT_MS = 30 * IN_MILLISECONDS; // une parole par bot et par 30 s
+constexpr size_t PAROLES_EN_FILE_MAX = 64;
+constexpr float PAROLE_DIRE_YD = 40.0f;                    // ListenRange.Say
+constexpr float PAROLE_CRIER_YD = 300.0f;                  // ListenRange.Yell
+
+struct Parole
+{
+    uint32 id;
+    uint32 bot;
+    uint32 joueur;
+    CoaDirCanal canal;
+    std::string texte;
+    uint32 poseMs;     // getMSTime() a l'execution de la commande
+    uint32 delaiMs;    // livraison au plus tot a poseMs + delaiMs
+};
+std::vector<Parole> paroles;                           // fil monde seul
+std::deque<uint32> parolesAcceptees;                   // getMSTime des paroles acceptees, 60 s glissantes
+std::unordered_map<uint32, uint32> derniereParoleBot;  // guid du bot -> getMSTime de sa derniere acceptee
+
+void OublierParolesAnciennes(uint32 maintenantMs)
+{
+    while (!parolesAcceptees.empty() && getMSTimeDiff(parolesAcceptees.front(), maintenantMs) >= MINUTE * IN_MILLISECONDS)
+        parolesAcceptees.pop_front();
+    for (auto it = derniereParoleBot.begin(); it != derniereParoleBot.end();)
+    {
+        if (getMSTimeDiff(it->second, maintenantMs) >= PAROLE_PAR_BOT_MS)
+            it = derniereParoleBot.erase(it);
+        else
+            ++it;
+    }
+}
+
+// Verbe `faire_parler` : la commande s'accuse `execute` et la parole entre en
+// file ; la livraison (LivrerParoles, chaque seconde) dit `livree` ou `perdue`
+// dans la ligne `coa directeur parole:`, jamais en base (la commande est deja
+// accusee). Les refus de cette fonction, eux, sont des accuses ordinaires.
+void ExecuterParole(CoaDirCommande const& c)
+{
+    // 6. bornes
+    if (c.cible == 0 || c.joueur == 0 || c.delaiS > PAROLE_DELAI_MAX_S ||
+        !(c.canal == CoaDirCanal::Dire || c.canal == CoaDirCanal::Crier || c.canal == CoaDirCanal::Chuchoter ||
+          c.canal == CoaDirCanal::Zone))
+    {
+        Refuser(c, "bornes");
+        return;
+    }
+    if (!TexteBusValide(c.texte))
+    {
+        Refuser(c, "texte");
+        return;
+    }
+    Player* bot = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!bot)
+    {
+        Refuser(c, "hors_ligne");
+        return;
+    }
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
+    if (!ia || !sRandomPlayerbotMgr.IsRandomBot(bot))
+    {
+        Refuser(c, "pas_un_bot");
+        return;
+    }
+    if (ia->HasGameClientMaster())
+    {
+        Refuser(c, "maitre_humain");
+        return;
+    }
+    Player* joueur = ObjectAccessor::FindPlayerByLowGUID(c.joueur);
+    if (!joueur)
+    {
+        Refuser(c, "hors_ligne");
+        return;
+    }
+    if (!Humain(joueur))
+    {
+        Refuser(c, "pas_humain");
+        return;
+    }
+    if (bot->GetTeamId() != joueur->GetTeamId())
+    {
+        Refuser(c, "faction");
+        return;
+    }
+    // 7. plafonds : `plafond` = AiPlayerbot.Directeur.MaxParolesParMinute, tous
+    // bots confondus (et la file bornee) ; `cadence` = une parole par bot et par
+    // 30 s (pas `budget`, deja pris par le jeton du bus, controle 5). Comptes a
+    // l'ACCEPTATION : une parole perdue a la livraison compte.
+    uint32 const maintenantMs = getMSTime();
+    OublierParolesAnciennes(maintenantMs);
+    if (parolesAcceptees.size() >= sPlayerbotAIConfig.directeurMaxParolesParMinute ||
+        paroles.size() >= PAROLES_EN_FILE_MAX)
+    {
+        Refuser(c, "plafond");
+        return;
+    }
+    if (derniereParoleBot.count(c.cible))
+    {
+        Refuser(c, "cadence");
+        return;
+    }
+    parolesAcceptees.push_back(maintenantMs);
+    derniereParoleBot[c.cible] = maintenantMs;
+    paroles.push_back(Parole{c.id, c.cible, c.joueur, c.canal, c.texte, maintenantMs, c.delaiS * IN_MILLISECONDS});
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    Accuser(c, "execute", nullptr);
+}
+
+void JournaliserParole(Parole const& p, char const* statut, char const* raison)
+{
+    LOG_INFO("playerbots", "coa directeur parole: id={} guid={} joueur={} canal={} statut={} raison={}", p.id, p.bot,
+             p.joueur, NomCanal(p.canal), statut, raison ? raison : "-");
+}
+
+// Canal de zone du bot, cherche COMME PlayerbotAI::SayToChannel (id
+// ZoneChannelId, nom qui contient la zone ou l'aire), mais sans parler : on
+// veut savoir QUEL canal, et si le bot en est membre (Channel::Say se tait
+// sinon, et SayToChannel rend vrai quand meme).
+Channel* CanalDeZone(Player* bot, PlayerbotAI* ia)
+{
+    ChannelMgr* cMgr = ChannelMgr::forTeam(bot->GetTeamId());
+    AreaTableEntry const* zone = ia->GetCurrentZone();
+    if (!cMgr || !zone)
+        return nullptr;
+    std::string const nomZone = PlayerbotAI::GetLocalizedAreaName(zone);
+    AreaTableEntry const* aire = ia->GetCurrentArea();
+    std::string const nomAire = aire ? PlayerbotAI::GetLocalizedAreaName(aire) : "";
+    for (auto const& [cle, canal] : cMgr->GetChannels())
+    {
+        if (!canal || canal->GetChannelId() != sPlayerbotAIConfig.zoneChannelId || canal->GetName().empty())
+            continue;
+        if ((!nomZone.empty() && canal->GetName().find(nomZone) != std::string::npos) ||
+            (!nomAire.empty() && canal->GetName().find(nomAire) != std::string::npos))
+            return canal;
+    }
+    return nullptr;
+}
+
+// Livraison, chaque seconde, fil monde, cartes a l'arret : Say et Yell visitent
+// les voisins de la grille sans course (P-137). Une parole echue est livree ou
+// perdue a ce passage ; seul un bot mort ou en combat la fait attendre, au plus
+// PAROLE_GRACE_MS apres son heure.
+void LivrerParoles()
+{
+    if (paroles.empty())
+        return;
+    uint32 const maintenantMs = getMSTime();
+    std::vector<Parole> restantes;
+    restantes.reserve(paroles.size());
+    std::vector<Parole> lot;
+    lot.swap(paroles);
+    for (Parole& p : lot)
+    {
+        uint32 const ecoule = getMSTimeDiff(p.poseMs, maintenantMs);
+        if (ecoule < p.delaiMs)
+        {
+            restantes.push_back(std::move(p));
+            continue;
+        }
+        char const* perdue = nullptr;
+        char const* reserve = nullptr;   // livree, mais sans preuve qu'elle a ete entendue
+        Player* bot = ObjectAccessor::FindPlayerByLowGUID(p.bot);
+        Player* joueur = ObjectAccessor::FindPlayerByLowGUID(p.joueur);
+        PlayerbotAI* ia = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
+        if (!bot || !ia)
+            perdue = "locuteur_absent";
+        else if (!joueur)
+            perdue = "joueur_absent";
+        else if (CoaDirecteur::EstArrete(p.joueur))
+            perdue = "arret";
+        else if (bot->GetTeamId() != joueur->GetTeamId())
+            perdue = "faction";
+        else if (ia->HasGameClientMaster())
+            perdue = "maitre_humain";
+        else if (!bot->IsAlive() || bot->IsInCombat())
+        {
+            if (ecoule < p.delaiMs + PAROLE_GRACE_MS)
+            {
+                restantes.push_back(std::move(p));
+                continue;
+            }
+            perdue = "indisponible";
+        }
+        if (!perdue)
+        {
+            bool const memeCarte = bot->GetMapId() == joueur->GetMapId();
+            float const distance = memeCarte ? bot->GetExactDist(joueur) : 1e9f;
+            switch (p.canal)
+            {
+                case CoaDirCanal::Dire:
+                    if (distance > PAROLE_DIRE_YD)
+                        perdue = "loin";
+                    else
+                        ia->Say(p.texte);
+                    break;
+                case CoaDirCanal::Crier:
+                    if (distance > PAROLE_CRIER_YD)
+                        perdue = "loin";
+                    else
+                        ia->Yell(p.texte);
+                    break;
+                case CoaDirCanal::Chuchoter:
+                    if (!ia->Whisper(p.texte, joueur->GetName()))
+                        perdue = "joueur_absent";
+                    break;
+                case CoaDirCanal::Zone:
+                {
+                    Channel* canal = bot->GetZoneId() == joueur->GetZoneId() ? CanalDeZone(bot, ia) : nullptr;
+                    if (bot->GetZoneId() != joueur->GetZoneId())
+                        perdue = "autre_zone";
+                    else if (!canal || !bot->IsInChannel(canal))
+                        perdue = "hors_canal";
+                    else
+                    {
+                        // LIMITE (revue D3) : Player::IsInChannel ne compare que
+                        // l'id du canal, commun a tous les « General » ; et
+                        // Channel::IsOn est prive. Si le bot n'est pas membre DE
+                        // CE canal, Channel::Say se tait (NotMember). La ligne dit
+                        // donc `livree raison=non_prouve` : seul le joueur, a
+                        // l'ecran, prouve la livraison (epreuve du § 5.5).
+                        canal->Say(bot->GetGUID(), p.texte, LANG_UNIVERSAL);
+                        ia->LogChat("tells channel " + canal->GetName(), p.texte);
+                        reserve = "non_prouve";
+                    }
+                    break;
+                }
+                default:
+                    perdue = "canal";
+                    break;
+            }
+        }
+        if (perdue)
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAROLES_PERDUES);
+            JournaliserParole(p, "perdue", perdue);
+        }
+        else
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAROLES_LIVREES);
+            JournaliserParole(p, "livree", reserve);
+        }
+    }
+    // Une commande executee pendant la boucle ? Impossible : on est dans
+    // Entretien, pas dans Recevoir. Ceinture tout de meme : on ajoute.
+    for (Parole& p : paroles)
+        restantes.push_back(std::move(p));
+    paroles.swap(restantes);
+}
+
+// Levee de paroles en file (lever, stop, bus eteint) : statut `leve` en base,
+// ligne `parole:` perdue.
+template <typename Predicat>
+size_t LeverParolesSi(Predicat lever, char const* raison)
+{
+    if (paroles.empty())
+        return 0;
+    size_t n = 0;
+    for (auto it = paroles.begin(); it != paroles.end();)
+    {
+        if (!lever(*it))
+        {
+            ++it;
+            continue;
+        }
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAROLES_PERDUES);
+        JournaliserParole(*it, "perdue", raison);
+        LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=faire_parler cible={} joueur={} statut=leve raison={}",
+                 it->id, it->bot, it->joueur, raison);
+        if (source)
+            source->Clore(it->id, "leve", raison);
+        it = paroles.erase(it);
+        ++n;
+    }
+    return n;
+}
+
+// ---- ciel (§ 6.2)
+
+constexpr int32 MINUTES_PAR_JOUR = 24 * 60;
+
+struct Ciel
+{
+    uint32 id;
+    uint32 joueur;    // guid du joueur qui le voit (la cible)
+    uint32 minute;    // minute du ciel voulue, heure de la MACHINE (UTC ici, decision n° 13)
+    uint32 finS;      // Maintenant()
+    uint32 carte;     // carte a la pose : un changement de carte renvoie l'heure vraie
+};
+std::unordered_map<uint32, Ciel> ciels;   // cle : guid du joueur ; fil monde seul
+
+// Meme paquet que Player::SendInitialPacketsBeforeAddToMap (SMSG_LOGIN_SETTIMESPEED :
+// heure empaquetee, vitesse, uint32 0), au seul joueur. SUPPOSE, a eprouver
+// (§ 6.2) : que le client 3.3.5a l'accepte hors connexion.
+void EnvoyerHeure(Player* p, time_t t)
+{
+    WorldPacket data(SMSG_LOGIN_SETTIMESPEED, 4 + 4 + 4);
+    data.AppendPackedTime(t);
+    data << float(0.01666667f);
+    data << uint32(0);
+    p->SendDirectMessage(&data);
+}
+
+// L'instant dont l'heure LOCALE de la machine est `minute` aujourd'hui.
+time_t InstantDeMinute(uint32 minute)
+{
+    time_t const maintenant = GameTime::GetGameTime().count();
+    std::tm const lt = Acore::Time::TimeBreakdown(maintenant);
+    return maintenant - (lt.tm_hour * HOUR + lt.tm_min * MINUTE + lt.tm_sec) + static_cast<time_t>(minute) * MINUTE;
+}
+
+// Fin d'un ciel retire (hors de toute iteration). `renvoyer` : l'heure vraie
+// est renvoyee si le joueur est encore la, sur la carte de la pose.
+void FinirCiel(Ciel const& ciel, char const* statut, char const* raison, char const* motif, bool renvoyer)
+{
+    if (renvoyer)
+        if (Player* p = ObjectAccessor::FindPlayerByLowGUID(ciel.joueur))
+            if (p->GetMapId() == ciel.carte)
+                EnvoyerHeure(p, GameTime::GetGameTime().count());
+    LOG_INFO("playerbots", "coa directeur ciel: id={} guid={} minute={} motif={}", ciel.id, ciel.joueur, ciel.minute,
+             motif);
+    if (statut)
+    {
+        LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=heure_du_jour cible={} joueur={} statut={} raison={}",
+                 ciel.id, ciel.joueur, ciel.joueur, statut, raison ? raison : "-");
+        if (source)
+            source->Clore(ciel.id, statut, raison);
+    }
+}
+
+void ExecuterCiel(CoaDirCommande const& c)
+{
+    if (!CibleJoueurValide(c) || c.valeur < 0 || c.valeur >= MINUTES_PAR_JOUR ||
+        c.dureeS < AFFECTATION_DUREE_MIN_S || c.dureeS > AFFECTATION_DUREE_MAX_S)
+    {
+        Refuser(c, "bornes");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        Refuser(c, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        Refuser(c, "pas_humain");
+        return;
+    }
+    Ciel const nouveau{c.id, c.cible, static_cast<uint32>(c.valeur), Maintenant() + c.dureeS, p->GetMapId()};
+    auto it = ciels.find(c.cible);
+    if (it != ciels.end())
+    {
+        // Un ciel par joueur, le dernier remplace ; pas de renvoi de l'heure
+        // vraie entre les deux (le nouveau paquet part juste apres).
+        Ciel const ancien = it->second;
+        ciels.erase(it);
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
+        std::string const par = Acore::StringFormat("par_{}", c.id);
+        FinirCiel(ancien, "remplace", par.c_str(), "remplace", false);
+    }
+    ciels[c.cible] = nouveau;
+    EnvoyerHeure(p, InstantDeMinute(nouveau.minute));
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_CIELS);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur ciel: id={} guid={} minute={} motif=pose fin_s={}", c.id, c.cible,
+             nouveau.minute, nouveau.finS);
+    Accuser(c, "execute", nullptr);
+}
+
+template <typename Predicat>
+size_t LeverCielsSi(Predicat lever, char const* raison)
+{
+    if (ciels.empty())
+        return 0;
+    std::vector<Ciel> leves;
+    for (auto it = ciels.begin(); it != ciels.end();)
+    {
+        if (lever(it->second))
+        {
+            leves.push_back(it->second);
+            it = ciels.erase(it);
+        }
+        else
+            ++it;
+    }
+    for (Ciel const& ciel : leves)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        FinirCiel(ciel, "leve", raison, raison, true);
+    }
+    return leves.size();
+}
+
+// Chaque seconde : echeance (heure vraie renvoyee), deconnexion (l'etat tombe,
+// la reconnexion renvoie l'heure vraie), changement de carte (le coeur a deja
+// renvoye l'heure vraie, MovementHandler -> SendInitialPacketsBeforeAddToMap :
+// on ne renvoie rien).
+void SuivreCiels()
+{
+    if (ciels.empty())
+        return;
+    uint32 const maintenant = Maintenant();
+    struct Fin { Ciel ciel; char const* motif; bool renvoyer; };
+    std::vector<Fin> fins;
+    for (auto it = ciels.begin(); it != ciels.end();)
+    {
+        Player* p = JoueurConnecte(it->first);
+        char const* motif = nullptr;
+        bool renvoyer = false;
+        if (!p)
+            motif = "hors_ligne";
+        else if (!p->IsInWorld() || p->IsBeingTeleported())
+        {
+            ++it;
+            continue;
+        }
+        else if (p->GetMapId() != it->second.carte)
+            motif = "carte";
+        else if (it->second.finS <= maintenant)
+        {
+            motif = "echue";
+            renvoyer = true;
+        }
+        if (!motif)
+        {
+            ++it;
+            continue;
+        }
+        fins.push_back(Fin{it->second, motif, renvoyer});
+        it = ciels.erase(it);
+    }
+    for (Fin const& f : fins)
+    {
+        if (f.renvoyer)
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECHUES);
+        FinirCiel(f.ciel, nullptr, nullptr, f.motif, f.renvoyer);
+    }
+}
+
+// ---- meteo (§ 6.3)
+
+struct MeteoJoueur
+{
+    uint32 id;
+    uint32 joueur;
+    uint32 zone;           // zone a la pose : en sortir met fin a la meteo
+    uint32 etat;           // WeatherState
+    float intensite;       // ]0,0001 ; 0,9999[
+    uint32 finS;           // Maintenant()
+    uint32 dernierEnvoiMs; // getMSTime() du dernier paquet
+};
+std::unordered_map<uint32, MeteoJoueur> meteos;   // cle : guid du joueur ; fil monde seul
+
+// Etats permis : ceux de l'enum WeatherState (Weather/Weather.h).
+bool EtatMeteoPermis(int32 v)
+{
+    switch (v)
+    {
+        case WEATHER_STATE_FINE: case WEATHER_STATE_FOG: case WEATHER_STATE_LIGHT_RAIN:
+        case WEATHER_STATE_MEDIUM_RAIN: case WEATHER_STATE_HEAVY_RAIN: case WEATHER_STATE_LIGHT_SNOW:
+        case WEATHER_STATE_MEDIUM_SNOW: case WEATHER_STATE_HEAVY_SNOW: case WEATHER_STATE_LIGHT_SANDSTORM:
+        case WEATHER_STATE_MEDIUM_SANDSTORM: case WEATHER_STATE_HEAVY_SANDSTORM: case WEATHER_STATE_THUNDERS:
+        case WEATHER_STATE_BLACKRAIN: case WEATHER_STATE_BLACKSNOW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void EnvoyerMeteo(Player* p, MeteoJoueur const& m)
+{
+    WorldPackets::Misc::Weather paquet(static_cast<WeatherState>(m.etat), m.intensite);
+    p->SendDirectMessage(paquet.Write());
+}
+
+// Retablissement : le temps de la zone ou se trouve le joueur, par les voies du
+// coeur. Map::SendZoneWeather ne dit RIEN pour une zone sans info dynamique (35
+// zones seulement ont des donnees) ; on envoie donc d'abord le beau temps, que
+// SendZoneWeather remplace aussitot quand la zone a son temps. Sans cela, la
+// pluie du Directeur suivrait le joueur. (L'ordre inverse de la spec, qui
+// supposait qu'on sache si la zone a une info : Map::_zoneDynamicInfo est prive.)
+void RetablirMeteo(Player* p)
+{
+    Weather::SendFineWeatherUpdateToPlayer(p);
+    if (Map* map = p->GetMap())
+        map->SendZoneWeather(p->GetZoneId(), p);
+}
+
+void FinirMeteo(MeteoJoueur const& m, char const* statut, char const* raison, char const* motif, bool retablir)
+{
+    if (retablir)
+        if (Player* p = ObjectAccessor::FindPlayerByLowGUID(m.joueur))
+            RetablirMeteo(p);
+    LOG_INFO("playerbots", "coa directeur meteo: id={} guid={} etat={} zone={} motif={}", m.id, m.joueur, m.etat, m.zone,
+             motif);
+    if (statut)
+    {
+        LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=meteo cible={} joueur={} statut={} raison={}", m.id,
+                 m.joueur, m.joueur, statut, raison ? raison : "-");
+        if (source)
+            source->Clore(m.id, statut, raison);
+    }
+}
+
+void ExecuterMeteo(CoaDirCommande const& c)
+{
+    if (!CibleJoueurValide(c) || !EtatMeteoPermis(c.valeur) || !std::isfinite(c.intensite) || c.intensite <= 0.0f ||
+        c.intensite >= 1.0f || c.dureeS < AFFECTATION_DUREE_MIN_S || c.dureeS > AFFECTATION_DUREE_MAX_S)
+    {
+        Refuser(c, "bornes");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        Refuser(c, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        Refuser(c, "pas_humain");
+        return;
+    }
+    // Bornes du coeur (Weather::UpdateWeather) : ]0,0001 ; 0,9999[.
+    float const intensite = std::min(0.9999f, std::max(0.0001f, c.intensite));
+    MeteoJoueur const nouvelle{c.id, c.cible, p->GetZoneId(), static_cast<uint32>(c.valeur), intensite,
+                               Maintenant() + c.dureeS, getMSTime()};
+    auto it = meteos.find(c.cible);
+    if (it != meteos.end())
+    {
+        // La nouvelle remplace ; pas de retablissement entre les deux.
+        MeteoJoueur const ancienne = it->second;
+        meteos.erase(it);
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
+        std::string const par = Acore::StringFormat("par_{}", c.id);
+        FinirMeteo(ancienne, "remplace", par.c_str(), "remplace", false);
+    }
+    meteos[c.cible] = nouvelle;
+    EnvoyerMeteo(p, nouvelle);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_METEOS);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur meteo: id={} guid={} etat={} zone={} motif=pose intensite={:.2f} fin_s={}",
+             c.id, c.cible, nouvelle.etat, nouvelle.zone, nouvelle.intensite, nouvelle.finS);
+    Accuser(c, "execute", nullptr);
+}
+
+template <typename Predicat>
+size_t LeverMeteosSi(Predicat lever, char const* raison)
+{
+    if (meteos.empty())
+        return 0;
+    std::vector<MeteoJoueur> levees;
+    for (auto it = meteos.begin(); it != meteos.end();)
+    {
+        if (lever(it->second))
+        {
+            levees.push_back(it->second);
+            it = meteos.erase(it);
+        }
+        else
+            ++it;
+    }
+    for (MeteoJoueur const& m : levees)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        FinirMeteo(m, "leve", raison, raison, true);
+    }
+    return levees.size();
+}
+
+// Chaque seconde : echeance et changement de zone (fin + retablissement),
+// deconnexion (l'etat tombe), sinon reaffirmation toutes les
+// MeteoReaffirmationSecondes -- une regeneration de WeatherMgr, qui part du fil
+// de CARTE (Map::UpdateWeather), peut ecraser le paquet ; le Directeur n'y
+// ecrit rien, il renvoie le sien depuis le fil monde.
+void SuivreMeteos()
+{
+    if (meteos.empty())
+        return;
+    uint32 const maintenant = Maintenant();
+    uint32 const maintenantMs = getMSTime();
+    uint32 const periodeMs = sPlayerbotAIConfig.directeurMeteoReaffirmationSecondes * IN_MILLISECONDS;
+    struct Fin { MeteoJoueur m; char const* motif; bool retablir; };
+    std::vector<Fin> fins;
+    for (auto it = meteos.begin(); it != meteos.end();)
+    {
+        MeteoJoueur& m = it->second;
+        Player* p = JoueurConnecte(it->first);
+        char const* motif = nullptr;
+        if (!p)
+            motif = "hors_ligne";
+        else if (!p->IsInWorld() || p->IsBeingTeleported())
+        {
+            ++it;
+            continue;
+        }
+        else if (p->GetZoneId() != m.zone)
+            motif = "zone";
+        else if (m.finS <= maintenant)
+            motif = "echue";
+        if (motif)
+        {
+            fins.push_back(Fin{m, motif, p != nullptr});
+            it = meteos.erase(it);
+            continue;
+        }
+        if (getMSTimeDiff(m.dernierEnvoiMs, maintenantMs) >= periodeMs)
+        {
+            EnvoyerMeteo(p, m);
+            m.dernierEnvoiMs = maintenantMs;
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REAFFIRMATIONS_METEO);
+            LOG_INFO("playerbots", "coa directeur meteo: id={} guid={} etat={} zone={} motif=reaffirme", m.id, m.joueur,
+                     m.etat, m.zone);
+        }
+        ++it;
+    }
+    for (Fin const& f : fins)
+    {
+        if (f.retablir && std::string_view(f.motif) == "echue")
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECHUES);
+        FinirMeteo(f.m, nullptr, nullptr, f.motif, f.retablir);
+    }
+}
+
 // Entretien de chaque seconde, bus allume OU eteint : la purge d'un bus
 // eteint met des mercenaires en file, et il faut bien les reconstruire.
 void Entretien(uint32 diff)
@@ -1590,6 +2490,10 @@ void Entretien(uint32 diff)
     // APRES le suivi : une mort constatee a cette seconde y a pose son etat.
     SuivreMortsEnTrajet();
     SuivreTrajetsLeves();
+    // Lot D3 : ciels, meteos, paroles (fil monde seul).
+    SuivreCiels();
+    SuivreMeteos();
+    LivrerParoles();
     if (!aReconstruire.empty())
         Reconstruire();
     filetMs += IN_MILLISECONDS;
@@ -1603,14 +2507,22 @@ void Entretien(uint32 diff)
 // Verbe `lever` : cible = id de la commande a lever, 0 = tout.
 void ExecuterLever(CoaDirCommande const& c)
 {
+    // Lot D3 : ciels (heure vraie renvoyee), meteos (temps de la zone
+    // retabli) et paroles en file se levent comme les autres consignes.
     size_t const n =
         c.cible == 0
             ? LeverSi([](Treve const&) { return true; }, "lever") +
                   LeverSuspensionsSi([](Suspension const&) { return true; }, "lever") +
-                  LeverAffectationsSi([](AffectationInterne const&) { return true; }, "lever")
+                  LeverAffectationsSi([](AffectationInterne const&) { return true; }, "lever") +
+                  LeverCielsSi([](Ciel const&) { return true; }, "lever") +
+                  LeverMeteosSi([](MeteoJoueur const&) { return true; }, "lever") +
+                  LeverParolesSi([](Parole const&) { return true; }, "lever")
             : LeverSi([&c](Treve const& t) { return t.id == c.cible; }, "lever") +
                   LeverSuspensionsSi([&c](Suspension const& s) { return s.id == c.cible; }, "lever") +
-                  LeverAffectationsSi([&c](AffectationInterne const& f) { return f.a.id == c.cible; }, "lever");
+                  LeverAffectationsSi([&c](AffectationInterne const& f) { return f.a.id == c.cible; }, "lever") +
+                  LeverCielsSi([&c](Ciel const& x) { return x.id == c.cible; }, "lever") +
+                  LeverMeteosSi([&c](MeteoJoueur const& m) { return m.id == c.cible; }, "lever") +
+                  LeverParolesSi([&c](Parole const& p) { return p.id == c.cible; }, "lever");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     // Rien a lever n'est pas un refus : la consigne a pu echoir ou etre
     // remplacee entre-temps, et l'intention (qu'elle ne soit plus) est tenue.
@@ -1862,6 +2774,68 @@ void ExecuterAffectation(CoaDirCommande const& c)
         Refuser(c, "carte");
         return;
     }
+    // Lot D3, verbe `peupler` (SPEC-directeur-D3.md § 4.2) : controles propres,
+    // en plus de ceux de `reaffecter`. Le joueur qui demande est lu ici, fil
+    // monde, cartes a l'arret (P-137).
+    bool const presence = c.verbe == CoaDirVerbe::Peupler;
+    if (presence)
+    {
+        Player* joueur = c.joueur ? ObjectAccessor::FindPlayerByLowGUID(c.joueur) : nullptr;
+        if (!joueur)
+        {
+            Refuser(c, "hors_ligne");
+            return;
+        }
+        if (!Humain(joueur))
+        {
+            Refuser(c, "pas_humain");
+            return;
+        }
+        if (bot->GetTeamId() != joueur->GetTeamId())
+        {
+            Refuser(c, "faction");
+            return;
+        }
+        // Un chasseur amene pres d'un joueur High Risk (FFA) le chasserait, et
+        // chasserait les autres arrivants (WildPvp.AllBotsAreTargets).
+        if (MercenaryRewards::EstMercenaire(bot) && !CoaDirecteur::MercenaireEnRpg(c.cible))
+        {
+            Refuser(c, "mercenaire");
+            return;
+        }
+        if (joueur->GetMapId() != c.carte)
+        {
+            Refuser(c, "carte");
+            return;
+        }
+        // Continuation : le bot porte deja une affectation ACTIVE du meme
+        // proprietaire pour ce joueur (etape precedente du meme parcours).
+        // Sans elle, les dernieres etapes, posees quand le bot approche,
+        // seraient toutes refusees `a_vue`.
+        bool continuation = false;
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = affectations.find(c.cible);
+            continuation = it != affectations.end() && it->second.a.finS > Maintenant() &&
+                           it->second.joueur == c.joueur && it->second.origine == c.origine;
+        }
+        float const bx = bot->GetPositionX() - joueur->GetPositionX();
+        float const by = bot->GetPositionY() - joueur->GetPositionY();
+        if (!continuation && bx * bx + by * by <= PRESENCE_A_VUE_YD * PRESENCE_A_VUE_YD)
+        {
+            Refuser(c, "a_vue");
+            return;
+        }
+        float const cx = c.x - joueur->GetPositionX();
+        float const cy = c.y - joueur->GetPositionY();
+        float const centreJoueur = cx * cx + cy * cy;
+        if (centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD ||
+            centreJoueur > PRESENCE_CENTRE_MAX_YD * PRESENCE_CENTRE_MAX_YD)
+        {
+            Refuser(c, "bornes");
+            return;
+        }
+    }
     float const dx = bot->GetPositionX() - c.x;
     float const dy = bot->GetPositionY() - c.y;
     if (dx * dx + dy * dy > AFFECTATION_DISTANCE_MAX * AFFECTATION_DISTANCE_MAX)
@@ -1922,7 +2896,9 @@ void ExecuterAffectation(CoaDirCommande const& c)
         }
     }
     WorldPosition centre(c.carte, c.x, c.y, sol);
-    if (ia->HasPlayerNearby(&centre, AFFECTATION_HUMAIN_YD))
+    // `peupler` exempte le joueur qui demande, et lui seul (§ 4.2).
+    if (presence ? HumainProcheSauf(centre, c.carte, AFFECTATION_HUMAIN_YD, c.joueur)
+                 : ia->HasPlayerNearby(&centre, AFFECTATION_HUMAIN_YD))
     {
         Refuser(c, "humain_proche");
         return;
@@ -1954,7 +2930,9 @@ void ExecuterAffectation(CoaDirCommande const& c)
     // ordinaire. Figee a la pose, comme le reste.
     nouvelle.a.etape = sPlayerbotAIConfig.directeurEtapes && c.action.size() > 2 && c.action[0] == 'E' &&
                        c.action[1] == '-';
+    nouvelle.a.presence = presence;
     nouvelle.verbe = c.verbe;
+    nouvelle.origine = c.origine;
     nouvelle.guid = c.cible;
     nouvelle.joueur = c.joueur;
     nouvelle.poseS = maintenant;
@@ -1965,18 +2943,44 @@ void ExecuterAffectation(CoaDirCommande const& c)
     nouvelle.quetesRendues0 = 0;
 
     bool remplace = false;
+    bool occupe = false;
     AffectationInterne ancienne{};
     {
         std::unique_lock<std::shared_mutex> garde(verrouConsignes);
         auto it = affectations.find(c.cible);
-        if (it != affectations.end())
+        // REFUS `occupe` (lot D3, SPEC-directeur-D3.md § 3.6, decision n° 15),
+        // APRES tous les autres controles (il ne masque ni un `hors_ligne` ni un
+        // `bornes`) et DANS la meme section que l'ecriture : le fil monde
+        // execute les commandes une a une, le test voit donc toute pose
+        // anterieure, meme lue dans la meme passe. Le premier proprietaire
+        // garde le bot ; le meme proprietaire continue (remplacement, comme en
+        // D2) ; `manuel` (l'operateur) remplace toujours. Une affectation echue
+        // mais pas encore levee ne compte plus.
+        if (it != affectations.end() && it->second.a.finS > maintenant && c.origine != "manuel" &&
+            !MemeProprietaire(it->second, c))
         {
-            remplace = true;
+            occupe = true;
             ancienne = it->second;
         }
-        // Une affectation par bot, la derniere remplace entierement (§ 6.3).
-        affectations[c.cible] = nouvelle;
-        nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
+        else
+        {
+            if (it != affectations.end())
+            {
+                remplace = true;
+                ancienne = it->second;
+            }
+            // Une affectation par bot, la derniere remplace entierement (§ 6.3).
+            affectations[c.cible] = nouvelle;
+            nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
+        }
+    }
+    if (occupe)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_OCCUPEES);
+        LOG_INFO("playerbots", "coa directeur occupe: id={} guid={} origine={} joueur={} par_id={} par_origine={}"
+                 " par_joueur={}", c.id, c.cible, c.origine, c.joueur, ancienne.a.id, ancienne.origine, ancienne.joueur);
+        Refuser(c, "occupe");
+        return;
     }
     if (remplace)
     {
@@ -1988,9 +2992,15 @@ void ExecuterAffectation(CoaDirCommande const& c)
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     LOG_INFO("playerbots",
              "coa directeur : affectation posee id={} guid={} verbe={} carte={} x={:.1f} y={:.1f} rayon={:.0f}"
-             " fin_s={} distance={:.0f} mercenaire_rpg={} etape={}",
+             " fin_s={} distance={:.0f} mercenaire_rpg={} etape={} origine={}",
              c.id, c.cible, NomVerbe(c.verbe), c.carte, c.x, c.y, c.rayon, fin, std::sqrt(dx * dx + dy * dy),
-             mercenaireRpg ? 1 : 0, nouvelle.a.etape ? 1 : 0);
+             mercenaireRpg ? 1 : 0, nouvelle.a.etape ? 1 : 0, c.origine);
+    if (presence)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PEUPLEMENTS);
+        LOG_INFO("playerbots", "coa directeur presence: id={} guid={} joueur={} etape={} remplace={}", c.id, c.cible,
+                 c.joueur, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0);
+    }
     Accuser(c, "execute", nullptr);
 }
 
@@ -2026,9 +3036,21 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "verbe_eteint");
         return;
     }
-    // 4. arret, avant le budget : un arret ne consomme pas de jeton.
-    if ((c.joueur && CoaDirecteur::EstArrete(c.joueur)) ||
-        (c.verbe == CoaDirVerbe::Treve && CoaDirecteur::EstArrete(c.cible)))
+    // 3 bis (lot D3). Verbe D3 sans les colonnes D3 (migration non appliquee au
+    // demarrage, P-131) : son texte, son canal, sa valeur n'ont pas ete lus.
+    if (VerbeD3(c.verbe) && (!source || !source->ColonnesD3()))
+    {
+        Refuser(c, "colonnes_d3");
+        return;
+    }
+    // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
+    // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
+    // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
+    // joueur lui-meme (cible), comme la treve.
+    bool const visePersonne = c.verbe == CoaDirVerbe::Treve || c.verbe == CoaDirVerbe::HeureDuJour ||
+                              c.verbe == CoaDirVerbe::Meteo;
+    if (c.verbe != CoaDirVerbe::Repondre &&
+        ((c.joueur && CoaDirecteur::EstArrete(c.joueur)) || (visePersonne && CoaDirecteur::EstArrete(c.cible))))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REFUS_ARRET);
         Refuser(c, "arret");
@@ -2052,7 +3074,20 @@ void Recevoir(CoaDirCommande const& c)
             break;
         case CoaDirVerbe::Reaffecter:
         case CoaDirVerbe::Alleger:
+        case CoaDirVerbe::Peupler:
             ExecuterAffectation(c);
+            break;
+        case CoaDirVerbe::Repondre:
+            ExecuterRepondre(c);
+            break;
+        case CoaDirVerbe::FaireParler:
+            ExecuterParole(c);
+            break;
+        case CoaDirVerbe::HeureDuJour:
+            ExecuterCiel(c);
+            break;
+        case CoaDirVerbe::Meteo:
+            ExecuterMeteo(c);
             break;
         default:
             Refuser(c, "verbe_eteint");   // inatteignable : VerbeImplemente l'a filtre
@@ -2084,7 +3119,10 @@ void Bilan()
              " affectations_levees_mort={} affectations_levees_hors_ligne={}"
              " affectations_levees_fin_suspension={} enlisements_retenus={} echues={}"
              " ecartes_trajet={} morts_en_trajet={} releves_ressuscites={} releves_loin_du_corps={}"
-             " etapes_arrivees={} en_releve={} tirages_refuses_hauteur={} rpg_remis_idle={} trajets_leves={}",
+             " etapes_arrivees={} en_releve={} tirages_refuses_hauteur={} rpg_remis_idle={} trajets_leves={}"
+             " reponses={} paroles_livrees={} paroles_perdues={} peuplements={} arrivees_presence={}"
+             " enlisements_presence={} ciels={} meteos={} reaffirmations_meteo={} occupees={} laisses_presence={}"
+             " paroles_en_file={} ciels_actifs={} meteos_actives={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -2100,7 +3138,11 @@ void Bilan()
              Lire(COA_DIR_MORTS_EN_TRAJET), Lire(COA_DIR_RELEVES_RESSUSCITES), Lire(COA_DIR_RELEVES_LOIN_DU_CORPS),
              Lire(COA_DIR_ETAPES_ARRIVEES), nbMortsEnTrajet.load(std::memory_order_relaxed),
              Lire(COA_DIR_TIRAGES_REFUSES_HAUTEUR), Lire(COA_DIR_RPG_REMIS_IDLE),
-             nbTrajetsLeves.load(std::memory_order_relaxed));
+             nbTrajetsLeves.load(std::memory_order_relaxed), Lire(COA_DIR_REPONSES), Lire(COA_DIR_PAROLES_LIVREES),
+             Lire(COA_DIR_PAROLES_PERDUES), Lire(COA_DIR_PEUPLEMENTS), Lire(COA_DIR_ARRIVEES_PRESENCE),
+             Lire(COA_DIR_ENLISEMENTS_PRESENCE), Lire(COA_DIR_CIELS), Lire(COA_DIR_METEOS),
+             Lire(COA_DIR_REAFFIRMATIONS_METEO), Lire(COA_DIR_OCCUPEES), Lire(COA_DIR_LAISSES_PRESENCE),
+             paroles.size(), ciels.size(), meteos.size());
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -2144,6 +3186,24 @@ std::string Consignes()
         out << f.a.id << ',' << NomVerbe(f.verbe) << ',' << f.guid << ',' << f.joueur << ',' << f.a.finS << ','
             << f.a.carte << ',' << f.a.x << ',' << f.a.y << ',' << f.a.rayon << ',' << NomPhase(f.a.phase) << ",-,"
             << (f.a.etape ? (f.etapeArrivee ? "1" : "0") : "-");
+    }
+    // Lot D3 : un ciel porte sa minute, une meteo son etat, en onzieme champ ;
+    // ni lieu ni phase. Les paroles en file ne sont pas des consignes.
+    // (ciels, meteos : fil monde seul, comme cette fonction.)
+    for (auto const& [guid, ciel] : ciels)
+    {
+        if (!premier)
+            out << '\t';
+        premier = false;
+        out << ciel.id << ",heure_du_jour," << ciel.joueur << ',' << ciel.joueur << ',' << ciel.finS << ",0,0,0,0,-,"
+            << ciel.minute << ",-";
+    }
+    for (auto const& [guid, m] : meteos)
+    {
+        if (!premier)
+            out << '\t';
+        premier = false;
+        out << m.id << ",meteo," << m.joueur << ',' << m.joueur << ',' << m.finS << ",0,0,0,0,-," << m.etat << ",-";
     }
     return out.str();
 }
@@ -2261,6 +3321,59 @@ std::string Lieux(std::string const& texte)
     }
     return out.str();
 }
+
+// `joueur,<guid>` (lot D3, SPEC-directeur-D3.md § 3.4), lecture seule, fil
+// monde (P-137). Une ligne :
+//   guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo
+// regle : pve, high_risk, war_mode ou '-', par HasAura dans l'ordre 9931032,
+// 1004019, 1004119 (P-138 : 1004119 est AUSSI porte en PvE) ; equipe A ou H ;
+// groupe : taille du groupe, 0 sans groupe ; ciel, meteo : minute et etat poses
+// par le Directeur, '-' sinon. Personnage absent : `absent`. Requete mal formee,
+// ou bus eteint (meme interrupteur que `lieux`) : `invalid`.
+constexpr uint32 AURA_REGLE_PVE = 9931032;        // mod-ascension-compat, AscensionRulesets.cpp
+constexpr uint32 AURA_REGLE_HIGH_RISK = 1004019;
+constexpr uint32 AURA_REGLE_WAR_MODE = 1004119;
+
+std::string Joueur(std::string const& texte)
+{
+    if (!sPlayerbotAIConfig.directeurBus)
+        return "invalid";
+    std::string const nombre = texte.substr(7);   // apres "joueur,"
+    if (nombre.empty() || nombre.size() > 10 ||
+        !std::all_of(nombre.begin(), nombre.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+        return "invalid";
+    unsigned long long const valeur = std::strtoull(nombre.c_str(), nullptr, 10);
+    if (valeur == 0 || valeur > 0xFFFFFFFFull)
+        return "invalid";
+    uint32 const guid = static_cast<uint32>(valeur);
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(guid);
+    if (!p)
+        return "absent";
+    char const* regle = p->HasAura(AURA_REGLE_PVE)         ? "pve"
+                        : p->HasAura(AURA_REGLE_HIGH_RISK) ? "high_risk"
+                        : p->HasAura(AURA_REGLE_WAR_MODE)  ? "war_mode"
+                                                           : "-";
+    Group* groupe = p->GetGroup();
+    std::ostringstream out;
+    out << guid << ',' << regle << ',' << (p->GetTeamId() == TEAM_ALLIANCE ? 'A' : 'H') << ','
+        << static_cast<uint32>(p->getRace()) << ',' << static_cast<uint32>(p->getClass()) << ','
+        << static_cast<uint32>(p->GetLevel()) << ',' << (groupe ? groupe->GetMembersCount() : 0) << ','
+        << (p->IsGameMaster() ? 1 : 0) << ',' << ((p->InBattleground() || p->InArena()) ? 1 : 0) << ','
+        << (p->IsFFAPvP() ? 1 : 0) << ',' << (p->IsPvP() ? 1 : 0) << ','
+        << (CoaDirecteur::EstArrete(guid) ? 1 : 0) << ',';
+    auto const ciel = ciels.find(guid);
+    if (ciel != ciels.end())
+        out << ciel->second.minute;
+    else
+        out << '-';
+    out << ',';
+    auto const meteo = meteos.find(guid);
+    if (meteo != meteos.end())
+        out << meteo->second.etat;
+    else
+        out << '-';
+    return out.str();
+}
 }  // namespace
 
 // ================================================================== interface
@@ -2376,6 +3489,10 @@ void CoaDirecteur::TraiterBus(uint32 diff)
         LeverSi([](Treve const&) { return true; }, "bus_eteint");
         LeverSuspensionsSi([](Suspension const&) { return true; }, "bus_eteint");
         LeverAffectationsSi([](AffectationInterne const&) { return true; }, "bus_eteint");
+        // Lot D3 : heure vraie renvoyee, temps de la zone retabli, paroles oubliees.
+        LeverCielsSi([](Ciel const&) { return true; }, "bus_eteint");
+        LeverMeteosSi([](MeteoJoueur const&) { return true; }, "bus_eteint");
+        LeverParolesSi([](Parole const&) { return true; }, "bus_eteint");
         PurgerMortsEnTrajet();
         source->Vidanger([](CoaDirCommande const& c)
         {
@@ -2688,9 +3805,10 @@ public:
             handler->SetSentErrorMessage(true);
             return false;
         }
-        // D1 : la demande est gardee, elle n'est pas encore executee (D3).
+        // Lot D3 : le service d'ecoute lit la demande et repond (verbe `repondre`).
+        // Accuse immediat, dans le meme appel (SPEC-directeur-D3.md § 2.8).
         Enregistrer(joueur, "ask", texte);
-        handler->PSendSysMessage("Demande gardee. Le Directeur ne sait pas encore y repondre : ce sera la prochaine etape.");
+        handler->PSendSysMessage("Le Directeur vous a entendu.");
         return true;
     }
 
@@ -2712,7 +3830,11 @@ public:
         size_t const levees =
             LeverSi([guidLow](Treve const& t) { return t.cible == guidLow || t.joueur == guidLow; }, "arret") +
             LeverSuspensionsSi([guidLow](Suspension const& s) { return s.joueur == guidLow; }, "arret") +
-            LeverAffectationsSi([guidLow](AffectationInterne const& f) { return f.joueur == guidLow; }, "arret");
+            LeverAffectationsSi([guidLow](AffectationInterne const& f) { return f.joueur == guidLow; }, "arret") +
+            // Lot D3 : son ciel et sa meteo sont retablis, ses paroles en file oubliees.
+            LeverCielsSi([guidLow](Ciel const& x) { return x.joueur == guidLow; }, "arret") +
+            LeverMeteosSi([guidLow](MeteoJoueur const& m) { return m.joueur == guidLow; }, "arret") +
+            LeverParolesSi([guidLow](Parole const& p) { return p.joueur == guidLow; }, "arret");
         if (levees)
             LOG_INFO("playerbots", "coa directeur : stop de {} leve {} consigne(s)", guidLow, levees);
         if (!DemandeArretTropTot(guidLow, true))

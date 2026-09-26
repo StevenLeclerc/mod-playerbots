@@ -118,10 +118,21 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         // il arrive DANS le disque, que le service a choisi loin des humains --
         // et il est journalise. C'est cette action qui lit la consigne : aucun
         // ecrivain de plus (P-134). Hors trajet : comportement amont inchange.
+        //
+        // Lot D3 (SPEC-directeur-D3.md § 4.2) : une affectation DE PRESENCE
+        // (`peupler`, destination pres du joueur qui l'a demandee) ne se rejoint
+        // JAMAIS par teleportation, en trajet comme en sejour : saut toujours
+        // retenu, compte a part (`enlisements_presence`).
         CoaDirecteur::Affectation aff;
         if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
-            aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
+            (aff.presence || aff.phase == CoaDirecteur::CoaDirPhase::Trajet))
         {
+            if (aff.presence)
+            {
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_RETENUS);
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_PRESENCE);
+                return false;
+            }
             if (!CoaDirecteur::DansLeDisque(aff, dest.GetMapId(), dest.GetPositionX(), dest.GetPositionY()) ||
                 dest.GetMapId() != bot->GetMapId() || botAI->HasPlayerNearby(150.0f))
             {

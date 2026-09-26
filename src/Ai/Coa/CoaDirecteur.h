@@ -27,6 +27,10 @@
  *    disque) en deux phases, TRAJET puis SEJOUR, lue par la teleportation
  *    aleatoire, new rpg et la chasse : § 6.
  *
+ * 6. (Lot D3) Les verbes `repondre`, `peupler`, `faire_parler`,
+ *    `heure_du_jour`, `meteo`, la requete `joueur,<guid>` et le refus `occupe` :
+ *    coa-project/docs/SPEC-directeur-D3.md, § 2.8, § 3 a § 6.
+ *
  * LA REGLE : un seul proprietaire par etat (P-134). Le drapeau d'arret n'est
  * ecrit que par ce fichier. Aucun champ du coeur ni de playerbots n'est touche.
  */
@@ -132,6 +136,13 @@ struct Affectation
     // Etape d'itineraire (action `E-...`, option Directeur.Etapes) : ne passe
     // jamais en SEJOUR, reste en TRAJET jusqu'au remplacement ou l'echeance.
     bool etape = false;
+    // Lot D3 (verbe `peupler`, SPEC-directeur-D3.md § 4.2) : affectation « de
+    // presence », pres du joueur qui l'a demandee. Figee a la pose. Deux
+    // lecteurs : NewRpgBaseAction::MoveFarTo (le saut d'enlisement est TOUJOURS
+    // retenu, en trajet comme en sejour : le bot ne se teleporte jamais sous les
+    // yeux du joueur) et NewRpgStatusUpdateAction::Execute (laisse de sejour,
+    // option Directeur.PresenceLaisseYd).
+    bool presence = false;
 };
 
 // Tout fil, chemin chaud : le bot a-t-il une affectation en cours ? `sortie`
@@ -238,9 +249,36 @@ enum CoaDirCompteur : uint8
     COA_DIR_ETAPES_ARRIVEES,         // etapes d'itineraire atteintes (sans sejour)
     COA_DIR_TIRAGES_REFUSES_HAUTEUR, // points du disque refuses par la laisse de hauteur
     COA_DIR_RPG_REMIS_IDLE,          // GO_GRIND vers un trajet leve remis a IDLE par l'IA
+    // Lot D3 (SPEC-directeur-D3.md § 3.3), en fin de la ligne bilan :
+    COA_DIR_REPONSES,                // lignes `repondre` envoyees
+    COA_DIR_PAROLES_LIVREES,         // paroles `faire_parler` dites
+    COA_DIR_PAROLES_PERDUES,         // ... perdues a la livraison (raison au journal)
+    COA_DIR_PEUPLEMENTS,             // affectations de presence posees
+    COA_DIR_ARRIVEES_PRESENCE,       // ... arrivees dans leur disque (sejour)
+    COA_DIR_ENLISEMENTS_PRESENCE,    // sauts d'enlisement retenus pour une presence
+    COA_DIR_CIELS,                   // ciels poses (heure_du_jour)
+    COA_DIR_METEOS,                  // meteos posees
+    COA_DIR_REAFFIRMATIONS_METEO,    // paquets meteo renvoyes (reaffirmation)
+    COA_DIR_OCCUPEES,                // affectations refusees `occupe` (§ 3.6)
+    COA_DIR_LAISSES_PRESENCE,        // laisses de sejour d'un bot de presence
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);
+
+// ------------------------------------------------------------------ lot D3
+//
+// SPEC-directeur-D3.md, § 2.8, § 3, § 4.2, § 5.2, § 6.2-6.3. Tout est inerte
+// tant que le verbe n'est pas dans AiPlayerbot.Directeur.Verbes, et tant que la
+// migration 2026_09_26_01_coa_directeur_d3.sql n'est pas appliquee (garde de
+// colonnes au demarrage : sans elle, refus `colonnes_d3`). Nouveaux etats, TOUS
+// au fil monde seul, sans verrou : la file de paroles, les ciels et les meteos
+// par joueur (un seul ecrivain, un seul lecteur : le fil monde -- Consignes et
+// `joueur,<guid>` du 8888 y sont executes, P-137). L'affectation de presence
+// (`peupler`) vit dans le magasin des affectations, meme verrou, meme patron.
+//
+// Requete neuve du 8888 (lecture seule, fil monde) :
+//   joueur,<guid> -> guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo
+// `absent` si le personnage n'est pas en jeu, `invalid` si mal formee OU bus eteint.
 }  // namespace CoaDirecteur
 
 void AddSC_coa_directeur();

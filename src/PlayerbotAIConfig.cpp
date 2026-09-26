@@ -759,6 +759,17 @@ bool PlayerbotAIConfig::Initialize()
     directeurReleveCimetiere = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ReleveCimetiere", false);
     directeurReleveSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.ReleveSecondes", 600);
     directeurEtapes = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Etapes", false);
+    // Lot D3 (SPEC-directeur-D3.md § 8 ; decision n° 7 du 26/09 : laisse de 250 yd).
+    directeurMaxParolesParMinute = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxParolesParMinute", 6);
+    directeurMeteoReaffirmationSecondes =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MeteoReaffirmationSecondes", 30);
+    directeurPresenceLaisseYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PresenceLaisseYd", 250);
+    // Sous 5 s, un joueur recevrait un paquet meteo presque a chaque seconde.
+    if (directeurMeteoReaffirmationSecondes < 5)
+        directeurMeteoReaffirmationSecondes = 5;
+    // Une laisse plus courte que le disque (rayon max 300) le ramenerait sans fin.
+    if (directeurPresenceLaisseYd && directeurPresenceLaisseYd < 60)
+        directeurPresenceLaisseYd = 60;
     // Sous 60 s, un trajet de 600 yd a pied serait abandonne avant d'arriver.
     if (directeurTrajetMaxSecondes < 60)
         directeurTrajetMaxSecondes = 60;
