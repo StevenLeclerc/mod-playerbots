@@ -73,8 +73,12 @@ std::atomic<bool> arretServeur{false};
  * `monde` : une ligne par personnage en jeu, champs separes par ',', lignes
  * par une tabulation, pour tenir dans le protocole a une ligne du port 8888.
  *
- *   guid,nom,type,carte,zone,aire,x,y,z,niveau,pv%,combat,etat,ffa,pvp,victime
+ *   guid,nom,type,carte,zone,aire,x,y,z,niveau,pv%,combat,etat,ffa,pvp,victime,vol
  *
+ * vol (26/09) : 0 au sol, 1 en taxi (IsInFlight), 2 drapeaux de vol (IsFlying) --
+ * ATTENTION, 2 vaut aussi pour un bot au sol sur monture volante : playerbots
+ * pose FLYING|DISABLE_GRAVITY des qu'il porte l'aura (MovementActions.cpp).
+ * Les lecteurs tolerent son absence (observateur.py, ecoute.py : `len(c) < 16`).
  * type : R (bot aleatoire), B (autre bot), H (humain). etat : A vivant,
  * D corps (esprit non libere), G fantome -- meme distinction que
  * LogPlayerLocation. Le niveau est ecrit comme un NOMBRE : le CSV de playerbots
@@ -110,7 +114,8 @@ std::string Monde()
             << static_cast<uint32>(p->GetHealthPct()) << ','
             << (p->IsInCombat() ? 1 : 0) << ',' << etat << ','
             << (p->IsFFAPvP() ? 1 : 0) << ',' << (p->IsPvP() ? 1 : 0) << ','
-            << (victime ? victime->GetGUID().GetCounter() : 0);
+            << (victime ? victime->GetGUID().GetCounter() : 0) << ','
+            << (p->IsInFlight() ? 1 : (p->IsFlying() ? 2 : 0));
     }
     return out.str();
 }
