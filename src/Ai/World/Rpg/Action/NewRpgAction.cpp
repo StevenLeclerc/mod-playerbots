@@ -305,6 +305,28 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
         }
     }
 
+    // CoA -- Directeur, teleportation cachee (27/09, option Directeur.TeleportCache) :
+    // le fil monde vient de teleporter ce bot dans le disque d'une etape `T-`.
+    // Un statut RPG choisi AVANT le saut (GO_GRIND vers un point de farm, quete,
+    // camp...) le ramenerait loin du point ; la laisse ne mord pas (le bot est
+    // dans le disque). C'est cette action, proprietaire de rpgInfo, qui le remet
+    // a IDLE (P-134) ; l'IDLE d'une etape ne tire qu'errance ou repos. Un statut
+    // ecrit apres le saut (startT > sautMs : getMSTimeDiff reboucle et rend
+    // plus de 2^31 ms) n'est pas touche. Sans affectation : un
+    // chargement atomique.
+    {
+        CoaDirecteur::Affectation aff;
+        if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.saut &&
+            aff.phase == CoaDirecteur::CoaDirPhase::Trajet && info.GetStatus() != RPG_IDLE &&
+            getMSTimeDiff(info.startT, aff.sautMs) < 0x80000000u &&
+            CoaDirecteur::DansLeDisque(aff, bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY()))
+        {
+            info.ChangeToIdle();
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_SAUTS_REMIS_IDLE);
+            return true;
+        }
+    }
+
     // CoA -- Directeur, lot D2b (SPEC-directeur-D2.md § 6.3) : LA LAISSE. En
     // TRAJET, hors du disque et pas en vol, le bot va au disque et nulle part
     // ailleurs : aucun statut neuf n'est tire (le switch ci-dessous, seul

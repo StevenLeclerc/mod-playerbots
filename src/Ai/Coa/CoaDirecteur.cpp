@@ -1892,6 +1892,162 @@ constexpr float PRESENCE_A_VUE_YD = 150.0f;       // visibilite 100 yd (worldser
 constexpr float PRESENCE_CENTRE_MIN_YD = 40.0f;   // centre du disque, depuis le joueur a la pose
 constexpr float PRESENCE_CENTRE_MAX_YD = 300.0f;
 
+// ------------------------------------------------------------------ teleportation cachee (27/09)
+//
+// Option Directeur.TeleportCache. Une presence `peupler` d'action `T-<n>` est
+// la PREMIERE etape d'un parcours long : a la pose, le fil monde (cartes a
+// l'arret, P-137) teleporte le bot sur un point de son disque, puis pose
+// l'affectation (une etape). Le bot marche ensuite les etapes suivantes. UN
+// ETAT NEUF, `sautsFaits` (guid -> Maintenant() du saut), fil monde seul, sans
+// verrou : ecrit et lu par ExecuterAffectation seulement (anti double saut).
+//
+// Ce qui garantit qu'aucun humain ne voit le bot apparaitre ou disparaitre :
+//  - la DISTANCE, d'abord : Visibility.Distance.Continents = 100 yd
+//    (worldserver.conf en service, lu le 27/09) ; le client ne recoit pas un
+//    objet au-dela. Le point est a >= SAUT_JOUEUR_MIN_YD du demandeur et a
+//    >= SAUT_HUMAIN_YD de TOUT humain (point de vue compris) ; au depart, aucun
+//    humain a SAUT_HUMAIN_YD du bot (HasPlayerNearby, la garde de RandomTeleport) ;
+//  - la LIGNE DE VUE, ensuite : ni les pieds ni la tete du bot au point ne sont
+//    visibles de l'oeil du demandeur. Map::isInLineOfSight ne lit QUE les
+//    modeles (vmap, objets de jeu) -- lu dans Map.cpp, pas le relief --, d'ou
+//    une seconde sonde sur la grille de terrain (ReliefCoupe) ;
+//    La ligne de vue part de la TETE du personnage (+ 1,5 yd), pas de la
+//    camera (plus haute, en arriere) : c'est un COMPLEMENT de la distance, qui
+//    seule garantit (revue du 27/09, m3) ;
+//  - le CHAMP, si possible : un point derriere le joueur (hors de l'arc de
+//    SAUT_CHAMP_RAD devant lui) est prefere. La camera du client tourne
+//    librement : ce n'est qu'une preference, le journal dit `dans_le_champ`.
+constexpr float SAUT_JOUEUR_MIN_YD = 150.0f;
+constexpr float SAUT_JOUEUR_MAX_YD = 260.0f;      // service : 150-250 yd, + 10 de marge (le joueur bouge)
+constexpr float SAUT_HUMAIN_YD = 150.0f;
+constexpr float SAUT_DEPART_MIN_YD = 300.0f;      // plus pres, il n'y a rien a gagner a sauter
+constexpr uint32 SAUT_REPOS_S = 900;              // un bot ne saute pas deux fois en 15 min
+constexpr float SAUT_OEIL_YD = 1.5f;              // au-dessus de la tete du joueur : la camera
+constexpr float SAUT_CORPS_BAS_YD = 0.5f;
+constexpr float SAUT_CORPS_HAUT_YD = 2.5f;
+constexpr float SAUT_PAS_RELIEF_YD = 4.0f;
+constexpr float SAUT_CHAMP_RAD = 2.0f * float(M_PI) / 3.0f;   // 120 degres devant le joueur
+std::unordered_map<uint32, uint32> sautsFaits;    // guid bas du bot -> Maintenant() du saut
+constexpr float SAUT_WINTERGRASP_MARGE_YD = 300.0f;
+
+// Revue du 27/09 (M1) : a Wintergrasp un joueur voit a 175 yd
+// (VISIBILITY_DIST_WINTERGRASP, Object.cpp), pas a 100 : la marge de 150 yd ne
+// tient plus. Meme boite que WorldObject::IsInWintergrasp (Object.h), elargie
+// de 300 yd : ni le bot, ni le joueur (donc aucun point, a <= 260 yd de lui).
+bool PresDeWintergrasp(uint32 carte, float x, float y)
+{
+    float const m = SAUT_WINTERGRASP_MARGE_YD;
+    return carte == 571 && x > 3733.33331f - m && x < 5866.66663f + m && y > 1599.99999f - m &&
+           y < 4799.99997f + m;
+}
+
+// Le relief coupe-t-il le segment (x1, y1, z1) -> (x2, y2, z2) ? La grille de
+// terrain est lue tous les SAUT_PAS_RELIEF_YD, bouts exclus ; un sol plus haut
+// que le segment (+ 0,5 yd) le coupe. Sans donnee de grille : pas coupe (la
+// sonde ne cache alors rien : prudent).
+bool ReliefCoupe(Map* map, float x1, float y1, float z1, float x2, float y2, float z2)
+{
+    float const dx = x2 - x1, dy = y2 - y1;
+    float const d = std::sqrt(dx * dx + dy * dy);
+    int const n = static_cast<int>(d / SAUT_PAS_RELIEF_YD);
+    for (int i = 1; i < n; ++i)
+    {
+        float const t = static_cast<float>(i) / static_cast<float>(n);
+        float const h = map->GetGridHeight(x1 + t * dx, y1 + t * dy);
+        if (h > INVALID_HEIGHT && h > z1 + t * (z2 - z1) + 0.5f)
+            return true;
+    }
+    return false;
+}
+
+// Le point (x, y, sol) est-il cache a l'oeil du joueur ? Oui si NI les pieds
+// NI la tete ne sont en vue : un modele (Map::isInLineOfSight, toutes les
+// verifications, aucun modele ignore) ou le relief coupe chacun des deux rayons.
+bool CacheAuJoueur(Map* map, Player* joueur, float x, float y, float sol)
+{
+    float const ox = joueur->GetPositionX(), oy = joueur->GetPositionY();
+    float const oz = joueur->GetPositionZ() + joueur->GetCollisionHeight() + SAUT_OEIL_YD;
+    for (float haut : {SAUT_CORPS_BAS_YD, SAUT_CORPS_HAUT_YD})
+    {
+        float const tz = sol + haut;
+        if (map->isInLineOfSight(ox, oy, oz, x, y, tz, joueur->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS,
+                                 VMAP::ModelIgnoreFlags::Nothing) &&
+            !ReliefCoupe(map, ox, oy, oz, x, y, tz))
+            return false;
+    }
+    return true;
+}
+
+// Le point du saut : dans le disque (centre, puis 8 caps a mi-rayon, puis 8 a
+// 0,9 rayon), a SAUT_JOUEUR_MIN_YD-SAUT_JOUEUR_MAX_YD du joueur, sol sec a
+// +-6 yd du sol du centre (P-132, fenetre de P-145), sous le ciel ouvert
+// (ToitAuDessus, P-145 : jamais sous une ville), aucun humain a SAUT_HUMAIN_YD,
+// cache au joueur. Deux passes : hors de son champ d'abord, puis partout.
+// -> essais faits ; `trouve` faux : aucun point.
+struct PointSaut
+{
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    bool trouve = false;
+    bool dansLeChamp = false;
+    uint8 essais = 0;
+};
+PointSaut ChercherPointCache(Map* map, Player* joueur, float cx, float cy, float solCentre, float rayon)
+{
+    PointSaut r;
+    std::vector<std::pair<float, float>> pts{{cx, cy}};
+    for (float f : {0.5f, 0.9f})
+        for (int k = 0; k < 8; ++k)
+        {
+            float const a = float(M_PI) * k / 4.0f + (f > 0.6f ? float(M_PI) / 8.0f : 0.0f);
+            pts.emplace_back(cx + f * rayon * std::cos(a), cy + f * rayon * std::sin(a));
+        }
+    for (int passe = 0; passe < 2 && !r.trouve; ++passe)
+    {
+        for (auto const& [px, py] : pts)
+        {
+            float const jx = px - joueur->GetPositionX(), jy = py - joueur->GetPositionY();
+            float const dj = std::sqrt(jx * jx + jy * jy);
+            if (dj < SAUT_JOUEUR_MIN_YD || dj > SAUT_JOUEUR_MAX_YD)
+                continue;
+            Position const p(px, py, solCentre);
+            bool const champ = joueur->HasInArc(SAUT_CHAMP_RAD, &p);
+            if ((passe == 0) == champ)   // passe 0 : hors du champ ; passe 1 : le reste
+                continue;
+            ++r.essais;
+            float sol = 0.0f;
+            if (!SolSec(map, px, py, solCentre + Z_OFFSET_FIND_HEIGHT, sol) || std::fabs(sol - solCentre) > TIRAGE_ECART_Z)
+                continue;
+            if (ToitAuDessus(map, px, py, sol, sol))
+                continue;
+            // Revue du 27/09 (m1) : le service a trace la route depuis le CENTRE.
+            // Un point qui en serait separe (corniche, autre cote d'un mur) y
+            // laisserait le bot coince (aucun saut d'enlisement en presence).
+            // Approximation peu couteuse de la connexite : pente d'au plus
+            // TIRAGE_PENTE_MAX et aucun modele entre le point et le centre.
+            if (px != cx || py != cy)
+            {
+                float const ex = px - cx, ey = py - cy;
+                float const plan = std::sqrt(ex * ex + ey * ey);
+                if (std::fabs(sol - solCentre) > TIRAGE_PENTE_MAX * plan ||
+                    !map->isInLineOfSight(cx, cy, solCentre + SAUT_OEIL_YD, px, py, sol + SAUT_OEIL_YD,
+                                          PHASEMASK_NORMAL, LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
+                    continue;
+            }
+            if (HumainProcheSauf(WorldPosition(map->GetId(), px, py, sol), map->GetId(), SAUT_HUMAIN_YD, 0))
+                continue;
+            if (!CacheAuJoueur(map, joueur, px, py, sol))
+                continue;
+            r.x = px;
+            r.y = py;
+            r.z = sol;
+            r.trouve = true;
+            r.dansLeChamp = champ;
+            break;
+        }
+    }
+    return r;
+}
+
 // ------------------------------------------------------------------ lot D3 : repondre, paroles, ciel, meteo
 //
 // SPEC-directeur-D3.md § 2.8, § 5.2, § 6.2, § 6.3. TROIS ETATS NEUFS, TOUS AU
@@ -2949,9 +3105,19 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         Refuser(c, "compagnon_eteint");
         return;
     }
+    // Teleportation cachee (27/09) : un peupler d'action `T-<n>`, qui est une
+    // ETAPE (le bot saute puis attend l'etape suivante) : les deux options.
+    bool const saut = presence && c.action.size() > 2 && c.action[0] == 'T' && c.action[1] == '-';
+    if (saut && (!sPlayerbotAIConfig.directeurTeleportCache || !sPlayerbotAIConfig.directeurEtapes))
+    {
+        Refuser(c, "teleport_eteint");
+        return;
+    }
+    Player* demandeur = nullptr;   // presence : le joueur qui a demande, lu ici (fil monde)
     if (presence)
     {
         Player* joueur = c.joueur ? ObjectAccessor::FindPlayerByLowGUID(c.joueur) : nullptr;
+        demandeur = joueur;
         if (!joueur)
         {
             Refuser(c, "hors_ligne");
@@ -2985,6 +3151,7 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         // seraient toutes refusees `a_vue`.
         bool continuation = false;
         bool presenceArrivee = false;
+        bool dejaSaute = false;
         {
             std::shared_lock<std::shared_mutex> garde(verrouConsignes);
             auto it = affectations.find(c.cible);
@@ -2992,6 +3159,52 @@ void ExecuterAffectation(CoaDirCommande const& recue)
                            it->second.joueur == c.joueur && it->second.origine == c.origine;
             presenceArrivee = continuation && it->second.a.presence && !it->second.a.etape &&
                               it->second.a.phase == CoaDirecteur::CoaDirPhase::Sejour;
+            // Double saut : une affectation en cours (tout proprietaire) issue d'un saut.
+            dejaSaute = it != affectations.end() && it->second.a.finS > Maintenant() && it->second.a.saut;
+        }
+        // Teleportation cachee : controles du DEPART, avant tout calcul de point.
+        if (saut)
+        {
+            auto const fait = sautsFaits.find(c.cible);
+            if (dejaSaute || (fait != sautsFaits.end() && Maintenant() < fait->second + SAUT_REPOS_S))
+            {
+                Refuser(c, "deja_saute");
+                return;
+            }
+            if (bot->IsInCombat())
+            {
+                Refuser(c, "combat");
+                return;
+            }
+            if (!bot->IsInWorld() || bot->IsBeingTeleported())
+            {
+                Refuser(c, "en_teleportation");
+                return;
+            }
+            if (!joueur->IsInWorld() || joueur->IsBeingTeleported() || !joueur->IsAlive())
+            {
+                Refuser(c, "joueur_indisponible");
+                return;
+            }
+            if (PresDeWintergrasp(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY()) ||
+                PresDeWintergrasp(joueur->GetMapId(), joueur->GetPositionX(), joueur->GetPositionY()))
+            {
+                Refuser(c, "wintergrasp");
+                return;
+            }
+            float const ox = bot->GetPositionX() - joueur->GetPositionX();
+            float const oy = bot->GetPositionY() - joueur->GetPositionY();
+            if (ox * ox + oy * oy < SAUT_DEPART_MIN_YD * SAUT_DEPART_MIN_YD)
+            {
+                Refuser(c, "trop_pres");
+                return;
+            }
+            // Personne ne le voit disparaitre (tout humain, le demandeur compris).
+            if (ia->HasPlayerNearby(SAUT_HUMAIN_YD))
+            {
+                Refuser(c, "depart_a_vue");
+                return;
+            }
         }
         // Compagnons : seulement un bot deja ARRIVE a sa presence (finale en
         // sejour, meme proprietaire, meme joueur). Il vient donc de l'anneau,
@@ -3013,10 +3226,14 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         float const centreJoueur = cx * cx + cy * cy;
         // Compagnons : le centre EST le joueur (sa position a l'emission ; il a
         // pu bouger depuis). Le suivi le recale ensuite chaque seconde.
+        // Teleportation cachee : le centre a SAUT_JOUEUR_MIN_YD-SAUT_JOUEUR_MAX_YD
+        // du joueur (chaque point essaye l'est aussi, ChercherPointCache).
         bool const horsBornes = compagnon
             ? centreJoueur > 1.0f   // le centre vient d'etre pris sur le joueur (plus haut)
-            : (centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD ||
-               centreJoueur > PRESENCE_CENTRE_MAX_YD * PRESENCE_CENTRE_MAX_YD);
+            : saut ? (centreJoueur < SAUT_JOUEUR_MIN_YD * SAUT_JOUEUR_MIN_YD ||
+                      centreJoueur > SAUT_JOUEUR_MAX_YD * SAUT_JOUEUR_MAX_YD)
+                   : (centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD ||
+                      centreJoueur > PRESENCE_CENTRE_MAX_YD * PRESENCE_CENTRE_MAX_YD);
         if (horsBornes)
         {
             Refuser(c, "bornes");
@@ -3025,7 +3242,8 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     }
     float const dx = bot->GetPositionX() - c.x;
     float const dy = bot->GetPositionY() - c.y;
-    if (dx * dx + dy * dy > AFFECTATION_DISTANCE_MAX * AFFECTATION_DISTANCE_MAX)
+    // Teleportation cachee : le bot vient de loin, c'est tout l'objet du saut.
+    if (!saut && dx * dx + dy * dy > AFFECTATION_DISTANCE_MAX * AFFECTATION_DISTANCE_MAX)
     {
         Refuser(c, "trop_loin");
         return;
@@ -3091,6 +3309,65 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         return;
     }
 
+    // Teleportation cachee : le point, puis le SAUT, AVANT l'ecriture. Le fil
+    // monde execute les commandes une a une et il est le seul ecrivain des
+    // affectations : le refus `occupe` teste ici sous verrou partage est donc
+    // celui que la section exclusive plus bas rendrait. Rien n'est ecrit si le
+    // saut ne part pas.
+    PointSaut point;
+    uint32 sautMs = 0;
+    if (saut)
+    {
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = affectations.find(c.cible);
+            if (it != affectations.end() && it->second.a.finS > Maintenant() && c.origine != "manuel" &&
+                !MemeProprietaire(it->second, c))
+            {
+                AffectationInterne const ancienne = it->second;
+                garde.unlock();
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_OCCUPEES);
+                LOG_INFO("playerbots", "coa directeur occupe: id={} guid={} origine={} joueur={} par_id={}"
+                         " par_origine={} par_joueur={}", c.id, c.cible, c.origine, c.joueur, ancienne.a.id,
+                         ancienne.origine, ancienne.joueur);
+                Refuser(c, "occupe");
+                return;
+            }
+        }
+        point = ChercherPointCache(map, demandeur, c.x, c.y, sol, c.rayon);
+        if (!point.trouve)
+        {
+            LOG_INFO("playerbots", "coa directeur teleport_cache: id={} guid={} joueur={} refus=sans_cache essais={}",
+                     c.id, c.cible, c.joueur, point.essais);
+            Refuser(c, "sans_cache");
+            return;
+        }
+        float const departX = bot->GetPositionX(), departY = bot->GetPositionY();
+        float const vx = departX - demandeur->GetPositionX(), vy = departY - demandeur->GetPositionY();
+        float const px = point.x - demandeur->GetPositionX(), py = point.y - demandeur->GetPositionY();
+        // (Pas de MotionMaster::Clear ici : PlayerbotAI::HandleTeleportAck le
+        // fait a l'arrivee. Un saut refuse par TeleportTo a deja retire les
+        // auras rompues par une teleportation -- nourriture, boisson : assume.)
+        if (!CoaDirecteur::Sauter(bot, WorldLocation(c.carte, point.x, point.y, point.z + 0.5f, bot->GetOrientation())))
+        {
+            LOG_INFO("playerbots", "coa directeur teleport_cache: id={} guid={} joueur={} refus=saut_echoue", c.id,
+                     c.cible, c.joueur);
+            Refuser(c, "saut_echoue");
+            return;
+        }
+        sautMs = getMSTime();
+        if (sautsFaits.size() > 256)
+            for (auto it = sautsFaits.begin(); it != sautsFaits.end();)
+                it = Maintenant() >= it->second + SAUT_REPOS_S ? sautsFaits.erase(it) : std::next(it);
+        sautsFaits[c.cible] = Maintenant();
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_CACHES);
+        LOG_INFO("playerbots",
+                 "coa directeur teleport_cache: id={} guid={} joueur={} de_x={:.1f} de_y={:.1f} a_x={:.1f} a_y={:.1f}"
+                 " a_z={:.1f} distance_joueur={:.0f} depart_joueur={:.0f} dans_le_champ={} essais={}",
+                 c.id, c.cible, c.joueur, departX, departY, point.x, point.y, point.z, std::sqrt(px * px + py * py),
+                 std::sqrt(vx * vx + vy * vy), point.dansLeChamp ? 1 : 0, point.essais);
+    }
+
     uint32 const maintenant = Maintenant();
     uint32 fin = maintenant + c.dureeS;
     // Mercenaire suspendu en mode RPG : l'affectation ne survit pas a la
@@ -3117,6 +3394,10 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     // ordinaire. Figee a la pose, comme le reste.
     nouvelle.a.etape = sPlayerbotAIConfig.directeurEtapes && c.action.size() > 2 && c.action[0] == 'E' &&
                        c.action[1] == '-';
+    // Teleportation cachee : une etape (Directeur.Etapes exigee plus haut).
+    nouvelle.a.etape = nouvelle.a.etape || saut;
+    nouvelle.a.saut = saut;
+    nouvelle.a.sautMs = sautMs;
     nouvelle.a.presence = presence;
     nouvelle.a.compagnon = compagnon;
     if (compagnon)
@@ -3330,7 +3611,7 @@ void Bilan()
              " reponses={} paroles_livrees={} paroles_perdues={} peuplements={} arrivees_presence={}"
              " enlisements_presence={} ciels={} meteos={} reaffirmations_meteo={} occupees={} laisses_presence={}"
              " paroles_en_file={} ciels_actifs={} meteos_actives={} compagnons={} approches={} ecartes_pacte={}"
-             " pactes={}",
+             " pactes={} teleports_caches={} sauts_remis_idle={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -3351,7 +3632,8 @@ void Bilan()
              Lire(COA_DIR_ENLISEMENTS_PRESENCE), Lire(COA_DIR_CIELS), Lire(COA_DIR_METEOS),
              Lire(COA_DIR_REAFFIRMATIONS_METEO), Lire(COA_DIR_OCCUPEES), Lire(COA_DIR_LAISSES_PRESENCE),
              paroles.size(), ciels.size(), meteos.size(), Lire(COA_DIR_COMPAGNONS), Lire(COA_DIR_APPROCHES),
-             Lire(COA_DIR_ECARTE_PACTE), nbPactes.load(std::memory_order_relaxed));
+             Lire(COA_DIR_ECARTE_PACTE), nbPactes.load(std::memory_order_relaxed), Lire(COA_DIR_TELEPORTS_CACHES),
+             Lire(COA_DIR_SAUTS_REMIS_IDLE));
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -3846,6 +4128,12 @@ bool CoaDirecteur::PointDApproche(Map* carte, Affectation const& a, float bx, fl
         return true;
     }
     return false;
+}
+
+bool CoaDirecteur::Sauter(Player* bot, WorldLocation const& dest)
+{
+    bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
+    return bot->TeleportTo(dest);
 }
 
 bool CoaDirecteur::MortEnTrajet(uint32 guidLow)

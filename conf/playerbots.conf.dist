@@ -3439,3 +3439,17 @@ AiPlayerbot.Directeur.PresenceLaisseYd = 250
 #        `compagnon_eteint`, aucun pacte, rien ne change.
 #        Default: 0
 AiPlayerbot.Directeur.Compagnons = 0
+
+#    AiPlayerbot.Directeur.TeleportCache
+#        peupler, teleportation cachee (27/09) : une presence d'action `T-<n>` TELEPORTE le bot, a la
+#        pose (fil monde), sur un point de son disque a 150-260 yd du joueur demandeur, aucun humain a
+#        moins de 150 yd du point ni du bot au depart (visibilite des continents : 100 yd -- c'est la
+#        DISTANCE qui garantit que personne ne le voit), et en complement hors de la ligne de vue du
+#        joueur depuis sa tete (vmap, objets et relief ; pas depuis la camera), sol sec sous le ciel
+#        ouvert ; le bot marche ensuite les derniers yards (etapes suivantes). Exige
+#        AiPlayerbot.Directeur.Etapes = 1 (la `T-` est une etape). Refus : bot en combat, a moins de
+#        300 yd du joueur, deja teleporte depuis moins de 15 min, pres de Wintergrasp (visibilite
+#        175 yd), point introuvable (`sans_cache`). Ligne `coa directeur teleport_cache:`. A 0 : `T-`
+#        refusee `teleport_eteint`, rien ne change.
+#        Default: 0
+AiPlayerbot.Directeur.TeleportCache = 0

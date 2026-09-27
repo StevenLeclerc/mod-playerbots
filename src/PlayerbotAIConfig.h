@@ -444,6 +444,9 @@ public:
     // Compagnons (27/09) : presence `C-` pres du joueur et pacte ; eteint par
     // defaut (une `C-` est alors refusee `compagnon_eteint`, aucun pacte lu).
     bool directeurCompagnons;
+    // Teleportation cachee (27/09) : presence `T-` teleportee hors de la vue du
+    // joueur ; eteinte par defaut (une `T-` est alors refusee `teleport_eteint`).
+    bool directeurTeleportCache;
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

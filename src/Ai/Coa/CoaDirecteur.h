@@ -43,6 +43,7 @@
 
 class Map;
 class Player;
+class WorldLocation;
 struct Position;
 
 namespace CoaDirecteur
@@ -150,6 +151,15 @@ struct Affectation
     // (NewRpgStatusUpdateAction::Execute, proprietaire de rpgInfo). Figee a
     // la pose. `rayon` vaut alors COMPAGNON_MAX_YD.
     bool compagnon = false;
+    // Teleportation cachee (27/09, option Directeur.TeleportCache) : presence
+    // `peupler` d'action `T-<n>`, une ETAPE (option Directeur.Etapes exigee).
+    // Le bot a ete TELEPORTE dans son disque a la pose, par le fil monde, hors
+    // de la vue du joueur (ExecuterAffectation). `sautMs` : getMSTime() au saut,
+    // meme horloge que rpgInfo.startT. Lecteur : NewRpgStatusUpdateAction::Execute,
+    // qui remet a IDLE un statut RPG choisi AVANT le saut (il menerait le bot
+    // loin du point). Figes a la pose.
+    bool saut = false;
+    uint32 sautMs = 0;
 };
 
 // Compagnons : la bande ou le bot se tient autour du joueur, et le point vise
@@ -247,6 +257,13 @@ bool EnTrajetPacifique(Player const* bot);
 //    fantome va a l'esprit-guerisseur au lieu du cadavre. Tout fil.
 bool MortEnTrajet(uint32 guidLow);
 
+// 3. LE SAUT (reutilise par le saut d'enlisement de NewRpgBaseAction::MoveFarTo
+//    et par la teleportation cachee `T-` d'ExecuterAffectation) : retire les
+//    auras rompues par une teleportation, puis Player::TeleportTo. Un seul code
+//    pour les deux sauts. Le fil de l'appelant : celui du bot (MoveFarTo) ou le
+//    fil monde, cartes a l'arret (ExecuterAffectation, P-137).
+bool Sauter(Player* bot, WorldLocation const& dest);
+
 // Compteurs du bilan `coa directeur bus:`. Atomiques relaxes : incrementes
 // depuis les fils de carte. L'ordre ne compte pas ; le bilan les nomme.
 enum CoaDirCompteur : uint8
@@ -299,6 +316,9 @@ enum CoaDirCompteur : uint8
     COA_DIR_COMPAGNONS,              // presences `C-` posees
     COA_DIR_APPROCHES,               // approches du joueur tirees par l'IA (bande 15-30 yd quittee)
     COA_DIR_ECARTE_PACTE,            // cibles ecartees par un pacte de compagnon
+    // Teleportation cachee (27/09), en fin de la ligne bilan :
+    COA_DIR_TELEPORTS_CACHES,        // presences `T-` posees : bot teleporte hors de la vue du joueur
+    COA_DIR_SAUTS_REMIS_IDLE,        // statuts RPG d'avant le saut remis a IDLE par l'IA (NewRpgAction)
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);

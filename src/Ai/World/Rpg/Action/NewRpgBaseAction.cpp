@@ -171,8 +171,9 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             bot->GetName(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(),
             dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dest.GetMapId(), bot->GetZoneId(),
             zone_name);
-        bot->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TELEPORTED | AURA_INTERRUPT_FLAG_CHANGE_MAP);
-        return bot->TeleportTo(dest);
+        // Le saut lui-meme : un seul code avec la teleportation cachee du
+        // Directeur (CoaDirecteur::Sauter : auras rompues, puis TeleportTo).
+        return CoaDirecteur::Sauter(bot, dest);
     }
 
     float dis = bot->GetExactDist(dest);

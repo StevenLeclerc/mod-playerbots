@@ -765,6 +765,7 @@ bool PlayerbotAIConfig::Initialize()
         sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MeteoReaffirmationSecondes", 30);
     directeurPresenceLaisseYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PresenceLaisseYd", 250);
     directeurCompagnons = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Compagnons", false);
+    directeurTeleportCache = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.TeleportCache", false);
     // Sous 5 s, un joueur recevrait un paquet meteo presque a chaque seconde.
     if (directeurMeteoReaffirmationSecondes < 5)
         directeurMeteoReaffirmationSecondes = 5;
