@@ -441,6 +441,9 @@ public:
     uint32 directeurMaxParolesParMinute;      // faire_parler : paroles acceptees par minute, tous bots
     uint32 directeurMeteoReaffirmationSecondes; // meteo : renvoi du paquet au joueur
     uint32 directeurPresenceLaisseYd;         // peupler : laisse de sejour (0 = aucune)
+    // Compagnons (27/09) : presence `C-` pres du joueur et pacte ; eteint par
+    // defaut (une `C-` est alors refusee `compagnon_eteint`, aucun pacte lu).
+    bool directeurCompagnons;
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

@@ -3427,3 +3427,15 @@ AiPlayerbot.Directeur.MeteoReaffirmationSecondes = 30
 #        (sinon new rpg peut l'emmener a une auberge hors de la scene). 0 = pas de laisse ; minimum 60.
 #        Default: 250
 AiPlayerbot.Directeur.PresenceLaisseYd = 250
+
+#    AiPlayerbot.Directeur.Compagnons
+#        peupler, compagnons (27/09) : une presence d'action `C-<n>`, posee APRES une presence du meme
+#        proprietaire pour le meme joueur, amene le bot a 15-30 yd du joueur et l'y tient (le centre
+#        suit le joueur chaque seconde, fige s'il est mort, en vol ou sur une autre carte). Toute
+#        presence (etapes, finale, `C-`) pose un PACTE : ce bot ne choisit comme cible ni ce joueur ni
+#        les autres bots pactes pour ce joueur (la riposte reste permise), jusqu'a la fin de
+#        l'affectation + 10 min, meme apres sa levee (calmer, stop, invitation dans le groupe du
+#        joueur), et tant qu'il reste dans le groupe du joueur, + 10 min. A 0 : `C-` refusee
+#        `compagnon_eteint`, aucun pacte, rien ne change.
+#        Default: 0
+AiPlayerbot.Directeur.Compagnons = 0

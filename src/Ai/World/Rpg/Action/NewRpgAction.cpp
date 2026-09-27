@@ -236,6 +236,75 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
 {
     NewRpgInfo& info = botAI->rpgInfo;
 
+    // CoA -- Directeur, compagnons (27/09, option Directeur.Compagnons) :
+    // presence `C-`. Le centre de l'affectation est LE JOUEUR (recale chaque
+    // seconde par le fil monde, seul ecrivain de l'affectation) ; le bot se
+    // tient dans la bande COMPAGNON_MIN_YD-COMPAGNON_MAX_YD. Place AVANT les
+    // deux laisses : elles le meneraient a un point tire au hasard dans un
+    // disque de 30 yd, jusque sous les pieds du joueur. En trajet comme en
+    // sejour. Hors de la bande : GO_GRIND vers le point d'approche (22 yd, sur
+    // la droite joueur -> bot), sauf s'il marche deja vers un point a au plus
+    // COMPAGNON_CIBLE_YD + 3 du centre ACTUEL. Aucun point a sol sec : il ne
+    // bouge pas (jamais vers le joueur lui-meme, revue M2) et reessaie au
+    // tick suivant. Dans la bande en marchant : ARRET (StopMoving : changer
+    // rpgInfo n'arrete pas un deplacement lance, revue M2), IDLE, tourne vers
+    // le joueur. Hysterese : en marche il s'arrete a COMPAGNON_CIBLE_YD + 3,
+    // a l'arret il ne repart qu'au-dela de COMPAGNON_MAX_YD. Il rend `true`
+    // SEULEMENT quand il change quelque chose (revue M1) : sinon les actions
+    // hors combat moins prioritaires (butin, manger, boire, grind) passent.
+    // C'est cette action, proprietaire de rpgInfo, qui l'ecrit (P-134). Sans
+    // affectation : un chargement atomique, puis le code d'origine.
+    {
+        CoaDirecteur::Affectation aff;
+        if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.compagnon &&
+            aff.carte == bot->GetMapId() && !bot->IsInFlight())
+        {
+            float const arret = CoaDirecteur::COMPAGNON_CIBLE_YD + 3.0f;
+            float const dx = bot->GetPositionX() - aff.x;
+            float const dy = bot->GetPositionY() - aff.y;
+            float const d2 = dx * dx + dy * dy;
+            auto const* allerA = std::get_if<NewRpgInfo::GoGrind>(&info.data);
+            bool versLaBande = false;
+            if (allerA && allerA->pos.GetMapId() == aff.carte)
+            {
+                float const gx = allerA->pos.GetPositionX() - aff.x;
+                float const gy = allerA->pos.GetPositionY() - aff.y;
+                versLaBande = gx * gx + gy * gy <= arret * arret;
+            }
+            float const seuil = versLaBande ? arret : CoaDirecteur::COMPAGNON_MAX_YD;
+            if (d2 > seuil * seuil)
+            {
+                if (versLaBande)
+                    return false;   // il y va : NewRpgGoGrindAction marche
+                float x = aff.x, y = aff.y, z = aff.z;
+                if (!CoaDirecteur::PointDApproche(bot->GetMap(), aff, bot->GetPositionX(), bot->GetPositionY(), x, y,
+                                                  z))
+                    return false;   // aucun sol pres du joueur (eau, pente, pont) : il attend
+                info.ChangeToGoGrind(WorldPosition(aff.carte, x, y, z));
+                LOG_DEBUG("playerbots", "coa directeur approche: guid={} id={} x={:.1f} y={:.1f} z={:.1f}",
+                          bot->GetGUID().GetCounter(), aff.id, x, y, z);
+                if (bot->getStandState() != UNIT_STAND_STATE_STAND)
+                    bot->SetStandState(UNIT_STAND_STATE_STAND);
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_APPROCHES);
+                return true;
+            }
+            if (allerA)
+            {
+                // Dans la bande (ou arrive a son point) : il s'arrete ici.
+                bot->StopMoving();
+                info.ChangeToIdle();
+                bot->SetFacingTo(std::atan2(aff.y - bot->GetPositionY(), aff.x - bot->GetPositionX()));
+                return true;
+            }
+            if (info.GetStatus() != RPG_IDLE)
+            {
+                info.ChangeToIdle();
+                return true;
+            }
+            return false;
+        }
+    }
+
     // CoA -- Directeur, lot D2b (SPEC-directeur-D2.md § 6.3) : LA LAISSE. En
     // TRAJET, hors du disque et pas en vol, le bot va au disque et nulle part
     // ailleurs : aucun statut neuf n'est tire (le switch ci-dessous, seul
@@ -450,11 +519,13 @@ bool NewRpgGoGrindAction::Execute(Event /*event*/)
     // Sans affectation : un chargement atomique. `quetes_trajet_evitees` compte
     // les RECHERCHES sautees (une par tick de GO_GRIND en trajet), pas des
     // quetes : le seul usage de la mesure est d'etre > 0 (§ 6.5).
+    // Compagnons (27/09) : un compagnon qui rejoint son joueur ne fait pas de
+    // detour par un donneur de quetes (non compte : ce n'est pas un trajet).
     CoaDirecteur::Affectation aff;
-    if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
-        aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
+    bool const affecte = CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff);
+    if (affecte && aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_QUETES_TRAJET_EVITEES);
-    else if (SearchQuestGiverAndAcceptOrReward())
+    else if (!(affecte && aff.compagnon) && SearchQuestGiverAndAcceptOrReward())
         return true;
     if (auto* data = std::get_if<NewRpgInfo::GoGrind>(&botAI->rpgInfo.data))
     {

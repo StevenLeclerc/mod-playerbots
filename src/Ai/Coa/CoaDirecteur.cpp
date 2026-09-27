@@ -446,6 +446,35 @@ constexpr uint32 TRAJET_LEVE_S = 900;
 std::unordered_map<uint32, TrajetLeve> trajetsLeves;   // cle : guid bas du bot
 std::atomic<uint32> nbTrajetsLeves{0};
 
+// Compagnons (27/09, option Directeur.Compagnons) : PACTES. Meme verrou, meme
+// patron. UN SEUL ECRIVAIN, le fil monde : pose par ExecuterAffectation a la
+// pose de toute presence (etape, finale, `C-`), dans la section exclusive de
+// l'affectation ; prolonge ou retire par SuivrePactes (groupe du joueur,
+// echeance, joueur deconnecte, option eteinte) et par la purge du bus eteint. Lu par PossibleTargetsValue::AcceptUnit (Pacte), depuis
+// les fils de carte. Il SURVIT a la levee de l'affectation : un compagnon que
+// le joueur a invite (levee `maitre_humain`), puis renvoye du groupe, se
+// retrouve FFA a 15-30 yd d'un joueur FFA ; calmer et stop le laissent au meme
+// endroit. Le pacte n'ajoute aucune action : il retire une cible.
+struct PacteCompagnon
+{
+    uint32 id;       // commande (presence) qui l'a pose
+    uint32 joueur;   // humain protege
+    uint32 finS;     // fin de l'affectation + PACTE_MARGE_S
+};
+constexpr uint32 PACTE_MARGE_S = 600;
+// Compagnons : le point du service (sa photo du joueur) a au plus 150 yd de la
+// position reelle du joueur a la pose (garde de coherence : le centre posé est
+// la position reelle, revue m1).
+constexpr float COMPAGNON_CENTRE_MAX_YD = 150.0f;
+// Compagnons : un joueur qui a franchi plus que cela en une seconde s'est
+// teleporte sur la meme carte (pierre de foyer, portail) : la presence est
+// levee `joueur_saut` (revue m9), sans quoi le bot traverserait le continent.
+constexpr float COMPAGNON_SAUT_YD = 300.0f;
+// Le suivi ne recale le centre que si le joueur s'en est ecarte d'autant.
+constexpr float COMPAGNON_RECALAGE_YD = 3.0f;
+std::unordered_map<uint32, PacteCompagnon> pactes;   // cle : guid bas du bot
+std::atomic<uint32> nbPactes{0};
+
 uint32 Maintenant()
 {
     return static_cast<uint32>(GameTime::GetGameTime().count());
@@ -1351,7 +1380,7 @@ void SuivreAffectations()
             copies.push_back(f);
     }
 
-    enum class Issue : uint8 { Arrivee, Levee, Echue, Niveau, Releve, EtapeArrivee };
+    enum class Issue : uint8 { Arrivee, Levee, Echue, Niveau, Releve, EtapeArrivee, Centre };
     struct Decision
     {
         uint32 guid, id;
@@ -1361,6 +1390,7 @@ void SuivreAffectations()
         PlayerbotAI const* ia;
         uint32 acceptees, rendues;
         uint8 niveau = 0;                        // Issue::Niveau : le niveau a retenir
+        float cx = 0.0f, cy = 0.0f, cz = 0.0f;   // Issue::Centre : la position du joueur
     };
     std::vector<Decision> decisions;
     auto lever = [&decisions](AffectationInterne const& f, char const* raison, CoaDirecteur::CoaDirCompteur compteur)
@@ -1457,6 +1487,36 @@ void SuivreAffectations()
             lever(f, "fin_suspension", CoaDirecteur::COA_DIR_AFFECTATIONS_LEVEES_FIN_SUSPENSION);
             continue;
         }
+        // Compagnons (27/09) : le centre SUIT le joueur, lu ici (fil monde,
+        // cartes a l'arret, P-137) et ecrit sous le verrou exclusif plus bas
+        // (seul ecrivain de l'affectation, P-134). FIGE si le joueur est mort
+        // (le bot l'attend sur place, il ne suit pas un fantome au cimetiere),
+        // en vol (taxi ou monture volante), en teleportation ou sur une autre
+        // carte (le service leve alors : `joueur_autre_carte`).
+        if (f.a.compagnon)
+        {
+            Player* joueur = JoueurConnecte(f.joueur);   // non nul : teste plus haut
+            if (joueur && joueur->IsInWorld() && !joueur->IsBeingTeleported() && joueur->GetMapId() == f.a.carte &&
+                joueur->IsAlive() && !joueur->IsInFlight() && !joueur->IsFlying())
+            {
+                float const ex = joueur->GetPositionX() - f.a.x;
+                float const ey = joueur->GetPositionY() - f.a.y;
+                if (ex * ex + ey * ey > COMPAGNON_SAUT_YD * COMPAGNON_SAUT_YD)
+                {
+                    lever(f, "joueur_saut", CoaDirecteur::COA_DIR_NB_COMPTEURS);
+                    continue;
+                }
+                if (ex * ex + ey * ey > COMPAGNON_RECALAGE_YD * COMPAGNON_RECALAGE_YD)
+                {
+                    Decision d{f.guid, f.a.id, Issue::Centre, nullptr, CoaDirecteur::COA_DIR_NB_COMPTEURS, nullptr, 0,
+                               0};
+                    d.cx = joueur->GetPositionX();
+                    d.cy = joueur->GetPositionY();
+                    d.cz = joueur->GetPositionZ();
+                    decisions.push_back(d);
+                }
+            }
+        }
         if (f.a.phase != CoaDirecteur::CoaDirPhase::Trajet)
         {
             // Sejour : releve unique a T + 5 min (§ 6.5). `maintenant` et
@@ -1531,6 +1591,13 @@ void SuivreAffectations()
             if (d.issue == Issue::Niveau)
             {
                 it->second.niveau = d.niveau;
+                continue;
+            }
+            if (d.issue == Issue::Centre)
+            {
+                it->second.a.x = d.cx;
+                it->second.a.y = d.cy;
+                it->second.a.z = d.cz;
                 continue;
             }
             if (d.issue == Issue::EtapeArrivee)
@@ -1695,6 +1762,74 @@ void SuivreTrajetsLeves()
             ++it;
     }
     nbTrajetsLeves.store(static_cast<uint32>(trajetsLeves.size()), std::memory_order_relaxed);
+}
+
+// Compagnons : pactes, chaque seconde, fil monde, cartes a l'arret. Ils
+// tombent a l'echeance, a la deconnexion du joueur protege, ou tous si
+// l'option est eteinte. Meme patron : copie des cles sous verrou partage,
+// lecture des joueurs hors verrou, retrait sous verrou exclusif.
+void SuivrePactes()
+{
+    if (!nbPactes.load(std::memory_order_relaxed))
+        return;
+    uint32 const maintenant = Maintenant();
+    bool const option = sPlayerbotAIConfig.directeurCompagnons;
+    std::vector<std::pair<uint32, PacteCompagnon>> copies;
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        copies.assign(pactes.begin(), pactes.end());
+    }
+    std::vector<std::pair<uint32, uint32>> retraits;       // (bot, id)
+    std::vector<std::pair<uint32, uint32>> prolongations;  // (bot, id)
+    for (auto const& [bot, p] : copies)
+    {
+        Player* joueur = option ? JoueurConnecte(p.joueur) : nullptr;
+        if (!option || !joueur)
+        {
+            retraits.emplace_back(bot, p.id);
+            continue;
+        }
+        // Dans le groupe du joueur (il l'a invite) : le pacte court tant qu'il
+        // y reste, puis PACTE_MARGE_S. Sans quoi un compagnon renvoye du groupe
+        // apres la fin du pacte redeviendrait FFA a quelques pas d'un joueur FFA.
+        Player* compagnon = JoueurConnecte(bot);
+        Group* groupe = joueur->GetGroup();
+        if (compagnon && groupe && compagnon->GetGroup() == groupe)
+        {
+            // Revue m3 : prolonge a mi-marge seulement (pas un verrou exclusif
+            // par seconde et par compagnon groupe).
+            if (p.finS < maintenant + PACTE_MARGE_S / 2)
+                prolongations.emplace_back(bot, p.id);
+            continue;
+        }
+        if (p.finS <= maintenant)
+            retraits.emplace_back(bot, p.id);
+    }
+    if (retraits.empty() && prolongations.empty())
+        return;
+    std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+    for (auto const& [bot, id] : retraits)
+    {
+        auto it = pactes.find(bot);
+        if (it != pactes.end() && it->second.id == id)
+            pactes.erase(it);
+    }
+    for (auto const& [bot, id] : prolongations)
+    {
+        auto it = pactes.find(bot);
+        if (it != pactes.end() && it->second.id == id)
+            it->second.finS = maintenant + PACTE_MARGE_S;
+    }
+    nbPactes.store(static_cast<uint32>(pactes.size()), std::memory_order_relaxed);
+}
+
+void PurgerPactes()
+{
+    if (!nbPactes.load(std::memory_order_relaxed))
+        return;
+    std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+    pactes.clear();
+    nbPactes.store(0, std::memory_order_relaxed);
 }
 
 // Purge sans condition (bus eteint) : plus aucun etat, les lecteurs retombent
@@ -2490,6 +2625,7 @@ void Entretien(uint32 diff)
     // APRES le suivi : une mort constatee a cette seconde y a pose son etat.
     SuivreMortsEnTrajet();
     SuivreTrajetsLeves();
+    SuivrePactes();
     // Lot D3 : ciels, meteos, paroles (fil monde seul).
     SuivreCiels();
     SuivreMeteos();
@@ -2705,8 +2841,35 @@ void ExecuterSuspension(CoaDirCommande const& c)
 // `cible` recoit le disque (carte, x, y, z, rayon) pour duree_s. Les controles
 // 6 a 9 sont ceux du § 4.4 puis du tableau « Controles propres » du § 6.3, dans
 // son ordre. Fil monde, cartes a l'arret (P-137).
-void ExecuterAffectation(CoaDirCommande const& c)
+void ExecuterAffectation(CoaDirCommande const& recue)
 {
+    // Compagnons (27/09, revue m1) : le centre d'une `C-` est la position
+    // REELLE du joueur, lue ici (fil monde, P-137), et non celle de la photo
+    // du service (jusqu'a 5 s + la latence du bus : un joueur monte l'aurait
+    // fait refuser `bornes`). Le point du service ne sert qu'a la garde de
+    // coherence ci-dessous (COMPAGNON_CENTRE_MAX_YD). Tout autre verbe : la
+    // commande telle quelle.
+    CoaDirCommande c = recue;
+    if (c.verbe == CoaDirVerbe::Peupler && c.action.size() > 2 && c.action[0] == 'C' && c.action[1] == '-' &&
+        sPlayerbotAIConfig.directeurCompagnons && c.joueur)
+    {
+        if (Player* j = ObjectAccessor::FindPlayerByLowGUID(c.joueur))
+        {
+            if (j->GetMapId() == c.carte)
+            {
+                float const ex = j->GetPositionX() - c.x;
+                float const ey = j->GetPositionY() - c.y;
+                if (ex * ex + ey * ey > COMPAGNON_CENTRE_MAX_YD * COMPAGNON_CENTRE_MAX_YD)
+                {
+                    Refuser(c, "bornes");
+                    return;
+                }
+                c.x = j->GetPositionX();
+                c.y = j->GetPositionY();
+                c.z = j->GetPositionZ();
+            }
+        }
+    }
     // 6. bornes
     if (c.cible == 0 || c.dureeS < AFFECTATION_DUREE_MIN_S || c.dureeS > AFFECTATION_DUREE_MAX_S ||
         !(c.rayon >= AFFECTATION_RAYON_MIN && c.rayon <= AFFECTATION_RAYON_MAX) || !std::isfinite(c.x) ||
@@ -2778,6 +2941,14 @@ void ExecuterAffectation(CoaDirCommande const& c)
     // en plus de ceux de `reaffecter`. Le joueur qui demande est lu ici, fil
     // monde, cartes a l'arret (P-137).
     bool const presence = c.verbe == CoaDirVerbe::Peupler;
+    // Compagnons (27/09) : un peupler d'action `C-<n>` (l'emetteur admet
+    // `[A-Z]-\d+`). Option eteinte : refus explicite, rien d'autre ne change.
+    bool const compagnon = presence && c.action.size() > 2 && c.action[0] == 'C' && c.action[1] == '-';
+    if (compagnon && !sPlayerbotAIConfig.directeurCompagnons)
+    {
+        Refuser(c, "compagnon_eteint");
+        return;
+    }
     if (presence)
     {
         Player* joueur = c.joueur ? ObjectAccessor::FindPlayerByLowGUID(c.joueur) : nullptr;
@@ -2813,11 +2984,22 @@ void ExecuterAffectation(CoaDirCommande const& c)
         // Sans elle, les dernieres etapes, posees quand le bot approche,
         // seraient toutes refusees `a_vue`.
         bool continuation = false;
+        bool presenceArrivee = false;
         {
             std::shared_lock<std::shared_mutex> garde(verrouConsignes);
             auto it = affectations.find(c.cible);
             continuation = it != affectations.end() && it->second.a.finS > Maintenant() &&
                            it->second.joueur == c.joueur && it->second.origine == c.origine;
+            presenceArrivee = continuation && it->second.a.presence && !it->second.a.etape &&
+                              it->second.a.phase == CoaDirecteur::CoaDirPhase::Sejour;
+        }
+        // Compagnons : seulement un bot deja ARRIVE a sa presence (finale en
+        // sejour, meme proprietaire, meme joueur). Il vient donc de l'anneau,
+        // a pied : jamais un bot tire d'ailleurs qui surgirait pres du joueur.
+        if (compagnon && !presenceArrivee)
+        {
+            Refuser(c, "sans_presence");
+            return;
         }
         float const bx = bot->GetPositionX() - joueur->GetPositionX();
         float const by = bot->GetPositionY() - joueur->GetPositionY();
@@ -2829,8 +3011,13 @@ void ExecuterAffectation(CoaDirCommande const& c)
         float const cx = c.x - joueur->GetPositionX();
         float const cy = c.y - joueur->GetPositionY();
         float const centreJoueur = cx * cx + cy * cy;
-        if (centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD ||
-            centreJoueur > PRESENCE_CENTRE_MAX_YD * PRESENCE_CENTRE_MAX_YD)
+        // Compagnons : le centre EST le joueur (sa position a l'emission ; il a
+        // pu bouger depuis). Le suivi le recale ensuite chaque seconde.
+        bool const horsBornes = compagnon
+            ? centreJoueur > 1.0f   // le centre vient d'etre pris sur le joueur (plus haut)
+            : (centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD ||
+               centreJoueur > PRESENCE_CENTRE_MAX_YD * PRESENCE_CENTRE_MAX_YD);
+        if (horsBornes)
         {
             Refuser(c, "bornes");
             return;
@@ -2931,6 +3118,9 @@ void ExecuterAffectation(CoaDirCommande const& c)
     nouvelle.a.etape = sPlayerbotAIConfig.directeurEtapes && c.action.size() > 2 && c.action[0] == 'E' &&
                        c.action[1] == '-';
     nouvelle.a.presence = presence;
+    nouvelle.a.compagnon = compagnon;
+    if (compagnon)
+        nouvelle.a.rayon = CoaDirecteur::COMPAGNON_MAX_YD;   // arrivee = dans la bande
     nouvelle.verbe = c.verbe;
     nouvelle.origine = c.origine;
     nouvelle.guid = c.cible;
@@ -2972,6 +3162,17 @@ void ExecuterAffectation(CoaDirCommande const& c)
             // Une affectation par bot, la derniere remplace entierement (§ 6.3).
             affectations[c.cible] = nouvelle;
             nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
+            // Compagnons : le pacte, dans la MEME section (un lecteur ne voit
+            // jamais le compagnon sans son pacte). Pose par TOUTE presence
+            // (etape, finale, `C-`) option allumee : un bot amene vers un joueur
+            // ne le convoite pas en route, ni dans son disque de l'anneau
+            // (80-250 yd, rayon 50 : il peut errer a 30 yd de lui). Un pacte
+            // anterieur de ce bot (autre joueur) est remplace.
+            if (presence && sPlayerbotAIConfig.directeurCompagnons)
+            {
+                pactes[c.cible] = PacteCompagnon{c.id, c.joueur, fin + PACTE_MARGE_S};
+                nbPactes.store(static_cast<uint32>(pactes.size()), std::memory_order_relaxed);
+            }
         }
     }
     if (occupe)
@@ -2993,13 +3194,19 @@ void ExecuterAffectation(CoaDirCommande const& c)
     LOG_INFO("playerbots",
              "coa directeur : affectation posee id={} guid={} verbe={} carte={} x={:.1f} y={:.1f} rayon={:.0f}"
              " fin_s={} distance={:.0f} mercenaire_rpg={} etape={} origine={}",
-             c.id, c.cible, NomVerbe(c.verbe), c.carte, c.x, c.y, c.rayon, fin, std::sqrt(dx * dx + dy * dy),
+             c.id, c.cible, NomVerbe(c.verbe), c.carte, c.x, c.y, nouvelle.a.rayon, fin, std::sqrt(dx * dx + dy * dy),
              mercenaireRpg ? 1 : 0, nouvelle.a.etape ? 1 : 0, c.origine);
     if (presence)
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PEUPLEMENTS);
         LOG_INFO("playerbots", "coa directeur presence: id={} guid={} joueur={} etape={} remplace={}", c.id, c.cible,
                  c.joueur, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0);
+    }
+    if (compagnon)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_COMPAGNONS);
+        LOG_INFO("playerbots", "coa directeur compagnon: id={} guid={} joueur={} fin_s={} pacte_fin_s={}", c.id,
+                 c.cible, c.joueur, fin, fin + PACTE_MARGE_S);
     }
     Accuser(c, "execute", nullptr);
 }
@@ -3122,7 +3329,8 @@ void Bilan()
              " etapes_arrivees={} en_releve={} tirages_refuses_hauteur={} rpg_remis_idle={} trajets_leves={}"
              " reponses={} paroles_livrees={} paroles_perdues={} peuplements={} arrivees_presence={}"
              " enlisements_presence={} ciels={} meteos={} reaffirmations_meteo={} occupees={} laisses_presence={}"
-             " paroles_en_file={} ciels_actifs={} meteos_actives={}",
+             " paroles_en_file={} ciels_actifs={} meteos_actives={} compagnons={} approches={} ecartes_pacte={}"
+             " pactes={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -3142,7 +3350,8 @@ void Bilan()
              Lire(COA_DIR_PAROLES_PERDUES), Lire(COA_DIR_PEUPLEMENTS), Lire(COA_DIR_ARRIVEES_PRESENCE),
              Lire(COA_DIR_ENLISEMENTS_PRESENCE), Lire(COA_DIR_CIELS), Lire(COA_DIR_METEOS),
              Lire(COA_DIR_REAFFIRMATIONS_METEO), Lire(COA_DIR_OCCUPEES), Lire(COA_DIR_LAISSES_PRESENCE),
-             paroles.size(), ciels.size(), meteos.size());
+             paroles.size(), ciels.size(), meteos.size(), Lire(COA_DIR_COMPAGNONS), Lire(COA_DIR_APPROCHES),
+             Lire(COA_DIR_ECARTE_PACTE), nbPactes.load(std::memory_order_relaxed));
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -3494,6 +3703,7 @@ void CoaDirecteur::TraiterBus(uint32 diff)
         LeverMeteosSi([](MeteoJoueur const&) { return true; }, "bus_eteint");
         LeverParolesSi([](Parole const&) { return true; }, "bus_eteint");
         PurgerMortsEnTrajet();
+        PurgerPactes();
         source->Vidanger([](CoaDirCommande const& c)
         {
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_RECUES);
@@ -3587,6 +3797,55 @@ bool CoaDirecteur::EnTrajetPacifique(Player const* bot)
     }
     // Champ de bataille, arene, instance : autre carte, jamais pacifique.
     return bot->GetMapId() == carte;
+}
+
+bool CoaDirecteur::Pacte(uint32 botLow, uint32 uniteLow)
+{
+    if (!nbPactes.load(std::memory_order_relaxed))
+        return false;
+    if (!sPlayerbotAIConfig.directeurCompagnons)
+        return false;
+    uint32 const maintenant = Maintenant();
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto it = pactes.find(botLow);
+    // Echu mais pas encore retire (le suivi passe chaque seconde) : plus de pacte.
+    if (it == pactes.end() || it->second.finS <= maintenant)
+        return false;
+    if (it->second.joueur == uniteLow)
+        return true;
+    auto autre = pactes.find(uniteLow);
+    return autre != pactes.end() && autre->second.finS > maintenant && autre->second.joueur == it->second.joueur;
+}
+
+bool CoaDirecteur::PointDApproche(Map* carte, Affectation const& a, float bx, float by, float& x, float& y, float& z)
+{
+    // Repli : le centre (le joueur, sol connu).
+    x = a.x;
+    y = a.y;
+    z = a.z;
+    if (!carte || carte->GetId() != a.carte)
+        return false;
+    float const dx = bx - a.x;
+    float const dy = by - a.y;
+    float const d = std::sqrt(dx * dx + dy * dy);
+    // Bot sur le centre (d nul) : n'importe quel cap.
+    float const cap = d > 0.1f ? std::atan2(dy, dx) : 0.0f;
+    static constexpr float ECARTS[] = {0.0f, 0.61f, -0.61f, 1.22f, -1.22f};   // 0, +-35, +-70 degres
+    for (float const e : ECARTS)
+    {
+        float const px = a.x + COMPAGNON_CIBLE_YD * std::cos(cap + e);
+        float const py = a.y + COMPAGNON_CIBLE_YD * std::sin(cap + e);
+        float sol = 0.0f;
+        // Laisse de hauteur (P-145) : un sol a plus de 6 yd du joueur est un
+        // autre etage (pont, rempart, terrain sous une ville) : essai perdu.
+        if (!SolSec(carte, px, py, a.z + Z_OFFSET_FIND_HEIGHT, sol) || std::fabs(sol - a.z) > TIRAGE_ECART_Z)
+            continue;
+        x = px;
+        y = py;
+        z = sol;
+        return true;
+    }
+    return false;
 }
 
 bool CoaDirecteur::MortEnTrajet(uint32 guidLow)

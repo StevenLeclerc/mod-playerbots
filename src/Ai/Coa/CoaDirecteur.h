@@ -143,7 +143,20 @@ struct Affectation
     // yeux du joueur) et NewRpgStatusUpdateAction::Execute (laisse de sejour,
     // option Directeur.PresenceLaisseYd).
     bool presence = false;
+    // Compagnons (27/09, option Directeur.Compagnons) : presence `peupler`
+    // d'action `C-...`, posee APRES une presence du meme proprietaire. Le
+    // centre SUIT le joueur (le fil monde le recale chaque seconde, seul
+    // ecrivain) ; le bot se tient a COMPAGNON_MIN_YD-COMPAGNON_MAX_YD de lui
+    // (NewRpgStatusUpdateAction::Execute, proprietaire de rpgInfo). Figee a
+    // la pose. `rayon` vaut alors COMPAGNON_MAX_YD.
+    bool compagnon = false;
 };
+
+// Compagnons : la bande ou le bot se tient autour du joueur, et le point vise
+// quand il en sort (sur la droite joueur -> bot).
+constexpr float COMPAGNON_MIN_YD = 15.0f;
+constexpr float COMPAGNON_MAX_YD = 30.0f;
+constexpr float COMPAGNON_CIBLE_YD = 22.0f;
 
 // Tout fil, chemin chaud : le bot a-t-il une affectation en cours ? `sortie`
 // nul : seulement la question. Sans affectation, un chargement atomique.
@@ -151,6 +164,27 @@ bool AffectationDe(uint32 guidLow, Affectation* sortie);
 
 // Le point (carte, x, y) est-il dans le disque ? Arithmetique seule.
 bool DansLeDisque(Affectation const& a, uint32 carte, float x, float y);
+
+// Compagnons : le point ou un bot en (bx, by) se place pres du joueur (le
+// centre de `a`) : sur la droite centre -> bot, a COMPAGNON_CIBLE_YD, sol sec
+// (P-132) ; sinon la meme distance a +-35 puis +-70 degres ; sinon le centre
+// (le sol du joueur). Meme contrat de fil que TirerDansLeDisque : `carte` est
+// la carte DU BOT, lue depuis son propre fil. -> faux si repli sur le centre.
+bool PointDApproche(Map* carte, Affectation const& a, float bx, float by, float& x, float& y, float& z);
+
+// Tout fil, chemin chaud : PACTE de compagnon (option Directeur.Compagnons).
+// Vrai si le bot `botLow` porte un pacte pour le joueur `uniteLow`, ou si
+// `uniteLow` est un autre bot pacte pour le MEME joueur. Lu par
+// PossibleTargetsValue::AcceptUnit, apres l'autodefense : un compagnon ne
+// convoite ni son joueur ni les autres compagnons de ce joueur (un joueur High
+// Risk porte le FFA, comme ~80 % des bots, 27/09 : sans groupe, rien d'autre ne
+// l'en garde a 15-30 yd). Pose par le fil monde a la pose de TOUTE presence
+// (etape, finale, `C-`), il SURVIT a sa levee (groupe, calmer, stop,
+// remplacement) jusqu'a la fin de l'affectation + PACTE_MARGE_S, prolonge
+// tant que le bot est dans le groupe du joueur ; il tombe aussi a la
+// deconnexion du joueur, au bus eteint, a l'option eteinte. Sans pacte : un
+// chargement atomique.
+bool Pacte(uint32 botLow, uint32 uniteLow);
 
 // Tire un point dans le disque, sol trouve et hors de l'eau (P-132), 6 essais,
 // sinon le centre (valide a la pose). LAISSE DE HAUTEUR (26/09) : le sol est
@@ -261,6 +295,10 @@ enum CoaDirCompteur : uint8
     COA_DIR_REAFFIRMATIONS_METEO,    // paquets meteo renvoyes (reaffirmation)
     COA_DIR_OCCUPEES,                // affectations refusees `occupe` (§ 3.6)
     COA_DIR_LAISSES_PRESENCE,        // laisses de sejour d'un bot de presence
+    // Compagnons (27/09), en fin de la ligne bilan :
+    COA_DIR_COMPAGNONS,              // presences `C-` posees
+    COA_DIR_APPROCHES,               // approches du joueur tirees par l'IA (bande 15-30 yd quittee)
+    COA_DIR_ECARTE_PACTE,            // cibles ecartees par un pacte de compagnon
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);

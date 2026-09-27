@@ -44,6 +44,24 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
     if (!AttackersValue::IsPossibleTarget(unit, bot, range))
         return false;
 
+    // CoA -- Directeur, compagnons (27/09, revue M3) : le PACTE couvre aussi le
+    // familier, le gardien et le charme d'un joueur pacte (le joueur lui-meme
+    // est traite plus bas, dans la branche joueur). Sinon : le compagnon mord
+    // le familier, le joueur riposte, et l'autodefense rend le combat legitime.
+    // Riposte permise : un familier qui attaque le bot reste une cible. Sans
+    // pacte : un chargement atomique.
+    if (!unit->IsPlayer())
+    {
+        Player* maitre = unit->GetCharmerOrOwnerPlayerOrPlayerItself();
+        if (maitre && CoaDirecteur::Pacte(bot->GetGUID().GetCounter(), maitre->GetGUID().GetCounter()) &&
+            !(bot->IsInCombat() && bot->GetVictim() == unit) && bot->getAttackerForHelper() != unit &&
+            !bot->InBattleground() && !bot->InArena())
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_PACTE);
+            return false;
+        }
+    }
+
     // Level-based PvP restrictions
     if (unit->IsPlayer())
     {
@@ -76,6 +94,22 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
             !bot->InArena() && !(bot->duel && bot->duel->Opponent == unit))
         {
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_TREVE);
+            return false;
+        }
+
+        // CoA -- Directeur, compagnons (27/09, option Directeur.Compagnons) :
+        // PACTE. Un bot amene vers un joueur par `peupler` (toute presence :
+        // etapes, finale, compagnon `C-`) ne convoite ni ce joueur ni les
+        // autres bots pactes pour ce joueur (les deux portent souvent le FFA,
+        // qui les rend hostiles hors groupe, Unit.cpp:7473). Meme
+        // place et memes exceptions que la treve : apres l'autodefense (la
+        // riposte reste permise), avant les exemptions qui rendent true.
+        // Pacte d'abord teste sur son compteur : sans pacte, un chargement
+        // atomique.
+        if (CoaDirecteur::Pacte(bot->GetGUID().GetCounter(), unit->GetGUID().GetCounter()) &&
+            !bot->InBattleground() && !bot->InArena() && !(bot->duel && bot->duel->Opponent == unit))
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_PACTE);
             return false;
         }
 
