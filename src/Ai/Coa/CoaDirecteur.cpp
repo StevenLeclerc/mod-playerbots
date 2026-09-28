@@ -5237,9 +5237,11 @@ public:
             return false;
         }
         // Lot D3 : le service d'ecoute lit la demande et repond (verbe `repondre`).
-        // Accuse immediat, dans le meme appel (SPEC-directeur-D3.md § 2.8).
+        // Accuse immediat, dans le meme appel (SPEC-directeur-D3.md § 2.8). Le jeu ne
+        // sait pas si le service tourne : l'accuse ne dit que ce qui est sur (28/09 :
+        // « Le Directeur vous a entendu » mentait quand l'ecoute etait coupee).
         Enregistrer(joueur, "ask", texte);
-        handler->PSendSysMessage("Le Directeur vous a entendu.");
+        handler->PSendSysMessage("Demande transmise au Directeur.");
         return true;
     }
 
