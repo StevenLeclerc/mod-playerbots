@@ -43,6 +43,9 @@ enum class CoaDirVerbe : uint8
     Repondre,       // une ligne systeme au joueur, prefixee [Directeur] (§ 2.8)
     HeureDuJour,    // le ciel d'un seul joueur (§ 6.2)
     Meteo,          // la meteo d'un seul joueur, reaffirmee (§ 6.3)
+    // Lot D4c (SPEC-directeur-D4.md § 3.1, § 6.2-6.3), AVANT Inconnu :
+    Prime,          // une prime sur la tete d'un joueur High Risk (cible = joueur, valeur = plafond)
+    Chasser,        // un mercenaire designe chasseur de ce joueur (affectation, disque)
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
 };
 
@@ -120,6 +123,12 @@ public:
     // intensite, delai_s) ET l'ENUM de `verbe` a dix valeurs sont-ils en base ?
     // Faux : les verbes D3 sont refuses `colonnes_d3`, les verbes D2 passent.
     virtual bool ColonnesD3() const { return false; }
+
+    // Lot D4c (SPEC-directeur-D4.md § 3.2). L'ENUM de `verbe` porte-t-il les
+    // douze valeurs D4 (ou les commence-t-il, migration future) ? Faux : les
+    // verbes D4 sont refuses `colonnes_d4`, les verbes D2 et D3 passent. Vrai
+    // implique ColonnesD3().
+    virtual bool ColonnesD4() const { return false; }
 };
 
 #endif

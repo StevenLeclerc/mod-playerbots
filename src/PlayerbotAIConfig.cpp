@@ -782,6 +782,34 @@ bool PlayerbotAIConfig::Initialize()
     // Sous 100 ms, le fil monde enverrait une requete a presque chaque tick.
     if (directeurBusIntervalleMs < 100)
         directeurBusIntervalleMs = 100;
+    // Lot D4c (SPEC-directeur-D4.md § 3.4, decisions n° 4, 6, 18, 21 : valeurs
+    // par defaut). Toutes absentes de la conf en service : ces defauts.
+    directeurTracerMorts = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.TracerMorts", false);
+    directeurMaxPrimes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxPrimes", 4);
+    directeurMaxChasseursParPrime = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxChasseursParPrime", 4);
+    directeurPrimeMeute = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeMeute", 2);
+    directeurPrimeTraqueSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeTraqueSecondes", 120);
+    directeurPrimeDetectionYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeDetectionYd", 250);
+    // Un plafond nul rendrait toute prime `bornes` sans le dire ; une meute nulle
+    // interdirait au chasseur d'engager son propre prime.
+    if (directeurMaxChasseursParPrime < 1)
+        directeurMaxChasseursParPrime = 1;
+    if (directeurPrimeMeute < 1)
+        directeurPrimeMeute = 1;
+    // Sous 45 s, la traque d'un chasseur serait plus courte que celle d'un
+    // mercenaire ordinaire (CoaChasseAction::DureeTraqueMaxMs) ; au-dela de
+    // 600 s, un chasseur colle a un joueur qui le fuit.
+    if (directeurPrimeTraqueSecondes < 45)
+        directeurPrimeTraqueSecondes = 45;
+    if (directeurPrimeTraqueSecondes > 600)
+        directeurPrimeTraqueSecondes = 600;
+    // Sous 90 yd (portee de detection d'une traque ordinaire), rien n'est
+    // gagne ; au-dela de 400, un chasseur lirait un joueur qu'aucun disque
+    // (centre a 120-300 yd, rayon 40) ne justifie.
+    if (directeurPrimeDetectionYd < 90)
+        directeurPrimeDetectionYd = 90;
+    if (directeurPrimeDetectionYd > 400)
+        directeurPrimeDetectionYd = 400;
 
     // Au-dela de 100 le pourcentage n'a pas de sens : le bot decrocherait de
     // TOUT combat des le premier coup recu, et l'etat RETOUR ne rentrerait

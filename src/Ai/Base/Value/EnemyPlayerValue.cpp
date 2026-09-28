@@ -118,9 +118,10 @@ bool BotEstMercenaireMemo(Player* bot)
 // pour un joueur qui n'est pas en train de se battre, c'est-a-dire le cas
 // commun. Le cout garanti par candidat, lui, etait le EstMercenaire(bot) de
 // AcceptUnit : c'est celui-la que le memo supprime.
-bool MercenaryAttackSlotFree(Player* bot, Player* enemy)
+// CoA -- Directeur, lot D4c : `cap` explicite (la meute d'un chasseur designe
+// face a son prime, Directeur.PrimeMeute) ; sans lui, MaxAttackersPerTarget.
+bool MercenaryAttackSlotFree(Player* bot, Player* enemy, uint32 cap)
 {
-    uint32 const cap = sPlayerbotAIConfig.wildPvpMaxAttackersPerTarget;
     if (!cap)
         return true;
 
@@ -213,11 +214,31 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
     // mercenaire qui attaque un joueur de faction opposee marque PvP passe par
     // la branche ordinaire, et echappait donc aux deux bornes. Un joueur seul
     // pouvait encore y etre submerge.
-    if (botEstMercenaire &&
-        (MercenaryRewards::instance().IsUnderTruce(enemy->GetGUID().GetRawValue()) ||
-         !MercenaryAttackSlotFree(bot, enemy)))
-    {
+    // CoA -- Directeur, lot D4c (SPEC-directeur-D4.md § 6.3, points 3 et 5). Un
+    // CHASSEUR DESIGNE ne convoite QUE son prime : l'engagement passe par la
+    // strategie `pvp` (« enemy player near » -> « attack enemy player »), qui
+    // prend le plus proche de cette valeur -- sans ce filtre, il ferait une
+    // fosse au pied du joueur avec les autres bots FFA (P-136). La riposte reste
+    // permise (il est deja en combat avec lui, ou il l'attaque). Face a son
+    // prime, le plafond d'assaillants devient Directeur.PrimeMeute, tous
+    // mercenaires comptes, designes ou non ; la treve de 60 s apres une mort
+    // (IsUnderTruce) n'est JAMAIS levee. Sans chasseur : un chargement atomique.
+    uint32 primeGuid = 0;
+    bool const imposee = enemy && botEstMercenaire && CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid);
+    bool const primeEnFace = imposee && enemy->GetGUID().GetCounter() == primeGuid;
+    if (imposee && !primeEnFace && !(bot->GetVictim() == unit || bot->getAttackerForHelper() == unit))
         return false;
+    uint32 const plafondNormal = sPlayerbotAIConfig.wildPvpMaxAttackersPerTarget;
+    if (botEstMercenaire && MercenaryRewards::instance().IsUnderTruce(enemy->GetGUID().GetRawValue()))
+        return false;
+    if (botEstMercenaire)
+    {
+        uint32 const plafond = primeEnFace ? sPlayerbotAIConfig.directeurPrimeMeute : plafondNormal;
+        if (!MercenaryAttackSlotFree(bot, enemy, plafond))
+            return false;
+        // Ce que la meute a permis au-dela du plafond ordinaire (mesure § 6.6).
+        if (primeEnFace && plafondNormal && plafond > plafondNormal && !MercenaryAttackSlotFree(bot, enemy, plafondNormal))
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MEUTE_PERMISE);
     }
 
     if (enemy && (mercenaire || (botAI->IsOpposing(enemy) && enemy->IsPvP())) &&

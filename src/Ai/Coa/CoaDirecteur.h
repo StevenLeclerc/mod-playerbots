@@ -31,6 +31,11 @@
  *    `heure_du_jour`, `meteo`, la requete `joueur,<guid>` et le refus `occupe` :
  *    coa-project/docs/SPEC-directeur-D3.md, § 2.8, § 3 a § 6.
  *
+ * 7. (Lot D4c) Les verbes `prime` et `chasser`, la garde de colonnes D4 et les
+ *    morts tracees d'humains (`coa directeur mort:`, option TracerMorts) :
+ *    coa-project/docs/SPEC-directeur-D4.md, § 3.2-3.4, § 6.2-6.3, et la voie
+ *    retenue pour D4-0 (§ 10) : un chasseur EN TRAJET est compose en mode RPG.
+ *
  * LA REGLE : un seul proprietaire par etat (P-134). Le drapeau d'arret n'est
  * ecrit que par ce fichier. Aucun champ du coeur ni de playerbots n'est touche.
  */
@@ -102,7 +107,29 @@ bool MercenaireSuspendu(uint32 guidLow);
 // (AiFactory::AddDefaultNonCombatStrategies), proprietaire de la composition
 // des strategies : vrai, elle compose celle d'un bot ordinaire. Le fil monde
 // appelle ResetStrategies a la pose et a la levee pour qu'elle la relise.
+// Lot D4c : vrai AUSSI pour un chasseur (verbe `chasser`) dont l'affectation
+// est EN TRAJET -- la marche vers la scene est celle de new rpg (etapes E-,
+// laisse, trajet pacifique), la seule que les mesures aient montree ; a
+// l'arrivee (SEJOUR), faux : la fabrique lui rend sa chasse. Le fil monde
+// appelle ResetStrategies a chaque bascule (pose, arrivee, fin en trajet).
 bool MercenaireEnRpg(uint32 guidLow);
+
+// ------------------------------------------------------------------ lot D4c
+//
+// Verbe `prime` (SPEC-directeur-D4.md § 6.2) : magasin `primes`, cle le guid du
+// joueur, ECRIT par le fil monde seul sous le verrou exclusif des consignes,
+// LU par les fils de carte sous le verrou partage apres un compteur atomique.
+// Verbe `chasser` (§ 6.3) : une affectation (meme magasin, meme suivi que
+// `reaffecter`), drapeau Affectation::chasseur.
+//
+// Tout fil, chemin chaud : le BOT `botLow` est-il un chasseur designe, dont la
+// prime court encore ? `joueur` (non nul) recoit le guid du joueur prime. Sans
+// chasseur : UN chargement atomique. Lu par la chasse (GUET : proie lue par son
+// guid ; traque plus longue), NearestEnemyPlayersValue::AcceptUnit (aucune
+// autre proie ; meute bornee a Directeur.PrimeMeute) et
+// PossibleTargetsValue::AcceptUnit (filtre de niveau saute pour ce couple).
+// `id` (non nul) recoit l'id de la commande `chasser` en cours (journal).
+bool ProieImposee(uint32 botLow, uint32* joueur, uint32* id = nullptr);
 
 // ------------------------------------------------------------------ lot D2b
 //
@@ -160,6 +187,15 @@ struct Affectation
     // loin du point). Figes a la pose.
     bool saut = false;
     uint32 sautMs = 0;
+    // Lot D4c (verbe `chasser`, SPEC-directeur-D4.md § 6.3) : un MERCENAIRE
+    // designe chasseur du joueur `joueur` de l'affectation, qui porte une
+    // prime. Fige a la pose. Lecteurs : NewRpgBaseAction::MoveFarTo (saut
+    // d'enlisement TOUJOURS retenu, comme une presence), la fabrique par
+    // MercenaireEnRpg (EN TRAJET, le chasseur est compose en mode RPG : c'est
+    // new rpg qui le mene, etape par etape -- voie retenue apres l'echec de
+    // D4-0), et ProieImposee (chasse, « nearest enemy players », filtre de
+    // niveau).
+    bool chasseur = false;
 };
 
 // Compagnons : la bande ou le bot se tient autour du joueur, et le point vise
@@ -319,6 +355,17 @@ enum CoaDirCompteur : uint8
     // Teleportation cachee (27/09), en fin de la ligne bilan :
     COA_DIR_TELEPORTS_CACHES,        // presences `T-` posees : bot teleporte hors de la vue du joueur
     COA_DIR_SAUTS_REMIS_IDLE,        // statuts RPG d'avant le saut remis a IDLE par l'IA (NewRpgAction)
+    // Lot D4c (SPEC-directeur-D4.md § 3.4), en fin de la ligne bilan :
+    COA_DIR_PRIMES,                  // primes posees
+    COA_DIR_CHASSEURS,               // affectations `chasser` posees (etapes comprises)
+    COA_DIR_PRIMES_TOMBEES,          // fins `tombe` (le joueur prime est mort)
+    COA_DIR_PRIMES_ECHUES,           // fins a l'echeance
+    COA_DIR_PRIMES_LEVEES,           // autres fins (lever, arret, bus eteint, hors ligne, regle, defi)
+    COA_DIR_PROIES_IMPOSEES,         // traques lancees sur le joueur prime (une par traque)
+    COA_DIR_TRAQUES_PRIME,           // ... arrivees a portee d'engagement
+    COA_DIR_MEUTE_PERMISE,           // candidats admis par la meute au-dela de MaxAttackersPerTarget
+    COA_DIR_MORTS_TRACEES,           // lignes `coa directeur mort:` ecrites
+    COA_DIR_MORTS_PERDUES,           // evenements de mort perdus (file pleine)
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);

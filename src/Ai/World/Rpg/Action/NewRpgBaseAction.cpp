@@ -123,11 +123,13 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         // (`peupler`, destination pres du joueur qui l'a demandee) ne se rejoint
         // JAMAIS par teleportation, en trajet comme en sejour : saut toujours
         // retenu, compte a part (`enlisements_presence`).
+        // Lot D4c (SPEC-directeur-D4.md § 6.3, point 1) : un CHASSEUR non plus --
+        // il vient vers un joueur, qui doit le voir arriver a pied. Meme compteur.
         CoaDirecteur::Affectation aff;
         if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
-            (aff.presence || aff.phase == CoaDirecteur::CoaDirPhase::Trajet))
+            (aff.presence || aff.chasseur || aff.phase == CoaDirecteur::CoaDirPhase::Trajet))
         {
-            if (aff.presence)
+            if (aff.presence || aff.chasseur)
             {
                 CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_RETENUS);
                 CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_PRESENCE);

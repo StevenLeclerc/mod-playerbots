@@ -475,6 +475,77 @@ constexpr float COMPAGNON_RECALAGE_YD = 3.0f;
 std::unordered_map<uint32, PacteCompagnon> pactes;   // cle : guid bas du bot
 std::atomic<uint32> nbPactes{0};
 
+// Lot D4c (SPEC-directeur-D4.md § 6.2) : PRIMES. Meme verrou, meme patron. UN
+// SEUL ECRIVAIN, le fil monde : pose par ExecuterPrime, retiree par
+// SuivrePrimes (echeance, mort, regle, defi, deconnexion), la levee (`lever`,
+// stop, bus eteint). Lue par les fils de carte (ProieImposee, sous verrou
+// partage) apres le compteur atomique : sans prime, rien ne se paie.
+struct Prime
+{
+    uint32 id;          // commande qui l'a posee
+    uint32 joueur;      // guid du joueur prime (la cible)
+    uint32 finS;        // Maintenant()
+    uint32 plafond;     // chasseurs au plus (colonne `valeur`)
+    std::string origine;  // proprietaire (regle, ask, arc, manuel) : seul le meme, ou `manuel`, remplace
+};
+std::unordered_map<uint32, Prime> primes;   // cle : guid bas du joueur
+std::atomic<uint32> nbPrimes{0};
+// Chasseurs actifs dans le magasin des affectations, tenu SOUS le verrou
+// exclusif avec nbAffectations (MajCompteursAffectations) : ProieImposee
+// commence par lui, un seul chargement atomique hors de toute prime.
+std::atomic<uint32> nbChasseurs{0};
+
+// Lot D4c : auras des DEFIS BLOQUANTS (PVE_ONLY, a vies, sans resurrection),
+// lues UNE fois au demarrage (DemarrerBus, requete synchrone sur acore_world),
+// puis lues par le fil monde seul (ExecuterPrime, SuivrePrimes) : aucun verrou.
+// `defisLus` faux (table absente, requete en echec) : toute prime est refusee
+// `defi` -- on ne pose pas une menace qu'on ne sait pas borner.
+std::unordered_set<uint32> aurasDefiBloquant;
+bool defisLus = false;
+
+// Lot D4c (SPEC-directeur-D4.md § 3.3) : MORTS D'HUMAINS. Les crochets de mort
+// tournent sur un FIL DE CARTE (Unit::Kill) : ils n'ecrivent que cette file, par
+// valeur, sous un verrou court (P-137 : jamais le magasin des consignes). Le fil
+// monde seul la vide (DrainerMorts), ecrit la ligne `coa directeur mort:` et
+// garde les evenements des dernieres secondes (mortsRecentes, fil monde seul)
+// pour nommer le tueur d'un prime tombe.
+struct EvenementMort
+{
+    uint32 victime = 0;
+    bool victimeHumaine = false;
+    uint32 tueur = 0;        // guid du joueur tueur (maitre d'un familier) ; 0 : creature ou environnement
+    char tueurType = 'E';    // H humain, J bot joueur (R ou B au fil monde), C creature, E environnement
+    uint32 entree = 0;       // creature : son entree
+    uint8 niveauV = 0, niveauT = 0;
+    uint32 carte = 0, zone = 0, aire = 0;
+    float x = 0.0f, y = 0.0f;
+    uint32 t = 0;            // Maintenant() a la mort
+};
+constexpr size_t MORTS_FILE_MAX = 256;
+std::mutex verrouMorts;
+std::vector<EvenementMort> fileMorts;             // sous verrouMorts
+struct MortRecente
+{
+    EvenementMort e;
+    bool chasseur;           // le tueur etait un chasseur designe de la victime
+};
+std::deque<MortRecente> mortsRecentes;            // fil monde seul
+constexpr uint32 MORT_RECENTE_S = 5;              // un prime tombe est rapproche des morts de 5 s
+uint64 nMorts = 0;                                // fil monde seul : `n=` de la ligne
+
+// A appeler SOUS le verrou exclusif, apres toute modification du magasin des
+// affectations : nbAffectations et nbChasseurs restent egaux a ce qu'ils
+// comptent (au plus MaxAffectations entrees : le decompte est borne).
+void MajCompteursAffectations()
+{
+    uint32 chasseurs = 0;
+    for (auto const& [guid, f] : affectations)
+        if (f.a.chasseur)
+            ++chasseurs;
+    nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
+    nbChasseurs.store(chasseurs, std::memory_order_relaxed);
+}
+
 uint32 Maintenant()
 {
     return static_cast<uint32>(GameTime::GetGameTime().count());
@@ -499,6 +570,8 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Repondre:            return "repondre";
         case CoaDirVerbe::HeureDuJour:         return "heure_du_jour";
         case CoaDirVerbe::Meteo:               return "meteo";
+        case CoaDirVerbe::Prime:               return "prime";
+        case CoaDirVerbe::Chasser:             return "chasser";
         default:                               return "inconnu";
     }
 }
@@ -515,6 +588,8 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "repondre")             return CoaDirVerbe::Repondre;
     if (nom == "heure_du_jour")        return CoaDirVerbe::HeureDuJour;
     if (nom == "meteo")                return CoaDirVerbe::Meteo;
+    if (nom == "prime")                return CoaDirVerbe::Prime;
+    if (nom == "chasser")              return CoaDirVerbe::Chasser;
     return CoaDirVerbe::Inconnu;
 }
 
@@ -523,6 +598,13 @@ bool VerbeD3(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Peupler || v == CoaDirVerbe::FaireParler || v == CoaDirVerbe::Repondre ||
            v == CoaDirVerbe::HeureDuJour || v == CoaDirVerbe::Meteo;
+}
+
+// Verbes du lot D4c : ils exigent l'ENUM de la migration D4 (§ 3.2). `prime`
+// lit `valeur` (colonne D3) : ColonnesD4 implique ColonnesD3.
+bool VerbeD4(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Prime || v == CoaDirVerbe::Chasser;
 }
 
 CoaDirCanal CanalDe(std::string const& nom)
@@ -556,7 +638,7 @@ char const* NomCanal(CoaDirCanal c)
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger || VerbeD3(v);
+           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -635,6 +717,7 @@ public:
         // ligne), treves comprises, et rien au journal du module. Requete
         // SYNCHRONE, au demarrage seulement ; relue au prochain demarrage.
         _colonnesD3 = false;
+        _colonnesD4 = false;
         QueryResult colonnes = CharacterDatabase.Query(
             "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
@@ -647,12 +730,29 @@ public:
             nbColonnes = (*colonnes)[0].Get<uint64>();
             typeVerbe = (*colonnes)[1].Get<std::string>();
         }
-        _colonnesD3 = nbColonnes == 5 && typeVerbe == ENUM_VERBE_D3;
+        // Lot D4c (SPEC-directeur-D4.md § 3.1-3.2) : LE PIEGE DE L'EGALITE STRICTE.
+        // La migration D4 ajoute `prime` et `chasser` a l'ENUM ; un binaire D3,
+        // qui exige l'ENUM D3 exact, eteindrait alors tous ses verbes D3 a son
+        // prochain demarrage. Ce binaire accepte donc les DEUX formes : ENUM D3
+        // (D3 vrai, D4 faux) ; ENUM D4, ou tout ENUM qui COMMENCE par les douze
+        // valeurs D4 dans l'ordre (migration future, D5 : sans quoi elle
+        // referait le piege) -> D3 et D4 vrais. Il demarre sans risque avant
+        // comme apres la migration.
+        bool const d4 = nbColonnes == 5 && CommencePar(typeVerbe, ENUM_VERBE_D4);
+        // Revue D4c (m3) : meme regle que le service (emetteur.enum_prolonge) --
+        // l'ENUM D3 exact ou tout ENUM qui le prolonge.
+        _colonnesD3 = nbColonnes == 5 && (CommencePar(typeVerbe, ENUM_VERBE_D3) || d4);
+        _colonnesD4 = d4;
         if (_colonnesD3)
             LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
         else
             LOG_INFO("playerbots", "coa directeur : colonnes D3 absentes, verbes D3 inertes (colonnes={}/5, verbe={})",
                      nbColonnes, typeVerbe.empty() ? std::string("?") : typeVerbe);
+        if (_colonnesD4)
+            LOG_INFO("playerbots", "coa directeur : colonnes D4 presentes, verbes D4 lisibles");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes D4 absentes, verbes D4 inertes (verbe={})",
+                     typeVerbe.empty() ? std::string("?") : typeVerbe);
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -770,6 +870,7 @@ public:
     }
 
     bool ColonnesD3() const override { return _colonnesD3; }
+    bool ColonnesD4() const override { return _colonnesD4; }
 
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
@@ -786,6 +887,24 @@ private:
     static constexpr char const* ENUM_VERBE_D3 =
         "enum('treve','reaffecter','alleger','suspendre_mercenaire','lever','peupler','faire_parler','repondre',"
         "'heure_du_jour','meteo')";
+    // Lot D4c : l'ENUM de la migration 2026_09_28_00_coa_directeur_d4.sql, meme
+    // forme (minuscules, apostrophes, sans espace : celle que MySQL rend pour
+    // l'ENUM D3, MESUREE le 28/09 dans information_schema).
+    static constexpr char const* ENUM_VERBE_D4 =
+        "enum('treve','reaffecter','alleger','suspendre_mercenaire','lever','peupler','faire_parler','repondre',"
+        "'heure_du_jour','meteo','prime','chasser')";
+
+    // `type` est-il `attendu`, ou `attendu` prolonge de valeurs de plus ? Pour un
+    // ENUM : meme debut sans la parenthese finale, puis `)` ou `,'`.
+    static bool CommencePar(std::string const& type, char const* attendu)
+    {
+        std::string const tete(attendu, std::char_traits<char>::length(attendu) - 1);   // sans ')'
+        if (type.size() < tete.size() + 1 || type.compare(0, tete.size(), tete) != 0)
+            return false;
+        if (type.compare(tete.size(), std::string::npos, ")") == 0)
+            return true;
+        return type.compare(tete.size(), 2, ",'") == 0 && type.back() == ')';
+    }
 
     QueryCallbackProcessor _queries;
     std::vector<CoaDirCommande> _pretes;
@@ -794,6 +913,7 @@ private:
     uint32 _balayageMs = 0;
     bool _enVol = false;
     bool _colonnesD3 = false;
+    bool _colonnesD4 = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -920,6 +1040,34 @@ void LeverEchues()
 // PARTAGE de verrouConsignes (MercenaireEnRpg). Ne JAMAIS l'appeler en tenant
 // le verrou exclusif : interblocage sur le fil monde, donc serveur fige.
 
+// Le bot est-il suspendu EN MODE RPG par `suspendre_mercenaire` ? C'est l'ancien
+// MercenaireEnRpg, avant le lot D4c : la question que posent les controles et le
+// suivi des AFFECTATIONS (fin `fin_suspension`, refus `mercenaire` de peupler,
+// drapeau mercenaireRpg). La fabrique, elle, lit CoaDirecteur::MercenaireEnRpg,
+// qui y ajoute le chasseur en trajet : confondre les deux ferait lever
+// `fin_suspension` un chasseur a son arrivee.
+bool SuspenduEnRpg(uint32 guidLow)
+{
+    if (!nbSuspensions.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto it = suspensions.find(guidLow);
+    return it != suspensions.end() && it->second.rpg && it->second.finS > Maintenant();
+}
+
+// Lot D4c : le bot porte-t-il une affectation `chasser` ACTIVE et EN TRAJET ?
+// C'est ce qui le fait composer en mode RPG (CoaDirecteur::MercenaireEnRpg).
+// Sans chasseur : un chargement atomique.
+bool ChasseurEnTrajet(uint32 guidLow)
+{
+    if (!nbChasseurs.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto it = affectations.find(guidLow);
+    return it != affectations.end() && it->second.a.chasseur &&
+           it->second.a.phase == CoaDirecteur::CoaDirPhase::Trajet && it->second.a.finS > Maintenant();
+}
+
 constexpr uint32 FILET_MS = 30 * IN_MILLISECONDS;
 constexpr uint32 FILET_LEVEE_S = 5 * MINUTE;       // surveillance apres une levee
 constexpr size_t RECONSTRUCTIONS_PAR_SECONDE = 32;
@@ -928,6 +1076,17 @@ std::unordered_set<uint32> aReconstruire;            // guid bas
 std::unordered_map<uint32, uint32> surveillesJusqua; // guid -> fin de surveillance (s)
 std::unordered_set<uint32> filetFait;                // le filet a deja relance ce guid
 uint32 filetMs = 0;
+
+// Lot D4c : la composition d'un CHASSEUR change (pose en trajet : mode RPG ;
+// arrivee ou fin en trajet : retour a la chasse). La fabrique la relit par
+// ResetStrategies, depuis la file (Reconstruire, fil monde, jamais sous le
+// verrou exclusif), et le filet surveille la bascule 5 min. Fil monde seul.
+void BasculerComposition(uint32 guidLow)
+{
+    aReconstruire.insert(guidLow);
+    surveillesJusqua[guidLow] = Maintenant() + FILET_LEVEE_S;
+    filetFait.erase(guidLow);
+}
 
 // Cartes ou un bot aleatoire joue : continents et Outreterre, Norfendre. Les
 // cartes de banc (§ 6.3) et les instances sont exclues.
@@ -1323,6 +1482,11 @@ void FinirAffectation(AffectationInterne const& f, char const* statut, char cons
                                      getMSTime()};
         nbTrajetsLeves.store(static_cast<uint32>(trajetsLeves.size()), std::memory_order_relaxed);
     }
+    // Lot D4c : un chasseur qui finit EN TRAJET etait compose en mode RPG. S'il
+    // n'en porte plus d'autre en trajet (la continuation du meme parcours vient
+    // d'etre ecrite AVANT cet appel), la fabrique doit lui rendre sa chasse.
+    if (f.a.chasseur && f.a.phase == CoaDirecteur::CoaDirPhase::Trajet && !ChasseurEnTrajet(f.guid))
+        BasculerComposition(f.guid);
     if (statut)
     {
         LOG_INFO("playerbots", "coa directeur cmd: id={} verbe={} cible={} joueur={} statut={} raison={}", f.a.id,
@@ -1352,7 +1516,7 @@ size_t LeverAffectationsSi(Predicat lever, char const* raison)
             else
                 ++it;
         }
-        nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
+        MajCompteursAffectations();
     }
     for (AffectationInterne const& f : levees)
     {
@@ -1454,7 +1618,9 @@ void SuivreAffectations()
         // Lot D3 : une presence n'a de sens qu'autour du joueur qui l'a
         // demandee. Deconnecte (FindConnectedPlayer : une teleportation
         // lointaine n'est pas une deconnexion), la presence tombe.
-        if (f.a.presence && (!f.joueur || !JoueurConnecte(f.joueur)))
+        // Lot D4c : un chasseur aussi (sa prime tombe `hors_ligne` a la meme
+        // seconde, SuivrePrimes ; ceinture si l'ordre changeait).
+        if ((f.a.presence || f.a.chasseur) && (!f.joueur || !JoueurConnecte(f.joueur)))
         {
             lever(f, "joueur_hors_ligne", CoaDirecteur::COA_DIR_NB_COMPTEURS);
             continue;
@@ -1482,7 +1648,7 @@ void SuivreAffectations()
         // levee, echeance, stop, purge ou remplacement par un mode 0. Le suivi
         // passe dans Entretien AVANT la file de reconstruction : l'affectation
         // tombe au plus tard au tick ou la chasse est rendue.
-        if (f.mercenaireRpg && !CoaDirecteur::MercenaireEnRpg(f.guid))
+        if (f.mercenaireRpg && !SuspenduEnRpg(f.guid))
         {
             lever(f, "fin_suspension", CoaDirecteur::COA_DIR_AFFECTATIONS_LEVEES_FIN_SUSPENSION);
             continue;
@@ -1561,6 +1727,7 @@ void SuivreAffectations()
     std::vector<MortTrajet> mortsPosees;
     uint32 arrivees = 0;
     uint32 arriveesPresence = 0;
+    std::vector<AffectationInterne> chasseursArrives;   // lot D4c : retour a la chasse
     {
         std::unique_lock<std::shared_mutex> garde(verrouConsignes);
         for (Decision const& d : decisions)
@@ -1580,6 +1747,8 @@ void SuivreAffectations()
                 ++arrivees;
                 if (it->second.a.presence)
                     ++arriveesPresence;
+                if (it->second.a.chasseur)
+                    chasseursArrives.push_back(it->second);
                 continue;
             }
             if (d.issue == Issue::Releve)
@@ -1609,7 +1778,7 @@ void SuivreAffectations()
             fins.push_back(Fin{it->second, d});
             affectations.erase(it);
         }
-        nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
+        MajCompteursAffectations();
         // L'etat mort_en_trajet n'est pose que pour une affectation
         // effectivement levee ici (meme id) : la ceinture ci-dessus vaut aussi
         // pour lui. Un etat deja pose pour ce bot est remplace (nouvelle mort).
@@ -1632,6 +1801,14 @@ void SuivreAffectations()
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ARRIVEES_PRESENCE);
     for (AffectationInterne const& r : releves)
         JournaliserFinAffectation(r, "arrivee_5min");
+    // Lot D4c : le chasseur est dans son disque (SEJOUR) ; MercenaireEnRpg rend
+    // faux des maintenant, la fabrique lui rend sa chasse.
+    for (AffectationInterne const& ch : chasseursArrives)
+    {
+        BasculerComposition(ch.guid);
+        LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=arrivee", ch.guid, ch.joueur,
+                 ch.a.id);
+    }
     for (AffectationInterne const& e : etapes)
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ETAPES_ARRIVEES);
@@ -1888,9 +2065,17 @@ bool HumainProcheSauf(WorldPosition centre, uint32 carte, float rayon, uint32 ex
     return false;
 }
 
+constexpr uint32 AURA_REGLE_PVE = 9931032;        // mod-ascension-compat, AscensionRulesets.cpp
+constexpr uint32 AURA_REGLE_HIGH_RISK = 1004019;
+constexpr uint32 AURA_REGLE_WAR_MODE = 1004119;
+
 constexpr float PRESENCE_A_VUE_YD = 150.0f;       // visibilite 100 yd (worldserver.conf) + marge
 constexpr float PRESENCE_CENTRE_MIN_YD = 40.0f;   // centre du disque, depuis le joueur a la pose
 constexpr float PRESENCE_CENTRE_MAX_YD = 300.0f;
+// Lot D4c (`chasser`, SPEC-directeur-D4.md § 6.3) : le disque final d'un
+// chasseur, depuis le joueur prime a la pose.
+constexpr float CHASSEUR_CENTRE_MIN_YD = 120.0f;
+constexpr float CHASSEUR_CENTRE_MAX_YD = 300.0f;
 
 // ------------------------------------------------------------------ teleportation cachee (27/09)
 //
@@ -2764,6 +2949,476 @@ void SuivreMeteos()
     }
 }
 
+// ------------------------------------------------------------------ lot D4c : prime et morts tracees
+//
+// SPEC-directeur-D4.md § 3.3, § 6.2. DEUX ETATS NEUFS :
+//  - le magasin `primes`, meme verrou et meme patron que les treves : ecrit au
+//    fil monde seul sous le verrou exclusif, lu par les fils de carte sous le
+//    verrou partage (ProieImposee) apres son compteur atomique ;
+//  - la file des morts, ecrite par les crochets de mort (fils de carte) sous
+//    un verrou court et par valeur, videe par le fil monde seul (P-137).
+// Aucune strategie touchee (P-130), aucun drapeau (P-134) : le FFA du joueur
+// reste a la regle High Risk, celui du bot a playerbots.
+
+constexpr uint32 PRIME_DUREE_MIN_S = 600;
+constexpr uint32 PRIME_DUREE_MAX_S = 3600;
+
+// Regle High Risk, dans l'ordre de P-138 : 1004119 est AUSSI porte en PvE, et le
+// PvE (9931032) l'emporte sur tout.
+bool HighRisk(Player* p)
+{
+    return p->HasAura(AURA_REGLE_HIGH_RISK) && !p->HasAura(AURA_REGLE_PVE);
+}
+
+// Le joueur porte-t-il une aura d'un defi bloquant (lues au demarrage) ? Fil
+// monde. O(auras du joueur).
+bool DefiBloquant(Player* p)
+{
+    if (aurasDefiBloquant.empty())
+        return false;
+    for (auto const& [sort, application] : p->GetAppliedAuras())
+        if (aurasDefiBloquant.count(sort))
+            return true;
+    return false;
+}
+
+// Fil monde, au demarrage (DemarrerBus) : les auras des defis PVE_ONLY, a vies
+// ou sans resurrection, depuis la DONNEE (acore_world.coa_challenge_definition
+// et coa_challenge_spell, colonnes pve et pvp : listes d'ids separes par `;`),
+// sans lien avec mod-coa-challenges. MESURE le 28/09 : 104 defis bloquants,
+// 355 auras, aucune partagee avec un defi non bloquant ; TROIS defis bloquants
+// n'ont AUCUNE aura (187 Hardcore, 201 et 202 Vitality) : le jeu ne les voit
+// pas, le controle D4-3 du service les refuse a la pose (limite ecrite).
+void ChargerDefisBloquants()
+{
+    aurasDefiBloquant.clear();
+    defisLus = false;
+    QueryResult tables = WorldDatabase.Query(
+        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+        " AND TABLE_NAME IN ('coa_challenge_definition', 'coa_challenge_spell')");
+    if (!tables || (*tables)[0].Get<uint64>() != 2)
+    {
+        LOG_INFO("playerbots", "coa directeur : defis illisibles (tables absentes), toute prime refusee `defi`");
+        return;
+    }
+    defisLus = true;
+    QueryResult r = WorldDatabase.Query(
+        "SELECT IFNULL(s.pve, ''), IFNULL(s.pvp, '') FROM coa_challenge_definition d"
+        " JOIN coa_challenge_spell s ON s.challengeId = d.id"
+        " WHERE d.rules LIKE '%CHALLENGE_RULES_TYPE_PVE_ONLY%' OR d.lives > 0 OR d.noResurrect = 1");
+    if (r)
+    {
+        do
+        {
+            for (uint32 col = 0; col < 2; ++col)
+            {
+                std::string const liste = (*r)[col].Get<std::string>();
+                size_t debut = 0;
+                while (debut < liste.size())
+                {
+                    size_t fin = liste.find(';', debut);
+                    if (fin == std::string::npos)
+                        fin = liste.size();
+                    std::string const morceau = liste.substr(debut, fin - debut);
+                    if (!morceau.empty() && morceau.size() <= 10 &&
+                        std::all_of(morceau.begin(), morceau.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+                    {
+                        unsigned long long const v = std::strtoull(morceau.c_str(), nullptr, 10);
+                        if (v > 0 && v <= 0xFFFFFFFFull)
+                            aurasDefiBloquant.insert(static_cast<uint32>(v));
+                    }
+                    debut = fin + 1;
+                }
+            }
+        } while (r->NextRow());
+    }
+    LOG_INFO("playerbots", "coa directeur : {} aura(s) de defi bloquant lue(s)", aurasDefiBloquant.size());
+}
+
+// Fin d'une prime retiree du magasin (hors verrou). `statut` nul : fin
+// naturelle, rien en base (le service la connait : vu_le + duree_s).
+// `leverChasseurs` : TOUTE fin de prime leve ses chasseurs, raison `fin_prime`
+// (le jeu nettoie son propre etat sans attendre le service) -- sauf un
+// remplacement, ou les chasseurs suivent la nouvelle prime du meme joueur.
+void FinirPrime(Prime const& p, char const* statut, char const* raison, char const* motif, uint32 tueur,
+                bool chasseurTueur, bool leverChasseurs)
+{
+    std::string_view const m(motif);
+    if (m == "tombe")
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PRIMES_TOMBEES);
+    else if (m == "echue")
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PRIMES_ECHUES);
+    else if (m != "remplace")
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PRIMES_LEVEES);
+    LOG_INFO("playerbots", "coa directeur prime: id={} joueur={} plafond={} motif={} tueur={} chasseur={}", p.id,
+             p.joueur, p.plafond, motif, tueur, chasseurTueur ? 1 : 0);
+    if (statut)
+    {
+        LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=prime cible={} joueur={} statut={} raison={}", p.id,
+                 p.joueur, p.joueur, statut, raison ? raison : "-");
+        if (source)
+            source->Clore(p.id, statut, raison);
+    }
+    if (leverChasseurs)
+    {
+        uint32 const j = p.joueur;
+        LeverAffectationsSi([j](AffectationInterne const& f) { return f.a.chasseur && f.joueur == j; }, "fin_prime");
+    }
+}
+
+template <typename Predicat>
+size_t LeverPrimesSi(Predicat lever, char const* raison)
+{
+    if (!nbPrimes.load(std::memory_order_relaxed))
+        return 0;
+    std::vector<Prime> levees;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+        for (auto it = primes.begin(); it != primes.end();)
+        {
+            if (lever(it->second))
+            {
+                levees.push_back(it->second);
+                it = primes.erase(it);
+            }
+            else
+                ++it;
+        }
+        nbPrimes.store(static_cast<uint32>(primes.size()), std::memory_order_relaxed);
+    }
+    for (Prime const& p : levees)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        FinirPrime(p, "leve", raison, raison, 0, false, true);
+    }
+    return levees.size();
+}
+
+// Verbe `prime` (§ 6.2). Cible = le joueur prime ; `joueur` vaut 0 ou le meme ;
+// `valeur` = plafond de chasseurs. Fil monde, cartes a l'arret (P-137).
+void ExecuterPrime(CoaDirCommande const& c)
+{
+    // 6. bornes
+    if (c.cible == 0 || (c.joueur != 0 && c.joueur != c.cible) || c.dureeS < PRIME_DUREE_MIN_S ||
+        c.dureeS > PRIME_DUREE_MAX_S || c.valeur < 1 ||
+        static_cast<uint32>(c.valeur) > sPlayerbotAIConfig.directeurMaxChasseursParPrime)
+    {
+        Refuser(c, "bornes");
+        return;
+    }
+    // 7. plafond : une prime reposee sur un joueur deja prime la remplace.
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        if (!primes.count(c.cible) && primes.size() >= sPlayerbotAIConfig.directeurMaxPrimes)
+        {
+            garde.unlock();
+            Refuser(c, "plafond");
+            return;
+        }
+    }
+    // 8. en ligne, humain
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        Refuser(c, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        Refuser(c, "pas_humain");
+        return;
+    }
+    // 9. controles propres. `mort` (ecart a la spec, ecrit) : une prime posee
+    // sur un corps tomberait a la seconde suivante.
+    if (!p->IsAlive())
+    {
+        Refuser(c, "mort");
+        return;
+    }
+    if (p->IsGameMaster())
+    {
+        Refuser(c, "mj");
+        return;
+    }
+    if (p->InBattleground() || p->InArena())
+    {
+        Refuser(c, "champ_de_bataille");
+        return;
+    }
+    if (!CarteDeSuspension(p->GetMapId()))
+    {
+        Refuser(c, "carte");
+        return;
+    }
+    if (!HighRisk(p))
+    {
+        Refuser(c, "regle");
+        return;
+    }
+    if (!defisLus || DefiBloquant(p))
+    {
+        Refuser(c, "defi");
+        return;
+    }
+
+    Prime const nouvelle{c.id, c.cible, Maintenant() + c.dureeS, static_cast<uint32>(c.valeur), c.origine};
+    bool remplace = false, occupe = false;
+    Prime ancienne{};
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+        auto it = primes.find(c.cible);
+        // Un proprietaire par prime (P-134) : seul le meme `origine` (le joueur
+        // est la cible), ou l'operateur (`manuel`), la remplace.
+        if (it != primes.end() && it->second.finS > Maintenant() && c.origine != "manuel" &&
+            it->second.origine != c.origine)
+        {
+            occupe = true;
+            ancienne = it->second;
+        }
+        else
+        {
+            if (it != primes.end())
+            {
+                remplace = true;
+                ancienne = it->second;
+            }
+            primes[c.cible] = nouvelle;
+            nbPrimes.store(static_cast<uint32>(primes.size()), std::memory_order_relaxed);
+        }
+    }
+    if (occupe)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_OCCUPEES);
+        LOG_INFO("playerbots", "coa directeur occupe: id={} guid={} origine={} joueur={} par_id={} par_origine={}"
+                 " par_verbe=prime", c.id, c.cible, c.origine, c.joueur, ancienne.id, ancienne.origine);
+        Refuser(c, "occupe");
+        return;
+    }
+    if (remplace)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
+        std::string const par = Acore::StringFormat("par_{}", c.id);
+        FinirPrime(ancienne, "remplace", par.c_str(), "remplace", 0, false, false);
+        // Les chasseurs suivent la nouvelle prime ; ceux au-dela de son plafond
+        // sont leves `plafond` (lesquels : l'ordre du magasin, arbitraire).
+        uint32 gardes = 0;
+        uint32 const plafond = nouvelle.plafond, j = c.cible;
+        LeverAffectationsSi(
+            [&gardes, plafond, j](AffectationInterne const& f)
+            {
+                if (!f.a.chasseur || f.joueur != j)
+                    return false;
+                return ++gardes > plafond;
+            },
+            "plafond");
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PRIMES);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur prime: id={} joueur={} plafond={} motif=pose fin_s={} origine={}", c.id,
+             c.cible, nouvelle.plafond, nouvelle.finS, c.origine);
+    Accuser(c, "execute", nullptr);
+}
+
+// Fil monde : type d'un bot vu dans une mort (R bot aleatoire, B autre bot).
+// Deconnecte depuis : B (on ne sait plus le dire).
+char TypeBot(uint32 guidLow)
+{
+    Player* p = JoueurConnecte(guidLow);
+    return p && sRandomPlayerbotMgr.IsRandomBot(p) ? 'R' : 'B';
+}
+
+// Chaque seconde, fil monde : la file des morts devient des lignes
+// `coa directeur mort:` (§ 3.3). AVANT SuivrePrimes (elle nomme le tueur d'un
+// prime tombe) et SuivreAffectations (un chasseur tue a cette seconde y serait
+// leve `mort` avant d'etre reconnu comme chasseur).
+void DrainerMorts()
+{
+    uint32 const maintenant = Maintenant();
+    while (!mortsRecentes.empty() && mortsRecentes.front().e.t + MORT_RECENTE_S < maintenant)
+        mortsRecentes.pop_front();
+    std::vector<EvenementMort> lot;
+    {
+        std::lock_guard<std::mutex> garde(verrouMorts);
+        if (fileMorts.empty())
+            return;
+        lot.swap(fileMorts);
+    }
+    for (EvenementMort const& e : lot)
+    {
+        char const victimeType = e.victimeHumaine ? 'H' : TypeBot(e.victime);
+        char const tueurType = e.tueurType == 'J' ? TypeBot(e.tueur) : e.tueurType;
+        // L'humain de cette mort, et le bot en face (s'il y en a un).
+        uint32 const humain = e.victimeHumaine ? e.victime : (tueurType == 'H' ? e.tueur : 0);
+        uint32 const bot = e.victimeHumaine ? ((tueurType == 'R' || tueurType == 'B') ? e.tueur : 0) : e.victime;
+        uint32 prime = 0;
+        bool chasseur = false;
+        if (humain && (nbPrimes.load(std::memory_order_relaxed) || nbChasseurs.load(std::memory_order_relaxed)))
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto p = primes.find(humain);
+            if (p != primes.end() && p->second.finS > maintenant)
+                prime = p->second.id;
+            auto a = bot ? affectations.find(bot) : affectations.end();
+            chasseur = a != affectations.end() && a->second.a.chasseur && a->second.joueur == humain;
+        }
+        ++nMorts;
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MORTS_TRACEES);
+        LOG_INFO("playerbots",
+                 "coa directeur mort: epoque={} n={} t={} victime={} victime_type={} tueur={} tueur_type={} entree={}"
+                 " niveau_v={} niveau_t={} carte={} zone={} aire={} x={:.1f} y={:.1f} prime={} chasseur={}",
+                 EpoqueMonde(), nMorts, e.t, e.victime, victimeType, e.tueur, tueurType, e.entree,
+                 static_cast<uint32>(e.niveauV), static_cast<uint32>(e.niveauT), e.carte, e.zone, e.aire, e.x, e.y,
+                 prime, chasseur ? 1 : 0);
+        if (e.victimeHumaine)
+            mortsRecentes.push_back(MortRecente{e, chasseur});
+    }
+}
+
+// Chaque seconde, fil monde, cartes a l'arret (§ 6.2) : echeance, deconnexion,
+// MORT DU JOUEUR (par son etat : corps ou fantome, quel que soit le tueur --
+// chute, noyade et lave comprises -- et independamment de TracerMorts), regle
+// quittee, defi bloquant commence en cours de prime. Meme patron que les
+// affectations : copie sous verrou partage, examen hors verrou, retrait sous
+// verrou exclusif (meme id), fins hors verrou.
+void SuivrePrimes()
+{
+    if (!nbPrimes.load(std::memory_order_relaxed))
+        return;
+    uint32 const maintenant = Maintenant();
+    std::vector<Prime> copies;
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        copies.reserve(primes.size());
+        for (auto const& [j, p] : primes)
+            copies.push_back(p);
+    }
+    struct Fin
+    {
+        Prime p;
+        char const* motif;
+        uint32 tueur;
+        bool chasseur;
+    };
+    std::vector<Fin> fins;
+    for (Prime const& p : copies)
+    {
+        if (p.finS <= maintenant)
+        {
+            fins.push_back(Fin{p, "echue", 0, false});
+            continue;
+        }
+        Player* j = JoueurConnecte(p.joueur);
+        if (!j)
+        {
+            fins.push_back(Fin{p, "hors_ligne", 0, false});
+            continue;
+        }
+        if (!j->IsInWorld() || j->IsBeingTeleported())
+            continue;   // on repassera dans une seconde
+        if (j->isDead())
+        {
+            // Le tueur, si la file des morts l'a vu (TracerMorts) : la mort la
+            // plus recente de ce joueur, de moins de MORT_RECENTE_S.
+            uint32 tueur = 0;
+            bool chasseur = false;
+            for (auto it = mortsRecentes.rbegin(); it != mortsRecentes.rend(); ++it)
+                if (it->e.victime == p.joueur)
+                {
+                    tueur = it->e.tueur;
+                    chasseur = it->chasseur;
+                    break;
+                }
+            fins.push_back(Fin{p, "tombe", tueur, chasseur});
+            continue;
+        }
+        if (!HighRisk(j))
+        {
+            fins.push_back(Fin{p, "regle", 0, false});
+            continue;
+        }
+        // Revue D4c (m4) : MJ, champ de bataille, arene ou carte hors monde
+        // ouvert : les chasseurs ne peuvent plus l'atteindre, la prime tombe.
+        if (j->IsGameMaster())
+        {
+            fins.push_back(Fin{p, "mj", 0, false});
+            continue;
+        }
+        if (j->InBattleground() || j->InArena() || !CarteDeSuspension(j->GetMapId()))
+        {
+            fins.push_back(Fin{p, "champ_de_bataille", 0, false});
+            continue;
+        }
+        if (!defisLus || DefiBloquant(j))
+            fins.push_back(Fin{p, "defi", 0, false});
+    }
+    if (fins.empty())
+        return;
+    std::vector<Fin> faites;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+        for (Fin const& f : fins)
+        {
+            auto it = primes.find(f.p.joueur);
+            if (it == primes.end() || it->second.id != f.p.id)
+                continue;
+            primes.erase(it);
+            faites.push_back(f);
+        }
+        nbPrimes.store(static_cast<uint32>(primes.size()), std::memory_order_relaxed);
+    }
+    for (Fin const& f : faites)
+    {
+        bool const naturelle = std::string_view(f.motif) == "echue";
+        if (!naturelle)
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        else
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECHUES);
+        FinirPrime(f.p, naturelle ? nullptr : "leve", naturelle ? nullptr : f.motif, f.motif, f.tueur, f.chasseur,
+                   true);
+    }
+}
+
+// Crochets de mort (FIL DE CARTE, Unit::Kill) : un evenement par valeur, et
+// rien d'autre. Seulement si un HUMAIN est victime ou tueur (session sans IA de
+// playerbots) ; les morts de bot a bot -- l'immense majorite -- ne coutent que
+// ce test. Les types R/B des bots sont resolus au fil monde (DrainerMorts).
+void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
+{
+    bool const victimeHumaine = Humain(victime);
+    bool const tueurHumain = tueurJoueur && Humain(tueurJoueur);
+    if (!victimeHumaine && !tueurHumain)
+        return;
+    EvenementMort e;
+    e.victime = victime->GetGUID().GetCounter();
+    e.victimeHumaine = victimeHumaine;
+    e.niveauV = victime->GetLevel();
+    e.carte = victime->GetMapId();
+    e.zone = victime->GetZoneId();
+    e.aire = victime->GetAreaId();
+    e.x = victime->GetPositionX();
+    e.y = victime->GetPositionY();
+    e.t = Maintenant();
+    if (tueurJoueur)
+    {
+        e.tueur = tueurJoueur->GetGUID().GetCounter();
+        e.tueurType = tueurHumain ? 'H' : 'J';
+        e.niveauT = tueurJoueur->GetLevel();
+    }
+    else if (tueurCreature)
+    {
+        e.tueurType = 'C';
+        e.entree = tueurCreature->GetEntry();
+        e.niveauT = tueurCreature->GetLevel();
+    }
+    std::lock_guard<std::mutex> garde(verrouMorts);
+    if (fileMorts.size() >= MORTS_FILE_MAX)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MORTS_PERDUES);
+        return;
+    }
+    fileMorts.push_back(e);
+}
+
 // Entretien de chaque seconde, bus allume OU eteint : la purge d'un bus
 // eteint met des mercenaires en file, et il faut bien les reconstruire.
 void Entretien(uint32 diff)
@@ -2772,6 +3427,11 @@ void Entretien(uint32 diff)
     if (secondeMs < IN_MILLISECONDS)
         return;
     secondeMs = 0;
+    // Lot D4c : les morts d'abord (elles nomment le tueur d'un prime tombe),
+    // puis les primes (dont la fin leve les chasseurs), AVANT le suivi des
+    // affectations.
+    DrainerMorts();
+    SuivrePrimes();
     LeverEchues();
     LeverSuspensionsEchues();
     LeverSuspensionsMaitreHumain();
@@ -2808,13 +3468,15 @@ void ExecuterLever(CoaDirCommande const& c)
                   LeverAffectationsSi([](AffectationInterne const&) { return true; }, "lever") +
                   LeverCielsSi([](Ciel const&) { return true; }, "lever") +
                   LeverMeteosSi([](MeteoJoueur const&) { return true; }, "lever") +
-                  LeverParolesSi([](Parole const&) { return true; }, "lever")
+                  LeverParolesSi([](Parole const&) { return true; }, "lever") +
+                  LeverPrimesSi([](Prime const&) { return true; }, "lever")
             : LeverSi([&c](Treve const& t) { return t.id == c.cible; }, "lever") +
                   LeverSuspensionsSi([&c](Suspension const& s) { return s.id == c.cible; }, "lever") +
                   LeverAffectationsSi([&c](AffectationInterne const& f) { return f.a.id == c.cible; }, "lever") +
                   LeverCielsSi([&c](Ciel const& x) { return x.id == c.cible; }, "lever") +
                   LeverMeteosSi([&c](MeteoJoueur const& m) { return m.id == c.cible; }, "lever") +
-                  LeverParolesSi([&c](Parole const& p) { return p.id == c.cible; }, "lever");
+                  LeverParolesSi([&c](Parole const& p) { return p.id == c.cible; }, "lever") +
+                  LeverPrimesSi([&c](Prime const& p) { return p.id == c.cible; }, "lever");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     // Rien a lever n'est pas un refus : la consigne a pu echoir ou etre
     // remplacee entre-temps, et l'intention (qu'elle ne soit plus) est tenue.
@@ -2948,6 +3610,25 @@ void ExecuterSuspension(CoaDirCommande const& c)
     {
         Refuser(c, "carte");
         return;
+    }
+    // Lot D4c (SPEC-directeur-D4.md § 6.3, revue n° 16) : un chasseur designe
+    // n'est jamais suspendu. Sans ce refus, la regle de fosse, une fois reelle,
+    // pourrait le neutraliser sans passer par `occupe`, qui ne couvre que les
+    // affectations. Son proprietaire le leve par `lever`.
+    if (nbChasseurs.load(std::memory_order_relaxed))
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        auto it = affectations.find(c.cible);
+        if (it != affectations.end() && it->second.a.chasseur && it->second.a.finS > Maintenant())
+        {
+            uint32 const parId = it->second.a.id;
+            garde.unlock();
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_OCCUPEES);
+            LOG_INFO("playerbots", "coa directeur occupe: id={} guid={} origine={} joueur={} par_id={} par_verbe=chasser",
+                     c.id, c.cible, c.origine, c.joueur, parId);
+            Refuser(c, "occupe");
+            return;
+        }
     }
 
     // Le mode est FIGE ici : changer l'option ne bascule pas les suspensions
@@ -3135,7 +3816,7 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         }
         // Un chasseur amene pres d'un joueur High Risk (FFA) le chasserait, et
         // chasserait les autres arrivants (WildPvp.AllBotsAreTargets).
-        if (MercenaryRewards::EstMercenaire(bot) && !CoaDirecteur::MercenaireEnRpg(c.cible))
+        if (MercenaryRewards::EstMercenaire(bot) && !SuspenduEnRpg(c.cible))
         {
             Refuser(c, "mercenaire");
             return;
@@ -3240,6 +3921,132 @@ void ExecuterAffectation(CoaDirCommande const& recue)
             return;
         }
     }
+    // Lot D4c, verbe `chasser` (SPEC-directeur-D4.md § 6.3) : controles propres,
+    // APRES ceux de toute affectation (le refus `occupe` reste le dernier, sous
+    // le verrou). VOIE RETENUE POUR D4-0 (§ 10) : une ETAPE `E-` de chasseur est
+    // admise -- elle reste en TRAJET, donc le chasseur y est compose en mode RPG
+    // et new rpg le mene (laisse, trajet pacifique : il ne chasse pas en
+    // route, c'est voulu) ; la FINALE (sans `E-`) passe en SEJOUR a l'arrivee,
+    // et la fabrique lui rend sa chasse.
+    bool const chasseur = c.verbe == CoaDirVerbe::Chasser;
+    bool const etapeChasse = chasseur && c.action.size() > 2 && c.action[0] == 'E' && c.action[1] == '-';
+    if (chasseur)
+    {
+        uint32 const maintenantS = Maintenant();
+        uint32 plafond = 0;
+        bool primeActive = false;
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = c.joueur ? primes.find(c.joueur) : primes.end();
+            if (it != primes.end() && it->second.finS > maintenantS)
+            {
+                primeActive = true;
+                plafond = it->second.plafond;
+            }
+        }
+        if (!primeActive)
+        {
+            Refuser(c, "sans_prime");
+            return;
+        }
+        // EstMercenaire exige aussi IsRandomBot, et rend faux WildPvp eteint.
+        if (!MercenaryRewards::EstMercenaire(bot))
+        {
+            Refuser(c, "pas_mercenaire");
+            return;
+        }
+        // Sans strategie `pvp` (mode RPG de la suspension, AiFactory.cpp), il ne
+        // pourrait pas engager ; et la suspension a son propre proprietaire.
+        if (CoaDirecteur::MercenaireSuspendu(c.cible))
+        {
+            Refuser(c, "suspendu");
+            return;
+        }
+        // Une etape `E-` sans Directeur.Etapes serait une affectation ordinaire :
+        // le chasseur passerait en SEJOUR, donc en chasse, loin du joueur.
+        if (etapeChasse && !sPlayerbotAIConfig.directeurEtapes)
+        {
+            Refuser(c, "etapes_eteintes");
+            return;
+        }
+        Player* joueur = ObjectAccessor::FindPlayerByLowGUID(c.joueur);
+        if (!joueur)
+        {
+            Refuser(c, "hors_ligne");
+            return;
+        }
+        if (joueur->GetMapId() != c.carte)
+        {
+            Refuser(c, "carte");
+            return;
+        }
+        // Continuation : le bot porte deja une affectation `chasser` ACTIVE du
+        // meme proprietaire pour ce joueur (etape precedente, redisposition).
+        bool continuation = false;
+        uint32 autres = 0;
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = affectations.find(c.cible);
+            continuation = it != affectations.end() && it->second.a.finS > maintenantS && it->second.a.chasseur &&
+                           it->second.joueur == c.joueur && MemeProprietaire(it->second, c);
+            for (auto const& [guid, f] : affectations)
+                if (guid != c.cible && f.a.chasseur && f.joueur == c.joueur && f.a.finS > maintenantS)
+                    ++autres;
+        }
+        // Premiere pose : un mercenaire DE LA CHASSE (classe CoA, composition
+        // de mercenaire). Un mercenaire de classe vanille n'a pas de chasse
+        // (AiFactory.cpp) : arrive, rien ne lui ferait lire sa proie.
+        if (!continuation && !chasse)
+        {
+            Refuser(c, "sans_moteur");
+            return;
+        }
+        if (!continuation && autres >= plafond)
+        {
+            Refuser(c, "plafond");
+            return;
+        }
+        // Revue D4c (M1) : une REDISPOSITION d'un chasseur deja arrive (SEJOUR)
+        // le recomposerait en mode RPG, donc couperait sa traque. Refusee tant
+        // qu'il est en combat ou assez pres pour lire son prime ; le service
+        // reessaie plus tard.
+        if (continuation)
+        {
+            bool enSejour = false;
+            {
+                std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+                auto it = affectations.find(c.cible);
+                enSejour = it != affectations.end() && it->second.a.phase == CoaDirecteur::CoaDirPhase::Sejour;
+            }
+            float const px = bot->GetPositionX() - joueur->GetPositionX();
+            float const py = bot->GetPositionY() - joueur->GetPositionY();
+            float const detection = float(sPlayerbotAIConfig.directeurPrimeDetectionYd);
+            if (enSejour && (bot->IsInCombat() || px * px + py * py <= detection * detection))
+            {
+                Refuser(c, "en_chasse");
+                return;
+            }
+        }
+        float const bx = bot->GetPositionX() - joueur->GetPositionX();
+        float const by = bot->GetPositionY() - joueur->GetPositionY();
+        if (!continuation && bx * bx + by * by <= PRESENCE_A_VUE_YD * PRESENCE_A_VUE_YD)
+        {
+            Refuser(c, "a_vue");
+            return;
+        }
+        // Centre : la finale a CHASSEUR_CENTRE_MIN_YD-CHASSEUR_CENTRE_MAX_YD du
+        // joueur (au-dela de la visibilite de 100 yd : il le voit arriver a
+        // pied) ; une etape jamais plus pres que le minimum.
+        float const ex = c.x - joueur->GetPositionX();
+        float const ey = c.y - joueur->GetPositionY();
+        float const carre = ex * ex + ey * ey;
+        if (carre < CHASSEUR_CENTRE_MIN_YD * CHASSEUR_CENTRE_MIN_YD ||
+            (!etapeChasse && carre > CHASSEUR_CENTRE_MAX_YD * CHASSEUR_CENTRE_MAX_YD))
+        {
+            Refuser(c, "bornes");
+            return;
+        }
+    }
     float const dx = bot->GetPositionX() - c.x;
     float const dy = bot->GetPositionY() - c.y;
     // Teleportation cachee : le bot vient de loin, c'est tout l'objet du saut.
@@ -3289,8 +4096,15 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     }
     // Mercenaire EN CHASSE (pas en mode RPG) : un centre sans PvP ferait
     // repasser la chasse en REPLI, qui en ressortirait (CoaChasse.h, REPLI).
-    bool const mercenaireRpg = CoaDirecteur::MercenaireEnRpg(c.cible);
-    if (chasse && !mercenaireRpg)
+    bool const mercenaireRpg = SuspenduEnRpg(c.cible);
+    // Lot D4c : la FINALE d'un chasseur n'est jamais posee en lieu sans PvP,
+    // meme quand il marche en mode RPG (`chasse` faux) : arrive, il y serait
+    // inerte, et son prime y est un refuge (SPEC § 12, « Refuge »).
+    // Revue D4c (m2, m7) : pour `chasser`, la FINALE seule (une etape traverse) ;
+    // pour tout autre verbe, aussi un mercenaire compose en mode RPG par une
+    // affectation `chasser` en trajet (il retrouvera sa chasse a la fin de celle-ci).
+    bool const enChasseApres = chasse || (!chasseur && ChasseurEnTrajet(c.cible));
+    if (chasseur ? !etapeChasse : (enChasseApres && !mercenaireRpg))
     {
         uint32 zone = 0, aire = 0;
         map->GetZoneAndAreaId(PHASEMASK_NORMAL, zone, aire, c.x, c.y, sol);
@@ -3301,8 +4115,9 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         }
     }
     WorldPosition centre(c.carte, c.x, c.y, sol);
-    // `peupler` exempte le joueur qui demande, et lui seul (§ 4.2).
-    if (presence ? HumainProcheSauf(centre, c.carte, AFFECTATION_HUMAIN_YD, c.joueur)
+    // `peupler` exempte le joueur qui demande, et lui seul (§ 4.2) ; `chasser`
+    // exempte le joueur prime, et lui seul (SPEC-directeur-D4.md § 6.3).
+    if ((presence || chasseur) ? HumainProcheSauf(centre, c.carte, AFFECTATION_HUMAIN_YD, c.joueur)
                  : ia->HasPlayerNearby(&centre, AFFECTATION_HUMAIN_YD))
     {
         Refuser(c, "humain_proche");
@@ -3400,6 +4215,7 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     nouvelle.a.sautMs = sautMs;
     nouvelle.a.presence = presence;
     nouvelle.a.compagnon = compagnon;
+    nouvelle.a.chasseur = chasseur;
     if (compagnon)
         nouvelle.a.rayon = CoaDirecteur::COMPAGNON_MAX_YD;   // arrivee = dans la bande
     nouvelle.verbe = c.verbe;
@@ -3442,7 +4258,7 @@ void ExecuterAffectation(CoaDirCommande const& recue)
             }
             // Une affectation par bot, la derniere remplace entierement (§ 6.3).
             affectations[c.cible] = nouvelle;
-            nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
+            MajCompteursAffectations();
             // Compagnons : le pacte, dans la MEME section (un lecteur ne voit
             // jamais le compagnon sans son pacte). Pose par TOUTE presence
             // (etape, finale, `C-`) option allumee : un bot amene vers un joueur
@@ -3464,6 +4280,12 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         Refuser(c, "occupe");
         return;
     }
+    // Lot D4c : la pose d'un chasseur (toujours EN TRAJET) le fait composer en
+    // mode RPG, sauf s'il l'etait deja (continuation d'un chasseur en trajet).
+    // AVANT FinirAffectation de l'ancienne : celle-ci voit alors le nouveau
+    // chasseur en trajet et ne demande pas le retour a la chasse.
+    if (chasseur && !(remplace && ancienne.a.chasseur && ancienne.a.phase == CoaDirecteur::CoaDirPhase::Trajet))
+        BasculerComposition(c.cible);
     if (remplace)
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
@@ -3482,6 +4304,12 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PEUPLEMENTS);
         LOG_INFO("playerbots", "coa directeur presence: id={} guid={} joueur={} etape={} remplace={}", c.id, c.cible,
                  c.joueur, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0);
+    }
+    if (chasseur)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_CHASSEURS);
+        LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=pose etape={} remplace={}", c.cible,
+                 c.joueur, c.id, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0);
     }
     if (compagnon)
     {
@@ -3531,12 +4359,22 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "colonnes_d3");
         return;
     }
+    // 3 ter (lot D4c, SPEC-directeur-D4.md § 3.2). Verbe D4 sans l'ENUM D4 au
+    // demarrage (migration non appliquee, P-131) : il ne devrait pas exister en
+    // base, et `valeur` (plafond de prime) pourrait ne pas avoir ete lue.
+    if (VerbeD4(c.verbe) && (!source || !source->ColonnesD4() || !source->ColonnesD3()))
+    {
+        Refuser(c, "colonnes_d4");
+        return;
+    }
     // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
     // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
     // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
     // joueur lui-meme (cible), comme la treve.
+    // Lot D4c : `prime` vise le joueur lui-meme (sa cible) ; `chasser` est
+    // couvert par le test de `joueur` (le prime).
     bool const visePersonne = c.verbe == CoaDirVerbe::Treve || c.verbe == CoaDirVerbe::HeureDuJour ||
-                              c.verbe == CoaDirVerbe::Meteo;
+                              c.verbe == CoaDirVerbe::Meteo || c.verbe == CoaDirVerbe::Prime;
     if (c.verbe != CoaDirVerbe::Repondre &&
         ((c.joueur && CoaDirecteur::EstArrete(c.joueur)) || (visePersonne && CoaDirecteur::EstArrete(c.cible))))
     {
@@ -3563,7 +4401,11 @@ void Recevoir(CoaDirCommande const& c)
         case CoaDirVerbe::Reaffecter:
         case CoaDirVerbe::Alleger:
         case CoaDirVerbe::Peupler:
+        case CoaDirVerbe::Chasser:
             ExecuterAffectation(c);
+            break;
+        case CoaDirVerbe::Prime:
+            ExecuterPrime(c);
             break;
         case CoaDirVerbe::Repondre:
             ExecuterRepondre(c);
@@ -3611,7 +4453,9 @@ void Bilan()
              " reponses={} paroles_livrees={} paroles_perdues={} peuplements={} arrivees_presence={}"
              " enlisements_presence={} ciels={} meteos={} reaffirmations_meteo={} occupees={} laisses_presence={}"
              " paroles_en_file={} ciels_actifs={} meteos_actives={} compagnons={} approches={} ecartes_pacte={}"
-             " pactes={} teleports_caches={} sauts_remis_idle={}",
+             " pactes={} teleports_caches={} sauts_remis_idle={} primes={} chasseurs={} primes_tombees={}"
+             " primes_echues={} primes_levees={} proies_imposees={} traques_prime={} meute_permise={}"
+             " morts_tracees={} morts_perdues={} primes_actives={} chasseurs_actifs={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -3633,7 +4477,11 @@ void Bilan()
              Lire(COA_DIR_REAFFIRMATIONS_METEO), Lire(COA_DIR_OCCUPEES), Lire(COA_DIR_LAISSES_PRESENCE),
              paroles.size(), ciels.size(), meteos.size(), Lire(COA_DIR_COMPAGNONS), Lire(COA_DIR_APPROCHES),
              Lire(COA_DIR_ECARTE_PACTE), nbPactes.load(std::memory_order_relaxed), Lire(COA_DIR_TELEPORTS_CACHES),
-             Lire(COA_DIR_SAUTS_REMIS_IDLE));
+             Lire(COA_DIR_SAUTS_REMIS_IDLE), Lire(COA_DIR_PRIMES), Lire(COA_DIR_CHASSEURS),
+             Lire(COA_DIR_PRIMES_TOMBEES), Lire(COA_DIR_PRIMES_ECHUES), Lire(COA_DIR_PRIMES_LEVEES),
+             Lire(COA_DIR_PROIES_IMPOSEES), Lire(COA_DIR_TRAQUES_PRIME), Lire(COA_DIR_MEUTE_PERMISE),
+             Lire(COA_DIR_MORTS_TRACEES), Lire(COA_DIR_MORTS_PERDUES), nbPrimes.load(std::memory_order_relaxed),
+             nbChasseurs.load(std::memory_order_relaxed));
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -3674,9 +4522,19 @@ std::string Consignes()
         if (!premier)
             out << '\t';
         premier = false;
+        // Lot D4c : un chasseur porte `c` en onzieme champ (mode).
         out << f.a.id << ',' << NomVerbe(f.verbe) << ',' << f.guid << ',' << f.joueur << ',' << f.a.finS << ','
-            << f.a.carte << ',' << f.a.x << ',' << f.a.y << ',' << f.a.rayon << ',' << NomPhase(f.a.phase) << ",-,"
-            << (f.a.etape ? (f.etapeArrivee ? "1" : "0") : "-");
+            << f.a.carte << ',' << f.a.x << ',' << f.a.y << ',' << f.a.rayon << ',' << NomPhase(f.a.phase) << ','
+            << (f.a.chasseur ? "c" : "-") << ',' << (f.a.etape ? (f.etapeArrivee ? "1" : "0") : "-");
+    }
+    // Lot D4c : une prime porte son plafond en onzieme champ ; cible et joueur
+    // sont le joueur prime ; ni lieu ni phase.
+    for (auto const& [j, p] : primes)
+    {
+        if (!premier)
+            out << '\t';
+        premier = false;
+        out << p.id << ",prime," << p.joueur << ',' << p.joueur << ',' << p.finS << ",0,0,0,0,-," << p.plafond << ",-";
     }
     // Lot D3 : un ciel porte sa minute, une meteo son etat, en onzieme champ ;
     // ni lieu ni phase. Les paroles en file ne sont pas des consignes.
@@ -3821,9 +4679,7 @@ std::string Lieux(std::string const& texte)
 // groupe : taille du groupe, 0 sans groupe ; ciel, meteo : minute et etat poses
 // par le Directeur, '-' sinon. Personnage absent : `absent`. Requete mal formee,
 // ou bus eteint (meme interrupteur que `lieux`) : `invalid`.
-constexpr uint32 AURA_REGLE_PVE = 9931032;        // mod-ascension-compat, AscensionRulesets.cpp
-constexpr uint32 AURA_REGLE_HIGH_RISK = 1004019;
-constexpr uint32 AURA_REGLE_WAR_MODE = 1004119;
+// (AURA_REGLE_* : definies plus haut, avec la prime du lot D4c.)
 
 std::string Joueur(std::string const& texte)
 {
@@ -3955,6 +4811,10 @@ void CoaDirecteur::DemarrerBus()
     bool const bus = sPlayerbotAIConfig.directeurBus;
     dernierEtatBus = bus;
     source = sourceMysql.Demarrer(EpoqueMonde(), bus) ? &sourceMysql : nullptr;
+    // Lot D4c : les auras des defis bloquants, une fois (requete synchrone,
+    // admise au demarrage comme la garde de colonnes).
+    if (source)
+        ChargerDefisBloquants();
     if (source)
         LOG_INFO("playerbots", "coa directeur : bus pret, epoque {}, interrupteur {}", EpoqueMonde(), bus ? 1 : 0);
 }
@@ -3984,6 +4844,8 @@ void CoaDirecteur::TraiterBus(uint32 diff)
         LeverCielsSi([](Ciel const&) { return true; }, "bus_eteint");
         LeverMeteosSi([](MeteoJoueur const&) { return true; }, "bus_eteint");
         LeverParolesSi([](Parole const&) { return true; }, "bus_eteint");
+        // Lot D4c : les chasseurs sont deja leves (affectations) ; la prime aussi.
+        LeverPrimesSi([](Prime const&) { return true; }, "bus_eteint");
         PurgerMortsEnTrajet();
         PurgerPactes();
         source->Vidanger([](CoaDirCommande const& c)
@@ -4040,11 +4902,33 @@ bool CoaDirecteur::MercenaireSuspendu(uint32 guidLow)
 
 bool CoaDirecteur::MercenaireEnRpg(uint32 guidLow)
 {
-    if (!nbSuspensions.load(std::memory_order_relaxed))
+    if (SuspenduEnRpg(guidLow))
+        return true;
+    // Lot D4c : un chasseur EN TRAJET est compose en mode RPG (voie retenue
+    // apres D4-0, SPEC-directeur-D4.md § 10). Sans chasseur : un chargement.
+    return ChasseurEnTrajet(guidLow);
+}
+
+bool CoaDirecteur::ProieImposee(uint32 botLow, uint32* joueur, uint32* id)
+{
+    // LA QUESTION D'ABORD : sans chasseur, un chargement atomique.
+    if (!nbChasseurs.load(std::memory_order_relaxed))
         return false;
+    uint32 const maintenant = Maintenant();
     std::shared_lock<std::shared_mutex> garde(verrouConsignes);
-    auto it = suspensions.find(guidLow);
-    return it != suspensions.end() && it->second.rpg && it->second.finS > Maintenant();
+    auto it = affectations.find(botLow);
+    if (it == affectations.end() || !it->second.a.chasseur || it->second.a.finS <= maintenant)
+        return false;
+    // La prime doit courir encore : sa fin leve les chasseurs a la seconde, mais
+    // un lecteur de carte peut passer entre les deux.
+    auto p = primes.find(it->second.joueur);
+    if (p == primes.end() || p->second.finS <= maintenant)
+        return false;
+    if (joueur)
+        *joueur = it->second.joueur;
+    if (id)
+        *id = it->second.a.id;
+    return true;
 }
 
 bool CoaDirecteur::AffectationDe(uint32 guidLow, Affectation* sortie)
@@ -4381,7 +5265,10 @@ public:
             // Lot D3 : son ciel et sa meteo sont retablis, ses paroles en file oubliees.
             LeverCielsSi([guidLow](Ciel const& x) { return x.joueur == guidLow; }, "arret") +
             LeverMeteosSi([guidLow](MeteoJoueur const& m) { return m.joueur == guidLow; }, "arret") +
-            LeverParolesSi([guidLow](Parole const& p) { return p.joueur == guidLow; }, "arret");
+            LeverParolesSi([guidLow](Parole const& p) { return p.joueur == guidLow; }, "arret") +
+            // Lot D4c : sa prime (ses chasseurs, affectations de joueur = lui,
+            // sont deja leves `arret` juste au-dessus).
+            LeverPrimesSi([guidLow](Prime const& p) { return p.joueur == guidLow; }, "arret");
         if (levees)
             LOG_INFO("playerbots", "coa directeur : stop de {} leve {} consigne(s)", guidLow, levees);
         if (!DemandeArretTropTot(guidLow, true))
@@ -4433,8 +5320,46 @@ public:
     }
 };
 
+// Lot D4c (SPEC-directeur-D4.md § 3.3) : les crochets de mort. FIL DE CARTE :
+// ils ne lisent que la victime et le tueur qu'ils recoivent, et ne font que
+// pousser un evenement par valeur (PousserMort). Option TracerMorts a 0 : ils
+// rendent la main au premier test.
+//  - OnPlayerPVPKill(tueur, victime) : tueur == victime est une mort de
+//    l'ENVIRONNEMENT (chute, noyade, lave : Player::EnvironmentalDamage tue par
+//    soi-meme, AscensionRulesets.cpp le traite de meme) -> tueur 0, type E ;
+//  - OnPlayerKilledByCreature(creature, victime) : Unit::Kill passe un FAMILIER
+//    ou un gardien comme Creature (Unit.cpp, « Hook for OnPVPKill Event ») ; le
+//    tueur est ramene a son maitre joueur, type C seulement sans maitre.
+class coa_directeur_playerscript : public PlayerScript
+{
+public:
+    coa_directeur_playerscript()
+        : PlayerScript("coa_directeur_playerscript",
+                       { PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_PLAYER_KILLED_BY_CREATURE })
+    {
+    }
+
+    void OnPlayerPVPKill(Player* killer, Player* killed) override
+    {
+        if (!sPlayerbotAIConfig.directeurTracerMorts || !killer || !killed)
+            return;
+        PousserMort(killed, killer == killed ? nullptr : killer, nullptr);
+    }
+
+    void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
+    {
+        if (!sPlayerbotAIConfig.directeurTracerMorts || !killer || !killed)
+            return;
+        Player* maitre = killer->GetCharmerOrOwnerPlayerOrPlayerItself();
+        if (maitre == killed)
+            maitre = nullptr;   // son propre familier : pas un meurtre, la creature reste le tueur
+        PousserMort(killed, maitre, maitre ? nullptr : killer);
+    }
+};
+
 void AddSC_coa_directeur()
 {
     new coa_directeur_commandscript();
     new coa_directeur_worldscript();
+    new coa_directeur_playerscript();
 }

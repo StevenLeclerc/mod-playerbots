@@ -12,6 +12,7 @@
 #include "CoaPostes.h"
 #include "Creature.h"
 #include "GridTerrainData.h"
+#include "Log.h"
 #include "Map.h"
 #include "MercenaryRewards.h"
 #include "NewRpgBaseAction.h"
@@ -795,18 +796,34 @@ public:
                 // reste a zero. A 100 -- le plafond de PlayerbotAIConfig.cpp:750
                 // -- plus aucune traque ne part, PV pleins compris. Voir
                 // l'en-tete de CoaPvSousLeSeuil.
+                //
+                // CoA -- Directeur, lot D4c (SPEC-directeur-D4.md § 6.3, points 2
+                // et 3) : un CHASSEUR DESIGNE ne tire aucune proie au hasard. Il
+                // lit son prime PAR SON GUID, jusqu'a PrimeDetectionYd (250 yd :
+                // « nearest enemy players » ne porte qu'a 75, et son disque est a
+                // 120-300 yd du joueur), et ne traque que lui. Sans chasseur : un
+                // chargement atomique, puis le code d'origine.
+                uint32 primeGuid = 0, chasseId = 0;
+                bool const imposee = CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid, &chasseId);
                 if (sPlayerbotAIConfig.wildPvpTraque && !PvSousLeSeuil() &&
                     GetMSTimeDiffToNow(dernierScanProie) >= DelaiScanProieMs)
                 {
                     dernierScanProie = getMSTime();
 
-                    ObjectGuid const tiree = ChoisirProie();
+                    ObjectGuid const tiree = imposee ? LireProieImposee(primeGuid) : ChoisirProie();
                     if (!tiree.IsEmpty())
                     {
                         proie = tiree;
                         etat = CoaEtatChasse::Traque;
                         debutTraque = getMSTime();
+                        traqueImposee = imposee;
                         CoaChasseCompteTraque();
+                        if (imposee)
+                        {
+                            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PROIES_IMPOSEES);
+                            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=proie_imposee",
+                                     bot->GetGUID().GetCounter(), primeGuid, chasseId);
+                        }
                         return Traquer();
                     }
                 }
@@ -989,6 +1006,10 @@ private:
     ObjectGuid proie;
     uint32 debutTraque = 0;
     uint32 dernierScanProie = 0;
+    // Lot D4c : la traque en cours vise le prime de ce chasseur (portee et
+    // duree de la prime, PrimeDetectionYd et PrimeTraqueSecondes). Remis a faux
+    // a toute sortie de traque (PasserEnRetour, Oublier).
+    bool traqueImposee = false;
 
     /*
      * REARMER LE COMPTEUR D'ENLISEMENT DE MoveFarTo, ET POURQUOI IL LE FAUT.
@@ -1069,6 +1090,7 @@ private:
     {
         etat = CoaEtatChasse::Retour;
         proie = ObjectGuid::Empty;
+        traqueImposee = false;
         debutRoute = getMSTime();
         RearmerEnlisement();
     }
@@ -1078,6 +1100,7 @@ private:
         etat = CoaEtatChasse::Choix;
         poste = WorldPosition();
         proie = ObjectGuid::Empty;
+        traqueImposee = false;
     }
 
     // Le seuil de decrochage, en pourcentage de PV. Le corps est CoaPvSousLeSeuil,
@@ -1109,7 +1132,18 @@ private:
             return false;
         }
 
-        if (GetMSTimeDiffToNow(debutTraque) >= DureeTraqueMaxMs)
+        // Lot D4c : la traque d'un chasseur vers son prime dure plus longtemps
+        // et porte plus loin ; elle s'arrete des que la prime ne court plus.
+        uint32 primeGuid = 0;
+        if (traqueImposee && (!CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid) ||
+                              proie.GetCounter() != primeGuid))
+        {
+            AbandonnerLaTraque();
+            return false;
+        }
+        uint32 const dureeMaxMs =
+            traqueImposee ? sPlayerbotAIConfig.directeurPrimeTraqueSecondes * IN_MILLISECONDS : DureeTraqueMaxMs;
+        if (GetMSTimeDiffToNow(debutTraque) >= dureeMaxMs)
         {
             AbandonnerLaTraque();
             return false;
@@ -1145,7 +1179,16 @@ private:
         }
 
         float const distance = bot->GetExactDist(cible);
-        if (distance > PorteeDetection())
+        float const portee = traqueImposee ? float(sPlayerbotAIConfig.directeurPrimeDetectionYd) : PorteeDetection();
+        if (distance > portee)
+        {
+            AbandonnerLaTraque();
+            return false;
+        }
+        // Lot D4c : la treve de 60 s apres une mort (MercenaryRewards) n'est
+        // JAMAIS contournee par un chasseur (SPEC § 2.6) : la lecture directe du
+        // prime ne passe pas par « nearest enemy players », qui la teste.
+        if (traqueImposee && MercenaryRewards::instance().IsUnderTruce(cible->GetGUID().GetRawValue()))
         {
             AbandonnerLaTraque();
             return false;
@@ -1185,6 +1228,8 @@ private:
         // proie reste, elle, dans « nearest enemy players ».
         if (distance <= PorteeEngagement(cible))
         {
+            if (traqueImposee)
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TRAQUES_PRIME);
             PasserEnRetour();
             return false;
         }
@@ -1414,6 +1459,48 @@ private:
          * a l'autre bout de cette fonction.
          */
         return retenus[urand(0, uint32(retenus.size()) - 1)];
+    }
+
+    /*
+     * LOT D4c (SPEC-directeur-D4.md § 6.3, point 2) : la proie d'un chasseur
+     * designe, lue PAR SON GUID. Les memes tests que ChoisirProie -- vivante,
+     * joueur, meme carte, pas deja a portee d'engagement, hors lieu sans PvP
+     * (invariant 3), AttackersValue::IsPossibleTarget (invariant 2) -- sans la
+     * portee de « nearest enemy players » : PrimeDetectionYd a la place. Plus
+     * les deux gardes que « nearest enemy players » aurait appliquees et que
+     * cette lecture contourne : la treve du Directeur (SousTreve, dans
+     * PossibleTargetsValue::AcceptUnit) et la treve de 60 s apres une mort
+     * (IsUnderTruce, dans NearestEnemyPlayersValue::AcceptUnit), toutes deux
+     * jamais contournees (SPEC § 2.6). Et le trajet pacifique, comme
+     * ChoisirProie.
+     *
+     * SURETE DE LA LECTURE (le SUPPOSE du § 6.3, point 2, tranche par
+     * lecture) : botAI->GetUnit(guid) est ObjectAccessor::GetUnit(*bot, guid),
+     * qui pour un joueur rend HashMapHolder<Player>::Find(guid) SEULEMENT s'il
+     * est IsInWorld et sur la MEME Map que le bot (ObjectAccessor.cpp,
+     * GetPlayer(Map const*, guid)). Une meme Map n'est mise a jour que par un
+     * fil a la fois : c'est le patron exact de Traquer() pour sa proie.
+     */
+    ObjectGuid LireProieImposee(uint32 primeGuid)
+    {
+        if (!primeGuid || CoaDirecteur::EnTrajetPacifique(bot))
+            return ObjectGuid::Empty;
+        ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(primeGuid);
+        Unit* unite = botAI->GetUnit(guid);
+        if (!unite || !unite->IsInWorld() || !unite->IsAlive() || !unite->IsPlayer() ||
+            unite->GetMapId() != bot->GetMapId())
+            return ObjectGuid::Empty;
+        float const distance = bot->GetExactDist(unite);
+        if (distance > float(sPlayerbotAIConfig.directeurPrimeDetectionYd) || distance <= PorteeEngagement(unite))
+            return ObjectGuid::Empty;
+        if (sPlayerbotAIConfig.CoaLieuSansPvp(unite->GetZoneId(), unite->GetAreaId()))
+            return ObjectGuid::Empty;
+        if (CoaDirecteur::SousTreve(primeGuid) ||
+            MercenaryRewards::instance().IsUnderTruce(unite->GetGUID().GetRawValue()))
+            return ObjectGuid::Empty;
+        if (!AttackersValue::IsPossibleTarget(unite, bot))
+            return ObjectGuid::Empty;
+        return guid;
     }
 
     /*

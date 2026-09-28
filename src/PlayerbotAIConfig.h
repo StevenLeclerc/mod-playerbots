@@ -447,6 +447,15 @@ public:
     // Teleportation cachee (27/09) : presence `T-` teleportee hors de la vue du
     // joueur ; eteinte par defaut (une `T-` est alors refusee `teleport_eteint`).
     bool directeurTeleportCache;
+    // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
+    // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
+    // eteint par defaut (les crochets de mort rendent la main au premier test).
+    bool directeurTracerMorts;                // ligne `coa directeur mort:` pour toute mort d'humain
+    uint32 directeurMaxPrimes;                // primes actives au plus
+    uint32 directeurMaxChasseursParPrime;     // plafond de `valeur` d'une prime
+    uint32 directeurPrimeMeute;               // mercenaires engages ensemble sur le prime, au plus
+    uint32 directeurPrimeTraqueSecondes;      // traque d'un chasseur vers son prime
+    uint32 directeurPrimeDetectionYd;         // portee a laquelle un chasseur lit son prime
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

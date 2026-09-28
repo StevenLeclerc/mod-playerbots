@@ -152,6 +152,17 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
         if (inCapitalCity)
             return true;
 
+        // CoA -- Directeur, lot D4c (SPEC-directeur-D4.md § 6.3, point 6) : le
+        // filtre probabiliste de niveau est saute pour un chasseur designe face
+        // a SON prime (le service l'a choisi a [L - 2, L + 3], et le hachage
+        // FNV-1a lui ferait sinon refuser son unique proie 25 a 75 % du temps).
+        // Place APRES treve, pacte et suspension (qui rendent faux plus haut).
+        // Sans chasseur : un chargement atomique.
+        uint32 primeGuid = 0;
+        if (CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid) &&
+            unit->GetGUID().GetCounter() == primeGuid)
+            return true;
+
         // Level difference check
         int32 levelDifference = unit->GetLevel() - bot->GetLevel();
         int32 absLevelDifference = std::abs(levelDifference);

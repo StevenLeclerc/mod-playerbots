@@ -3453,3 +3453,56 @@ AiPlayerbot.Directeur.Compagnons = 0
 #        refusee `teleport_eteint`, rien ne change.
 #        Default: 0
 AiPlayerbot.Directeur.TeleportCache = 0
+
+#
+#    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
+#
+#    Verbes neufs : prime, chasser. Chacun reste INERTE tant qu'il n'est pas dans
+#    AiPlayerbot.Directeur.Verbes. Migration data/sql/characters/updates/2026_09_28_00_coa_directeur_d4.sql
+#    (ENUM `verbe` a 12 valeurs). Ce binaire accepte l'ENUM D3 comme l'ENUM D4 : installez-le AVANT la
+#    migration, puis migrez, puis redemarrez (SPEC § 11). Sans migration : `colonnes D4 absentes, verbes D4
+#    inertes` au demarrage, les verbes D2 et D3 fonctionnent, tout verbe D4 est refuse `colonnes_d4`.
+#    Une prime ne se pose que sur un joueur HIGH RISK (aura 1004019 sans 9931032), hors MJ, champ de
+#    bataille et defi bloquant (PVE_ONLY, a vies, sans resurrection : auras lues au demarrage) ; elle se
+#    relit chaque seconde et tombe a la mort du joueur, quel que soit le tueur. Un chasseur est un
+#    mercenaire de la chasse (classe CoA) : EN TRAJET il est compose en mode RPG (new rpg le mene, etapes
+#    `E-` comprises, trajet pacifique) ; arrive, il retrouve sa chasse, lit son prime jusqu'a
+#    PrimeDetectionYd et ne convoite personne d'autre.
+#
+#    AiPlayerbot.Directeur.TracerMorts
+#        Une ligne `coa directeur mort:` pour toute mort ou un HUMAIN est victime ou tueur (PvP, PvE,
+#        environnement), ecrite par le fil monde. A 0, les crochets de mort rendent la main au premier
+#        test. N'est pas requis par la prime (sa fin `tombe` se lit par l'etat du joueur) ; sans lui, le
+#        tueur n'est pas nomme.
+#        Default: 0
+AiPlayerbot.Directeur.TracerMorts = 0
+
+#    AiPlayerbot.Directeur.MaxPrimes
+#        prime : primes actives au plus (une nouvelle sur un joueur deja prime la remplace).
+#        Default: 4
+AiPlayerbot.Directeur.MaxPrimes = 4
+
+#    AiPlayerbot.Directeur.MaxChasseursParPrime
+#        prime : borne haute du plafond de chasseurs (`valeur`) d'une prime. Minimum 1.
+#        Default: 4
+AiPlayerbot.Directeur.MaxChasseursParPrime = 4
+
+#    AiPlayerbot.Directeur.PrimeMeute
+#        chasser : un chasseur designe engage son prime tant que moins de N mercenaires (designes ou
+#        non) sont deja en combat avec lui ; remplace, pour ce seul couple, WildPvp.MaxAttackersPerTarget.
+#        La treve de 60 s apres une mort (WildPvp.TruceAfterDeathSec) n'est jamais contournee. Minimum 1.
+#        Default: 2
+AiPlayerbot.Directeur.PrimeMeute = 2
+
+#    AiPlayerbot.Directeur.PrimeTraqueSecondes
+#        chasser : duree maximale d'une traque vers le prime (45 s pour une traque ordinaire).
+#        Bornes 45-600.
+#        Default: 120
+AiPlayerbot.Directeur.PrimeTraqueSecondes = 120
+
+#    AiPlayerbot.Directeur.PrimeDetectionYd
+#        chasser : distance a laquelle un chasseur en guet lit son prime par son guid (« nearest enemy
+#        players » ne porte qu'a 75 yd). Au-dela de la visibilite (100 yd) : le joueur voit arriver le
+#        chasseur a pied. Bornes 90-400.
+#        Default: 250
+AiPlayerbot.Directeur.PrimeDetectionYd = 250
