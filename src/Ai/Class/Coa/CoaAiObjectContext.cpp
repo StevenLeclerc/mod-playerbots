@@ -1779,8 +1779,29 @@ public:
         // A stance replaces the one the bot is in, and CoA classes have several of them
         // (five Boons, twenty-two Runic Tattoos): take one only while standing in none, or
         // two of them would take turns for ever.
-        bool const inStance = std::any_of(spells.begin(), spells.end(), [this](Usable const& spell)
-            { return (spell.kind & KIND_STANCE) && bot->HasAura(spell.info->Id); });
+        //
+        // One exception, and only one: a Venomancer (CLASS_PROPHET, 29) in Stalking (53).
+        // Facemelter, Rotfang and Widowmaker - its Spenders - require Spider Form 800841
+        // (AscensionVenomancerAbilities.cpp, OnSpellCheckCast), and the rule above kept a bot
+        // that had first taken Beetle Form 803183 in Beetle for ever. For that spec, Spider
+        // Form is the only stance it takes, and it counts as "in a stance" only while in
+        // Spider Form: from Beetle it shifts once, then HasAura(800841) holds and nothing is
+        // recast. Every other class and spec keeps the rule unchanged.
+        constexpr uint32 SpiderForm = 800841;
+        constexpr uint32 StalkingSpecialization = 53;
+        bool const wantsSpider = bot->getClass() == CLASS_PROPHET &&
+            GetAscensionActiveSpecialization(bot) == StalkingSpecialization &&
+            std::any_of(spells.begin(), spells.end(), [](Usable const& spell)
+                { return (spell.kind & KIND_STANCE) && spell.info->Id == SpiderForm; });
+        bool const inStance = wantsSpider ? bot->HasAura(SpiderForm) :
+            std::any_of(spells.begin(), spells.end(), [this](Usable const& spell)
+                { return (spell.kind & KIND_STANCE) && bot->HasAura(spell.info->Id); });
+        // Beetle Form 803183 is a true shapeshift: 800841 carries SPELL_ATTR0_NOT_SHAPESHIFTED, so
+        // CheckCast refuses Spider Form with SPELL_FAILED_NOT_SHAPESHIFT while the bot is still a
+        // beetle. A player's client cancels the form first; do the same for the bot.
+        constexpr uint32 BeetleForm = 803183;
+        if (wantsSpider && !inStance && bot->HasAura(BeetleForm))
+            bot->RemoveAurasDueToSpell(BeetleForm);
 
         time_t const now = time(nullptr);
         if (recent.size() > 64)
@@ -1795,6 +1816,8 @@ public:
 
                 // A stance is the bot's own, and only when it stands in none.
                 if ((spell.kind & KIND_STANCE) && (member != bot || inStance))
+                    continue;
+                if (wantsSpider && (spell.kind & KIND_STANCE) && spell.info->Id != SpiderForm)
                     continue;
 
                 if (member->HasAura(spell.info->Id))
