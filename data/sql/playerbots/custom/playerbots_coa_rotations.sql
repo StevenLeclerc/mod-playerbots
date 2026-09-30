@@ -5643,12 +5643,6 @@ INSERT INTO `playerbots_custom_strategy` (`name`, `idx`, `owner`, `action_line`)
 --    describes the spec at 60, this line carries the bot before that.
 ('templar-crusader', 15, 0, 'can cast::Gift of Fervor>cast melee::Gift of Fervor!20'),
 
--- 16. Tithe (class spell/early, from level 20, ID 804781).
---    [cooldown 3600s]
---    Class spell from level 20. Filler for the low levels: the guide
---    describes the spec at 60, this line carries the bot before that.
-('templar-crusader', 16, 0, 'buff missing::Tithe>cast buff::Tithe!19'),
-
 -- 17. Light's Hope (class spell/early, from level 18, ID 807814).
 --    [cooldown 60s]
 --    Class spell from level 18. Filler for the low levels: the guide
@@ -5902,12 +5896,6 @@ INSERT INTO `playerbots_custom_strategy` (`name`, `idx`, `owner`, `action_line`)
 --    describes the spec at 60, this line carries the bot before that.
 ('templar-oathkeeper', 25, 0, 'can cast::Gift of Fervor>cast melee::Gift of Fervor!15'),
 
--- 26. Tithe (class spell/early, from level 20, ID 804781).
---    [cooldown 3600s]
---    Class spell from level 20. Filler for the low levels: the guide
---    describes the spec at 60, this line carries the bot before that.
-('templar-oathkeeper', 26, 0, 'buff missing::Tithe>cast buff::Tithe!14'),
-
 -- 27. Light's Hope (class spell/early, from level 18, ID 807814).
 --    [cooldown 60s]
 --    Class spell from level 18. Filler for the low levels: the guide
@@ -6139,12 +6127,6 @@ INSERT INTO `playerbots_custom_strategy` (`name`, `idx`, `owner`, `action_line`)
 --    Class spell from level 20. Filler for the low levels: the guide
 --    describes the spec at 60, this line carries the bot before that.
 ('templar-zealot', 25, 0, 'can cast::Gift of Fervor>cast melee::Gift of Fervor!17'),
-
--- 26. Tithe (class spell/early, from level 20, ID 804781).
---    [cooldown 3600s]
---    Class spell from level 20. Filler for the low levels: the guide
---    describes the spec at 60, this line carries the bot before that.
-('templar-zealot', 26, 0, 'buff missing::Tithe>cast buff::Tithe!16'),
 
 -- 27. Light's Hope (class spell/early, from level 18, ID 807814).
 --    [cooldown 60s]
