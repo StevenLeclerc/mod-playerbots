@@ -455,6 +455,12 @@ public:
     // locuteur a son client (au plus 60 s, puis `perdue hors_vue`) ; eteint par
     // defaut (la parole part comme avant, la ligne dit `vu=0`).
     bool directeurParoleAVue;
+    // Missions (30/09) : la FINALE `Q-` d'une presence d'animation porte une
+    // mission (colonne `texte` : quete, chasse, recolte, passage, bande ;
+    // `valeur` : quete, metier ou chef). En SEJOUR, le bot ne tire plus que ce
+    // qui le garde au lieu de sa mission, et sa laisse s'y centre. Eteint par
+    // defaut : la mission est ignoree (journal `etat=ignoree`), rien ne change.
+    bool directeurMissions;
     // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
     // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
     // eteint par defaut (les crochets de mort rendent la main au premier test).

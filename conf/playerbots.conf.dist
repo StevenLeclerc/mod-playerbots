@@ -3476,6 +3476,18 @@ AiPlayerbot.Directeur.TeleportLointain = 0
 #        Default: 0
 AiPlayerbot.Directeur.ParoleAVue = 0
 
+#    AiPlayerbot.Directeur.Missions
+#        peupler, missions de l'animation (30/09) : la finale `Q-` d'une presence porte une mission tiree
+#        des donnees du lieu par le service (colonne `texte` : quete, chasse, recolte, passage, bande ;
+#        `valeur` : id de quete, metier 182/186, guid du chef de bande). Arrive (SEJOUR), le bot ne tire
+#        plus que les statuts RPG qui le gardent au lieu de sa mission (quete : cette quete ; sinon errance
+#        dans le disque, a plat, et repos) ; sa laisse se centre sur la mission, rayon + 30 yd ; un
+#        suiveur de bande reste a 15 yd de son chef. Toute laisse de sejour d'une presence tire un point
+#        a +-6 yd de hauteur du centre (plus de montee en pente). Mission caduque (quete rendue, chef
+#        parti) : degradee en chasse, jamais de refus. A 0 : la mission est ignoree, rien ne change.
+#        Default: 0
+AiPlayerbot.Directeur.Missions = 0
+
 #
 #    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
 #

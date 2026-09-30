@@ -18,6 +18,11 @@
 #include "PlayerbotAI.h"
 #include "QuestDef.h"
 #include "TravelMgr.h"
+
+namespace CoaDirecteur
+{
+struct Affectation;
+}
 #include <string>
 
 class Player;
@@ -59,6 +64,11 @@ public:
         // transitionMat[RPG_IDLE][RPG_DO_QUEST] = 35;
     }
     bool Execute(Event event) override;
+
+private:
+    // CoA -- Directeur, missions (30/09) : la quete d'une mission, au point
+    // d'objectif le plus proche du centre de l'affectation. Voir le .cpp.
+    bool DemarrerQueteDeMission(CoaDirecteur::Affectation const& aff);
 
 protected:
     // static NewRpgStatusTransitionProb transitionMat;

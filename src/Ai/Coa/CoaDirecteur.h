@@ -154,6 +154,28 @@ enum class CoaDirPhase : uint8
     Sejour
 };
 
+// Missions de l'animation (30/09, option Directeur.Missions) : ce que le bot
+// vient faire au lieu de sa presence. Portee par la FINALE `Q-` (colonne
+// `texte`, parametre `valeur`) ; ouverte : un evenement de zone (vortex, etude
+// a venir) sera un type de plus. Aucune : presence ordinaire, code d'avant.
+enum class CoaDirMission : uint8
+{
+    Aucune,
+    Quete,      // valeur : id de la quete, incomplete au journal du bot
+    Chasse,     // un camp de creatures de son niveau au centre du disque
+    Recolte,    // valeur : metier (182 herboristerie, 186 minage), noeuds au centre
+    Passage,    // il traverse la scene, puis s'en va a l'echeance
+    Bande       // valeur : guid du CHEF (une presence du meme joueur) ; le centre suit le chef arrive
+};
+
+// Missions : la laisse d'un bot en mission s'etend a rayon + MISSION_LAISSE_MARGE_YD ;
+// un suiveur de bande se tient a BANDE_MAX_YD de son chef, et vise BANDE_CIBLE_YD.
+constexpr float MISSION_LAISSE_MARGE_YD = 30.0f;
+constexpr float BANDE_MAX_YD = 15.0f;
+constexpr float BANDE_CIBLE_YD = 6.0f;
+// Laisse d'un suiveur : au-dela de BANDE_CIBLE_YD + 10 yd (arrivee de GO_GRIND).
+constexpr float BANDE_LAISSE_YD = 25.0f;
+
 struct Affectation
 {
     uint32 id = 0;      // commande qui l'a posee
@@ -196,6 +218,14 @@ struct Affectation
     // D4-0), et ProieImposee (chasse, « nearest enemy players », filtre de
     // niveau).
     bool chasseur = false;
+    // Missions (30/09, option Directeur.Missions) : posee avec la FINALE d'une
+    // presence (`peupler` `Q-`), lue en SEJOUR par NewRpgStatusUpdateAction
+    // (statuts tires, laisse), NewRpgWanderRandomAction (errance dans le
+    // disque). Le fil monde seul l'ecrit : a la pose, puis quand elle devient
+    // caduque (quete finie, chef parti : degradee en Chasse). Pour une Bande,
+    // le centre (x, y, z) suit le chef, recale par le meme suivi.
+    CoaDirMission mission = CoaDirMission::Aucune;
+    uint32 missionParam = 0;
 };
 
 // Compagnons : la bande ou le bot se tient autour du joueur, et le point vise
@@ -251,7 +281,19 @@ struct TirageDisque
     bool repli = true;          // aucun point garde : le centre
 };
 TirageDisque TirerDansLeDisque(Map* carte, Affectation const& a, float& x, float& y, float& z,
-                               Position const* depuis = nullptr, float distanceMax = 0.0f);
+                               Position const* depuis = nullptr, float distanceMax = 0.0f,
+                               bool hauteurStricte = false);
+// Missions (30/09) : `hauteurStricte` vrai, un sol a plus de TIRAGE_ECART_Z (6 yd)
+// du centre est TOUJOURS refuse, ciel ouvert et pente douce compris : la laisse
+// de sejour d'une presence en mission ne mene plus un bot au flanc d'une colline
+// (mesure du 30/09 : points a z + 40 d'un centre en plaine). Le trajet garde la
+// regle d'avant (un chemin peut monter).
+
+// Missions, bande : le point ou un suiveur en (bx, by) rejoint son chef (le centre
+// de `a`) : sur la droite centre -> suiveur, a `distance`, sol a +-6 yd du centre ;
+// sinon +-35 puis +-70 degres ; sinon le centre. Meme contrat de fil que
+// PointDApproche (qui l'appelle a COMPAGNON_CIBLE_YD). -> faux si repli.
+bool PointPres(Map* carte, Affectation const& a, float bx, float by, float distance, float& x, float& y, float& z);
 
 // Tout fil, chemin chaud : le point (carte, x, y) est-il dans le disque d'une
 // affectation levee EN TRAJET depuis moins de TRAJET_LEVE_S secondes (ou en
@@ -369,6 +411,13 @@ enum CoaDirCompteur : uint8
     // 30/09, en fin de la ligne bilan :
     COA_DIR_TELEPORTS_LOINTAINS,     // presences `L-` posees : bot teleporte a 250-350 yd du joueur
     COA_DIR_PAROLES_HORS_VUE,        // dire/crier differes : le joueur n'a pas le locuteur a son client
+    // Missions (30/09), en fin de la ligne bilan :
+    COA_DIR_MISSIONS,                // finales `Q-` posees avec une mission
+    COA_DIR_MISSIONS_IGNOREES,       // ... ignorees (option eteinte, type inconnu)
+    COA_DIR_MISSIONS_DEGRADEES,      // missions devenues caduques (quete finie, chef parti) : Chasse
+    COA_DIR_PATROUILLES,             // errances d'un bot en mission vers un point a plat de son disque
+    COA_DIR_BANDES_RECALEES,         // centres de suiveurs recales sur leur chef
+    COA_DIR_BANDES_REJOINTES,        // suiveurs repartis rejoindre leur chef (laisse de bande)
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);

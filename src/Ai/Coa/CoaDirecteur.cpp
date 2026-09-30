@@ -20,6 +20,7 @@
 #include "MercenaryRewards.h"
 #include "MiscPackets.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Opcodes.h"
 #include "Player.h"
 #include "PlayerbotAI.h"
@@ -39,6 +40,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <deque>
 #include <future>
@@ -472,6 +474,27 @@ constexpr float COMPAGNON_CENTRE_MAX_YD = 150.0f;
 constexpr float COMPAGNON_SAUT_YD = 300.0f;
 // Le suivi ne recale le centre que si le joueur s'en est ecarte d'autant.
 constexpr float COMPAGNON_RECALAGE_YD = 3.0f;
+// Missions (30/09) : un suiveur de bande recale son centre sur le chef des que
+// celui-ci s'en est eloigne de plus de BANDE_RECALAGE_YD ; degrade en Chasse,
+// il retrouve un disque de BANDE_DEGRADEE_RAYON_YD.
+constexpr float BANDE_RECALAGE_YD = 4.0f;
+constexpr float BANDE_DEGRADEE_RAYON_YD = 35.0f;
+
+// Missions de l'animation (30/09, option Directeur.Missions). Le nom de chaque
+// type est celui de la colonne `texte` (contrat avec emetteur.py, _valider_d3).
+char const* NomMission(CoaDirecteur::CoaDirMission m)
+{
+    switch (m)
+    {
+        case CoaDirecteur::CoaDirMission::Quete:   return "quete";
+        case CoaDirecteur::CoaDirMission::Chasse:  return "chasse";
+        case CoaDirecteur::CoaDirMission::Recolte: return "recolte";
+        case CoaDirecteur::CoaDirMission::Passage: return "passage";
+        case CoaDirecteur::CoaDirMission::Bande:   return "bande";
+        default:                                   return "aucune";
+    }
+}
+
 std::unordered_map<uint32, PacteCompagnon> pactes;   // cle : guid bas du bot
 std::atomic<uint32> nbPactes{0};
 
@@ -1544,7 +1567,7 @@ void SuivreAffectations()
             copies.push_back(f);
     }
 
-    enum class Issue : uint8 { Arrivee, Levee, Echue, Niveau, Releve, EtapeArrivee, Centre };
+    enum class Issue : uint8 { Arrivee, Levee, Echue, Niveau, Releve, EtapeArrivee, Centre, Mission };
     struct Decision
     {
         uint32 guid, id;
@@ -1683,6 +1706,49 @@ void SuivreAffectations()
                 }
             }
         }
+        // Missions (30/09). Une mission CADUQUE est degradee en Chasse (le bot
+        // reste au lieu, il ne repart pas) : quete plus incomplete (finie, rendue,
+        // abandonnee), chef de bande parti (fin, mort, hors ligne, autre carte).
+        // Un suiveur dont le chef est ARRIVE voit son centre recale sur lui des
+        // qu'il a bouge de plus de BANDE_RECALAGE_YD. Lu ici, fil monde, cartes a
+        // l'arret (P-137) ; ecrit sous le verrou exclusif plus bas (P-134).
+        if (f.a.mission == CoaDirecteur::CoaDirMission::Quete && f.a.phase == CoaDirecteur::CoaDirPhase::Sejour &&
+            bot->GetQuestStatus(f.a.missionParam) != QUEST_STATUS_INCOMPLETE)
+        {
+            Decision d{f.guid, f.a.id, Issue::Mission, "quete_finie", CoaDirecteur::COA_DIR_NB_COMPTEURS, nullptr, 0,
+                       0};
+            decisions.push_back(d);
+        }
+        else if (f.a.mission == CoaDirecteur::CoaDirMission::Bande)
+        {
+            AffectationInterne const* chefAff = nullptr;
+            for (AffectationInterne const& autre : copies)
+                if (autre.guid == f.a.missionParam)
+                    chefAff = &autre;
+            Player* chef = chefAff ? JoueurConnecte(chefAff->guid) : nullptr;
+            if (!chefAff || !chefAff->a.presence || chefAff->a.compagnon || chefAff->joueur != f.joueur ||
+                chefAff->a.mission == CoaDirecteur::CoaDirMission::Bande || chefAff->a.finS <= maintenant || !chef ||
+                !chef->IsAlive() || chef->GetMapId() != f.a.carte)
+            {
+                decisions.push_back(Decision{f.guid, f.a.id, Issue::Mission, "chef_parti",
+                                             CoaDirecteur::COA_DIR_NB_COMPTEURS, nullptr, 0, 0});
+            }
+            else if (chef->IsInWorld() && !chef->IsBeingTeleported() && !chefAff->a.etape &&
+                     chefAff->a.phase == CoaDirecteur::CoaDirPhase::Sejour)
+            {
+                float const ex = chef->GetPositionX() - f.a.x;
+                float const ey = chef->GetPositionY() - f.a.y;
+                if (ex * ex + ey * ey > BANDE_RECALAGE_YD * BANDE_RECALAGE_YD)
+                {
+                    Decision d{f.guid, f.a.id, Issue::Centre, nullptr, CoaDirecteur::COA_DIR_BANDES_RECALEES, nullptr,
+                               0, 0};
+                    d.cx = chef->GetPositionX();
+                    d.cy = chef->GetPositionY();
+                    d.cz = chef->GetPositionZ();
+                    decisions.push_back(d);
+                }
+            }
+        }
         if (f.a.phase != CoaDirecteur::CoaDirPhase::Trajet)
         {
             // Sejour : releve unique a T + 5 min (§ 6.5). `maintenant` et
@@ -1727,6 +1793,14 @@ void SuivreAffectations()
     std::vector<MortTrajet> mortsPosees;
     uint32 arrivees = 0;
     uint32 arriveesPresence = 0;
+    uint32 bandesRecalees = 0;
+    struct MissionDegradee
+    {
+        uint32 guid, id;
+        char const* avant;
+        char const* raison;
+    };
+    std::vector<MissionDegradee> missionsDegradees;
     std::vector<AffectationInterne> chasseursArrives;   // lot D4c : retour a la chasse
     {
         std::unique_lock<std::shared_mutex> garde(verrouConsignes);
@@ -1767,6 +1841,20 @@ void SuivreAffectations()
                 it->second.a.x = d.cx;
                 it->second.a.y = d.cy;
                 it->second.a.z = d.cz;
+                if (d.compteur != CoaDirecteur::COA_DIR_NB_COMPTEURS)
+                    ++bandesRecalees;
+                continue;
+            }
+            if (d.issue == Issue::Mission)
+            {
+                // Degradee en Chasse, au meme lieu. Un suiveur retrouve un disque
+                // de chasse (le sien etait de BANDE_MAX_YD autour du chef).
+                missionsDegradees.push_back(
+                    MissionDegradee{d.guid, d.id, NomMission(it->second.a.mission), d.raison});
+                if (it->second.a.mission == CoaDirecteur::CoaDirMission::Bande)
+                    it->second.a.rayon = std::max(it->second.a.rayon, BANDE_DEGRADEE_RAYON_YD);
+                it->second.a.mission = CoaDirecteur::CoaDirMission::Chasse;
+                it->second.a.missionParam = 0;
                 continue;
             }
             if (d.issue == Issue::EtapeArrivee)
@@ -1799,6 +1887,14 @@ void SuivreAffectations()
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TRAJETS_ARRIVES);
     for (uint32 i = 0; i < arriveesPresence; ++i)
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ARRIVEES_PRESENCE);
+    for (uint32 i = 0; i < bandesRecalees; ++i)
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_BANDES_RECALEES);
+    for (MissionDegradee const& m : missionsDegradees)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MISSIONS_DEGRADEES);
+        LOG_INFO("playerbots", "coa directeur mission: id={} guid={} type=chasse avant={} etat=degradee raison={}", m.id,
+                 m.guid, m.avant, m.raison);
+    }
     for (AffectationInterne const& r : releves)
         JournaliserFinAffectation(r, "arrivee_5min");
     // Lot D4c : le chasseur est dans son disque (SEJOUR) ; MercenaireEnRpg rend
@@ -3730,6 +3826,99 @@ void ExecuterSuspension(CoaDirCommande const& c)
     Accuser(c, "execute", nullptr);
 }
 
+constexpr uint32 METIER_HERBORISTERIE = 182;   // SKILL_HERBALISM
+constexpr uint32 METIER_MINAGE = 186;          // SKILL_MINING
+
+struct MissionLue
+{
+    CoaDirecteur::CoaDirMission type = CoaDirecteur::CoaDirMission::Aucune;
+    uint32 param = 0;
+    char const* etat = nullptr;   // nul : aucune mission demandee, aucune ligne
+    char const* raison = "-";
+};
+
+// La mission d'une commande. Fil monde, cartes a l'arret (P-137). Jamais de
+// refus : une mission inconnue est IGNOREE (presence ordinaire), une mission
+// caduque des la pose (quete absente, metier absent, chef parti) est DEGRADEE
+// en Chasse -- le bot est deja en route, le service ne doit rien reemettre.
+// `finale` : presence `peupler` d'action `Q-` (ni etape, ni saut, ni `C-`).
+MissionLue LireMission(CoaDirCommande const& c, Player* bot, bool finale)
+{
+    MissionLue m;
+    if (c.texte.empty())
+        return m;
+    m.etat = "ignoree";
+    if (!finale)
+    {
+        m.raison = "pas_une_finale";
+        return m;
+    }
+    if (!sPlayerbotAIConfig.directeurMissions)
+    {
+        m.raison = "option_eteinte";
+        return m;
+    }
+    using M = CoaDirecteur::CoaDirMission;
+    M type = M::Aucune;
+    if (c.texte == "quete")
+        type = M::Quete;
+    else if (c.texte == "chasse")
+        type = M::Chasse;
+    else if (c.texte == "recolte")
+        type = M::Recolte;
+    else if (c.texte == "passage")
+        type = M::Passage;
+    else if (c.texte == "bande")
+        type = M::Bande;
+    if (type == M::Aucune || c.valeur < 0)
+    {
+        m.raison = "type_inconnu";
+        return m;
+    }
+    uint32 const param = static_cast<uint32>(c.valeur);
+    m.etat = "posee";
+    m.type = type;
+    m.param = param;
+    auto degrader = [&m](char const* raison)
+    {
+        m.type = M::Chasse;
+        m.param = 0;
+        m.etat = "degradee";
+        m.raison = raison;
+    };
+    if (type == M::Quete)
+    {
+        if (!param || !sObjectMgr->GetQuestTemplate(param) || bot->GetQuestStatus(param) != QUEST_STATUS_INCOMPLETE)
+            degrader("quete_absente");
+    }
+    else if (type == M::Recolte)
+    {
+        if ((param != METIER_HERBORISTERIE && param != METIER_MINAGE) || !bot->HasSkill(param))
+            degrader("sans_metier");
+    }
+    else if (type == M::Bande)
+    {
+        // Le chef : un bot qui porte une presence ACTIVE du MEME joueur, encore
+        // en route (etape, saut : il part juste avant son suiveur, d'ailleurs,
+        // et peut arriver apres lui) ou deja pose (finale). Pas de bande de
+        // bande, pas de bot chef de lui-meme. Le suivi recale le suiveur sur lui
+        // seulement une fois sa finale arrivee.
+        bool chef = false;
+        if (param && param != c.cible)
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = affectations.find(param);
+            chef = it != affectations.end() && it->second.a.finS > Maintenant() && it->second.a.presence &&
+                   !it->second.a.compagnon && it->second.joueur == c.joueur && it->second.a.mission != M::Bande;
+        }
+        if (!chef)
+            degrader("sans_chef");
+    }
+    else
+        m.param = 0;   // chasse, passage : sans parametre
+    return m;
+}
+
 // Verbes `reaffecter` et `alleger` (SPEC § 6) : meme effet cote jeu. Le bot
 // `cible` recoit le disque (carte, x, y, z, rayon) pour duree_s. Les controles
 // 6 a 9 sont ceux du § 4.4 puis du tableau « Controles propres » du § 6.3, dans
@@ -4293,6 +4482,14 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     nouvelle.a.chasseur = chasseur;
     if (compagnon)
         nouvelle.a.rayon = CoaDirecteur::COMPAGNON_MAX_YD;   // arrivee = dans la bande
+    // Missions (30/09) : la finale d'une presence seulement (`Q-`).
+    bool const finalePresence = presence && !compagnon && !saut && !nouvelle.a.etape && c.action.size() > 2 &&
+                                c.action[0] == 'Q' && c.action[1] == '-';
+    MissionLue const mission = LireMission(c, bot, finalePresence);
+    nouvelle.a.mission = mission.type;
+    nouvelle.a.missionParam = mission.param;
+    if (mission.type == CoaDirecteur::CoaDirMission::Bande)
+        nouvelle.a.rayon = CoaDirecteur::BANDE_MAX_YD;       // arrivee = aupres du chef
     nouvelle.verbe = c.verbe;
     nouvelle.origine = c.origine;
     nouvelle.guid = c.cible;
@@ -4385,6 +4582,18 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_CHASSEURS);
         LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=pose etape={} remplace={}", c.cible,
                  c.joueur, c.id, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0);
+    }
+    if (mission.etat)
+    {
+        CoaDirecteur::Compter(mission.type == CoaDirecteur::CoaDirMission::Aucune ? CoaDirecteur::COA_DIR_MISSIONS_IGNOREES
+                                                                                  : CoaDirecteur::COA_DIR_MISSIONS);
+        if (std::strcmp(mission.etat, "degradee") == 0)
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MISSIONS_DEGRADEES);
+        LOG_INFO("playerbots",
+                 "coa directeur mission: id={} guid={} joueur={} type={} param={} demande={} etat={} raison={}"
+                 " rayon={:.0f}",
+                 c.id, c.cible, c.joueur, NomMission(mission.type), mission.param, c.texte, mission.etat,
+                 mission.raison, nouvelle.a.rayon);
     }
     if (compagnon)
     {
@@ -4531,7 +4740,8 @@ void Bilan()
              " pactes={} teleports_caches={} sauts_remis_idle={} primes={} chasseurs={} primes_tombees={}"
              " primes_echues={} primes_levees={} proies_imposees={} traques_prime={} meute_permise={}"
              " morts_tracees={} morts_perdues={} primes_actives={} chasseurs_actifs={} teleports_lointains={}"
-             " paroles_hors_vue={}",
+             " paroles_hors_vue={} missions={} missions_ignorees={} missions_degradees={} patrouilles={}"
+             " bandes_recalees={} bandes_rejointes={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -4558,7 +4768,9 @@ void Bilan()
              Lire(COA_DIR_PROIES_IMPOSEES), Lire(COA_DIR_TRAQUES_PRIME), Lire(COA_DIR_MEUTE_PERMISE),
              Lire(COA_DIR_MORTS_TRACEES), Lire(COA_DIR_MORTS_PERDUES), nbPrimes.load(std::memory_order_relaxed),
              nbChasseurs.load(std::memory_order_relaxed), Lire(COA_DIR_TELEPORTS_LOINTAINS),
-             Lire(COA_DIR_PAROLES_HORS_VUE));
+             Lire(COA_DIR_PAROLES_HORS_VUE), Lire(COA_DIR_MISSIONS), Lire(COA_DIR_MISSIONS_IGNOREES),
+             Lire(COA_DIR_MISSIONS_DEGRADEES), Lire(COA_DIR_PATROUILLES), Lire(COA_DIR_BANDES_RECALEES),
+             Lire(COA_DIR_BANDES_REJOINTES));
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -5062,6 +5274,12 @@ bool CoaDirecteur::Pacte(uint32 botLow, uint32 uniteLow)
 
 bool CoaDirecteur::PointDApproche(Map* carte, Affectation const& a, float bx, float by, float& x, float& y, float& z)
 {
+    return PointPres(carte, a, bx, by, COMPAGNON_CIBLE_YD, x, y, z);
+}
+
+bool CoaDirecteur::PointPres(Map* carte, Affectation const& a, float bx, float by, float distance, float& x, float& y,
+                             float& z)
+{
     // Repli : le centre (le joueur, sol connu).
     x = a.x;
     y = a.y;
@@ -5076,8 +5294,8 @@ bool CoaDirecteur::PointDApproche(Map* carte, Affectation const& a, float bx, fl
     static constexpr float ECARTS[] = {0.0f, 0.61f, -0.61f, 1.22f, -1.22f};   // 0, +-35, +-70 degres
     for (float const e : ECARTS)
     {
-        float const px = a.x + COMPAGNON_CIBLE_YD * std::cos(cap + e);
-        float const py = a.y + COMPAGNON_CIBLE_YD * std::sin(cap + e);
+        float const px = a.x + distance * std::cos(cap + e);
+        float const py = a.y + distance * std::sin(cap + e);
         float sol = 0.0f;
         // Laisse de hauteur (P-145) : un sol a plus de 6 yd du joueur est un
         // autre etage (pont, rempart, terrain sous une ville) : essai perdu.
@@ -5176,7 +5394,8 @@ bool CoaDirecteur::TrajetLeveVers(uint32 guidLow, uint32 carte, float x, float y
 // Le centre lui-meme (repli) a passe la meme laisse a la pose : `sol_sous_structure`.
 
 CoaDirecteur::TirageDisque CoaDirecteur::TirerDansLeDisque(Map* carte, Affectation const& a, float& x, float& y,
-                                                          float& z, Position const* depuis, float distanceMax)
+                                                          float& z, Position const* depuis, float distanceMax,
+                                                          bool hauteurStricte)
 {
     TirageDisque t;
     // Repli : le centre, dont le sol a ete trouve a la pose (a.z).
@@ -5223,7 +5442,8 @@ CoaDirecteur::TirageDisque CoaDirecteur::TirerDansLeDisque(Map* carte, Affectati
         if (ecart > TIRAGE_ECART_Z)
         {
             // Revue P-145 : la sonde part de max(sol, a.z) + 50, pas de sol + 50.
-            if (ToitAuDessus(carte, px, py, sol, a.z) || ecart > TIRAGE_PENTE_MAX * r)
+            // Missions (30/09) : hauteur stricte, ni ciel ouvert ni pente douce.
+            if (hauteurStricte || ToitAuDessus(carte, px, py, sol, a.z) || ecart > TIRAGE_PENTE_MAX * r)
             {
                 ++t.refusesHauteur;
                 Compter(COA_DIR_TIRAGES_REFUSES_HAUTEUR);

@@ -232,6 +232,64 @@ bool StartRpgDoQuestAction::Execute(Event event)
     return false;
 }
 
+static POIInfo const* PoiDeMission(CoaDirecteur::Affectation const& aff, std::vector<POIInfo> const& poiInfo);
+
+// Missions (30/09) : la quete de la mission, sur le point d'objectif le plus
+// proche du centre du disque (DoIncompleteQuest en tirerait un au hasard, peut-
+// etre a 1 500 yd : la laisse le ramenerait, et l'aller-retour recommencerait).
+// FAUX, sans rien changer, si la quete n'est plus incomplete (le fil monde la
+// degradera en Chasse), si le bot l'a mise de cote (lowPriorityQuest : 5 min
+// sans progres), ou si aucun point d'objectif restant n'est a portee de laisse :
+// le bot erre alors dans son disque au lieu de relancer une quete sans fin
+// (revue M1 : sans point, DoIncompleteQuest repassait a IDLE a chaque tick).
+bool NewRpgStatusUpdateAction::DemarrerQueteDeMission(CoaDirecteur::Affectation const& aff)
+{
+    uint32 const questId = aff.missionParam;
+    Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+    if (!quest || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE ||
+        botAI->lowPriorityQuest.count(questId))
+        return false;
+    std::vector<POIInfo> poiInfo;
+    if (!GetQuestPOIPosAndObjectiveIdx(questId, poiInfo) || poiInfo.empty())
+        return false;
+    POIInfo const* meilleur = PoiDeMission(aff, poiInfo);
+    if (!meilleur)
+        return false;
+    float const dz = std::max(bot->GetMap()->GetHeight(meilleur->pos.x, meilleur->pos.y, MAX_HEIGHT),
+                              bot->GetMap()->GetWaterLevel(meilleur->pos.x, meilleur->pos.y));
+    if (dz == INVALID_HEIGHT || dz == VMAP_INVALID_HEIGHT_VALUE)
+        return false;
+    botAI->rpgInfo.ChangeToDoQuest(questId, quest);
+    if (auto* data = std::get_if<NewRpgInfo::DoQuest>(&botAI->rpgInfo.data))
+    {
+        data->pos = WorldPosition(bot->GetMapId(), meilleur->pos.x, meilleur->pos.y, dz);
+        data->objectiveIdx = meilleur->objectiveIdx;
+        data->lastReachPOI = 0;
+    }
+    return true;
+}
+
+// Missions : le point d'objectif le plus proche du centre de l'affectation, s'il
+// est a portee de laisse (rayon + MISSION_LAISSE_MARGE_YD) ; sinon nul.
+static POIInfo const* PoiDeMission(CoaDirecteur::Affectation const& aff, std::vector<POIInfo> const& poiInfo)
+{
+    POIInfo const* meilleur = nullptr;
+    float meilleurD2 = 0.0f;
+    for (POIInfo const& p : poiInfo)
+    {
+        float const ex = p.pos.x - aff.x;
+        float const ey = p.pos.y - aff.y;
+        float const d2 = ex * ex + ey * ey;
+        if (!meilleur || d2 < meilleurD2)
+        {
+            meilleur = &p;
+            meilleurD2 = d2;
+        }
+    }
+    float const bout = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+    return meilleur && meilleurD2 <= bout * bout ? meilleur : nullptr;
+}
+
 bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
 {
     NewRpgInfo& info = botAI->rpgInfo;
@@ -372,33 +430,68 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
     // centre (0 : pas de laisse), meme geste que la laisse de trajet, chez le
     // meme proprietaire de rpgInfo (P-134). Sans affectation : un chargement
     // atomique.
-    if (uint32 const laisse = sPlayerbotAIConfig.directeurPresenceLaisseYd)
+    // Missions (30/09, option Directeur.Missions) : un bot EN MISSION tient une
+    // laisse centree sur sa mission, rayon + MISSION_LAISSE_MARGE_YD (et non plus
+    // PresenceLaisseYd, 110 yd en service : il allait chercher son camp ou sa
+    // quete lointaine, puis revenait) ; un suiveur de BANDE, BANDE_MAX_YD de son
+    // chef (le centre, recale par le fil monde), et il le rejoint a
+    // BANDE_CIBLE_YD. Option allumee, TOUTE laisse de sejour d'une presence tire
+    // a plat (+-6 yd du centre : mesure du 30/09, points a z + 40 en plaine).
     {
+        uint32 const laisse = sPlayerbotAIConfig.directeurPresenceLaisseYd;
+        bool const missions = sPlayerbotAIConfig.directeurMissions;
         CoaDirecteur::Affectation aff;
-        if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.presence &&
+        if ((laisse || missions) && CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.presence &&
             aff.phase == CoaDirecteur::CoaDirPhase::Sejour && aff.carte == bot->GetMapId() && !bot->IsInFlight())
         {
+            bool const enMission = missions && aff.mission != CoaDirecteur::CoaDirMission::Aucune;
+            bool const bande = enMission && aff.mission == CoaDirecteur::CoaDirMission::Bande;
             float const dx = bot->GetPositionX() - aff.x;
             float const dy = bot->GetPositionY() - aff.y;
             auto const* allerA = std::get_if<NewRpgInfo::GoGrind>(&info.data);
-            bool const dejaVersLeDisque =
-                allerA && CoaDirecteur::DansLeDisque(aff, allerA->pos.GetMapId(), allerA->pos.GetPositionX(),
-                                                     allerA->pos.GetPositionY());
+            // Deja en route vers le lieu : un GO_GRIND dans le disque (bande : a
+            // BANDE_MAX_YD du chef ACTUEL, il a pu bouger depuis le tirage).
+            bool dejaVersLeDisque = false;
+            if (allerA && allerA->pos.GetMapId() == aff.carte)
+            {
+                float const gx = allerA->pos.GetPositionX() - aff.x;
+                float const gy = allerA->pos.GetPositionY() - aff.y;
+                float const r = bande ? CoaDirecteur::BANDE_MAX_YD : aff.rayon;
+                dejaVersLeDisque = gx * gx + gy * gy <= r * r;
+            }
             // Jamais plus courte que le rayon : un point tire dans un disque plus
             // large que la laisse la redeclencherait a chaque arrivee.
-            float const bout = std::max(static_cast<float>(laisse), aff.rayon);
-            if (dx * dx + dy * dy > bout * bout && !dejaVersLeDisque)
+            float bout = std::max(static_cast<float>(laisse), aff.rayon);
+            // Bande (revue M2) : BANDE_LAISSE_YD, au-dela de la cible (BANDE_CIBLE_YD)
+            // + le seuil d'arrivee de GO_GRIND (10 yd) : pas de relance en boucle.
+            if (enMission)
+                bout = bande ? CoaDirecteur::BANDE_LAISSE_YD : aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+            if ((laisse || enMission) && dx * dx + dy * dy > bout * bout && !dejaVersLeDisque)
             {
                 float x = aff.x, y = aff.y, z = aff.z;
-                CoaDirecteur::TirageDisque const t = CoaDirecteur::TirerDansLeDisque(bot->GetMap(), aff, x, y, z);
+                CoaDirecteur::TirageDisque t;
+                if (!bande || !CoaDirecteur::PointPres(bot->GetMap(), aff, bot->GetPositionX(), bot->GetPositionY(),
+                                                       CoaDirecteur::BANDE_CIBLE_YD, x, y, z))
+                    t = CoaDirecteur::TirerDansLeDisque(bot->GetMap(), aff, x, y, z, nullptr, 0.0f, missions);
+                else
+                    t.repli = false;
                 info.ChangeToGoGrind(WorldPosition(aff.carte, x, y, z));
-                LOG_INFO("playerbots",
-                         "coa directeur laisse: guid={} id={} x={:.1f} y={:.1f} z={:.1f} centre_z={:.1f} essais={}"
-                         " refus_hauteur={} repli={} sejour=1",
-                         bot->GetGUID().GetCounter(), aff.id, x, y, z, aff.z, t.essais, t.refusesHauteur,
-                         t.repli ? 1 : 0);
                 if (bot->getStandState() != UNIT_STAND_STATE_STAND)
                     bot->SetStandState(UNIT_STAND_STATE_STAND);
+                // Bande (revue M2) : rejoindre son chef n'est pas une laisse ; ni
+                // la ligne `laisse:` ni `laisses_presence` ne la comptent.
+                if (bande)
+                {
+                    LOG_DEBUG("playerbots", "coa directeur bande: guid={} id={} chef={} x={:.1f} y={:.1f}",
+                              bot->GetGUID().GetCounter(), aff.id, aff.missionParam, x, y);
+                    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_BANDES_REJOINTES);
+                    return true;
+                }
+                LOG_INFO("playerbots",
+                         "coa directeur laisse: guid={} id={} x={:.1f} y={:.1f} z={:.1f} centre_z={:.1f} essais={}"
+                         " refus_hauteur={} repli={} sejour=1 mission={}",
+                         bot->GetGUID().GetCounter(), aff.id, x, y, z, aff.z, t.essais, t.refusesHauteur,
+                         t.repli ? 1 : 0, enMission ? static_cast<uint32>(aff.mission) : 0u);
                 CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LAISSES_PRESENCE);
                 return true;
             }
@@ -439,6 +532,19 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
             if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.etape &&
                 aff.phase == CoaDirecteur::CoaDirPhase::Trajet && aff.carte == bot->GetMapId())
                 return RandomChangeStatus({RPG_WANDER_RANDOM, RPG_REST});
+            // Missions (30/09) : EN SEJOUR, un bot en mission ne tire que ce qui le
+            // garde au lieu : sa quete (le point d'objectif le plus proche du
+            // centre), sinon errance dans le disque (NewRpgWanderRandomAction, a
+            // plat) ou repos. Ni camp, ni grind lointain, ni vol, ni PvP exterieur :
+            // c'etaient eux, les allers-retours (58 laisses en 20 min, 30/09).
+            if (sPlayerbotAIConfig.directeurMissions && CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
+                aff.presence && aff.phase == CoaDirecteur::CoaDirPhase::Sejour &&
+                aff.mission != CoaDirecteur::CoaDirMission::Aucune && aff.carte == bot->GetMapId())
+            {
+                if (aff.mission == CoaDirecteur::CoaDirMission::Quete && DemarrerQueteDeMission(aff))
+                    return true;
+                return RandomChangeStatus({RPG_WANDER_RANDOM, RPG_REST});
+            }
             return RandomChangeStatus({RPG_GO_CAMP, RPG_GO_GRIND, RPG_WANDER_RANDOM, RPG_WANDER_NPC, RPG_DO_QUEST,
                                        RPG_TRAVEL_FLIGHT, RPG_REST, RPG_OUTDOOR_PVP});
         }
@@ -586,8 +692,37 @@ bool NewRpgWanderRandomAction::Execute(Event /*event*/)
     // garde la recherche de quetes du binaire D2. Sans affectation : un
     // chargement atomique, puis le code d'origine.
     CoaDirecteur::Affectation aff;
-    if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.etape &&
-        aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
+    bool const affecte = CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff);
+    // Missions (30/09) : EN SEJOUR, un bot en mission erre DANS son disque, vers
+    // un point a plat (+-6 yd du centre), pas au hasard autour de lui : les pas
+    // de 20-50 yd de MoveRandomNear le menaient au flanc de la colline. Pas de
+    // recherche de donneur de quete (il irait au camp). Aucun point : un petit
+    // pas, comme d'origine.
+    if (affecte && sPlayerbotAIConfig.directeurMissions && aff.presence &&
+        aff.phase == CoaDirecteur::CoaDirPhase::Sejour && aff.mission != CoaDirecteur::CoaDirMission::Aucune &&
+        aff.carte == bot->GetMapId())
+    {
+        if (IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL))
+            return false;
+        float x = aff.x, y = aff.y, z = aff.z;
+        CoaDirecteur::Affectation disque = aff;
+        if (aff.mission == CoaDirecteur::CoaDirMission::Bande)
+            disque.rayon = CoaDirecteur::BANDE_MAX_YD;   // autour du chef
+        CoaDirecteur::TirageDisque const t =
+            CoaDirecteur::TirerDansLeDisque(bot->GetMap(), disque, x, y, z, nullptr, 0.0f, true);
+        // Repli (aucun point a plat) : le centre lui-meme, sol connu a la pose,
+        // plutot qu'un pas au hasard qui, en pente, le ferait monter (revue m2).
+        if (bot->GetExactDist2d(x, y) > 5.0f &&
+            MoveTo(bot->GetMapId(), x, y, z, false, false, false, true, MovementPriority::MOVEMENT_NORMAL))
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PATROUILLES);
+            return true;
+        }
+        if (!t.repli)
+            return false;   // deja au point tire : il attend le tick suivant
+        return MoveRandomNear(10.0f);
+    }
+    if (affecte && aff.etape && aff.phase == CoaDirecteur::CoaDirPhase::Trajet)
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_QUETES_TRAJET_EVITEES);
     else if (SearchQuestGiverAndAcceptOrReward())
         return true;
@@ -712,6 +847,26 @@ bool NewRpgDoQuestAction::DoIncompleteQuest(NewRpgInfo::DoQuest& data)
             return true;
         }
         uint32 rndIdx = urand(0, poiInfo.size() - 1);
+        // CoA -- Directeur, missions (30/09, revue M1) : un bot en mission QUETE
+        // sur CETTE quete, en sejour, prend le point le plus proche du centre de
+        // sa mission, a portee de laisse ; aucun : IDLE (il errera dans son
+        // disque). Sans affectation : un chargement atomique, puis le tirage.
+        {
+            CoaDirecteur::Affectation aff;
+            if (sPlayerbotAIConfig.directeurMissions && CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
+                aff.presence && aff.phase == CoaDirecteur::CoaDirPhase::Sejour &&
+                aff.mission == CoaDirecteur::CoaDirMission::Quete && aff.missionParam == questId &&
+                aff.carte == bot->GetMapId())
+            {
+                POIInfo const* p = PoiDeMission(aff, poiInfo);
+                if (!p)
+                {
+                    botAI->rpgInfo.ChangeToIdle();
+                    return true;
+                }
+                rndIdx = static_cast<uint32>(p - poiInfo.data());
+            }
+        }
         G3D::Vector2 nearestPoi = poiInfo[rndIdx].pos;
         int32 objectiveIdx = poiInfo[rndIdx].objectiveIdx;
 
@@ -795,6 +950,23 @@ bool NewRpgDoQuestAction::DoCompletedQuest(NewRpgInfo::DoQuest& data)
 {
     uint32 questId = data.questId;
     Quest const* quest = data.quest;
+
+    // CoA -- Directeur, missions (30/09, revue 2, m2) : un bot EN MISSION, en
+    // sejour de presence, ne part pas rendre sa quete au donneur (jusqu'a
+    // 1 500 yd : une laisse de plus, puis l'aller-retour). Il reste au lieu
+    // (le fil monde degrade la mission en Chasse) ; il la rendra a la fin de
+    // sa presence, par son RPG ordinaire. Sans affectation : un chargement
+    // atomique, puis le code d'origine.
+    {
+        CoaDirecteur::Affectation aff;
+        if (sPlayerbotAIConfig.directeurMissions && CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
+            aff.presence && aff.phase == CoaDirecteur::CoaDirPhase::Sejour &&
+            aff.mission != CoaDirecteur::CoaDirMission::Aucune)
+        {
+            botAI->rpgInfo.ChangeToIdle();
+            return true;
+        }
+    }
 
     if (data.objectiveIdx != -1)
     {
