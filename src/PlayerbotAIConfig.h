@@ -447,6 +447,14 @@ public:
     // Teleportation cachee (27/09) : presence `T-` teleportee hors de la vue du
     // joueur ; eteinte par defaut (une `T-` est alors refusee `teleport_eteint`).
     bool directeurTeleportCache;
+    // Saut lointain (30/09) : presence `L-` teleportee a 250-350 yd du joueur, hors
+    // de sa portee de vue (100 yd), sans exiger la ligne de vue coupee ; eteint par
+    // defaut (une `L-` est alors refusee `lointain_eteint`). Exige TeleportCache.
+    bool directeurTeleportLointain;
+    // Paroles (30/09) : `dire`/`crier` differes tant que le joueur n'a pas le
+    // locuteur a son client (au plus 60 s, puis `perdue hors_vue`) ; eteint par
+    // defaut (la parole part comme avant, la ligne dit `vu=0`).
+    bool directeurParoleAVue;
     // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
     // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
     // eteint par defaut (les crochets de mort rendent la main au premier test).

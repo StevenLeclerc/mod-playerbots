@@ -3454,6 +3454,28 @@ AiPlayerbot.Directeur.Compagnons = 0
 #        Default: 0
 AiPlayerbot.Directeur.TeleportCache = 0
 
+#    AiPlayerbot.Directeur.TeleportLointain
+#        peupler, saut lointain (30/09) : une presence d'action `L-<n>` TELEPORTE le bot sur un point de
+#        son disque a 250-350 yd du joueur demandeur, SANS exiger que la ligne de vue soit coupee : la
+#        distance seule garantit (Visibility.Distance.Continents = 100 yd : le client ne recoit aucun
+#        objet au-dela). Toutes les autres gardes de TeleportCache restent (sol sec, ciel ouvert, point
+#        relie au centre, aucun humain ni point de vue a moins de 150 yd du point ni du bot au depart,
+#        Wintergrasp, un saut par bot en 15 min). Le service ne l'emet qu'apres un refus `sans_cache`
+#        (plaine sans relief). Exige TeleportCache = 1 et Etapes = 1. Refus : `sans_point` (aucun sol
+#        sur). A 0 : `L-` refusee `lointain_eteint`, rien ne change.
+#        Default: 0
+AiPlayerbot.Directeur.TeleportLointain = 0
+
+#    AiPlayerbot.Directeur.ParoleAVue
+#        faire_parler (30/09) : `dire` et `crier` ne sont entendus que d'un joueur qui a le locuteur a
+#        son client, donc a au plus Visibility.Distance.Continents (100 yd), quel que soit
+#        ListenRange.Yell (Player::Yell -> MessageDistDeliverer::SendPacket, HaveAtClient). A 1, une
+#        parole dont le joueur n'a pas le locuteur a son client ATTEND (au plus 60 s apres son heure),
+#        puis est perdue `hors_vue`. A 0 : dite comme avant ; la ligne `coa directeur parole:` porte
+#        dans les deux cas `distance=` et `vu=`.
+#        Default: 0
+AiPlayerbot.Directeur.ParoleAVue = 0
+
 #
 #    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
 #

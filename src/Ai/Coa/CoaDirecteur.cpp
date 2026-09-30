@@ -2115,6 +2115,21 @@ constexpr float SAUT_CHAMP_RAD = 2.0f * float(M_PI) / 3.0f;   // 120 degres deva
 std::unordered_map<uint32, uint32> sautsFaits;    // guid bas du bot -> Maintenant() du saut
 constexpr float SAUT_WINTERGRASP_MARGE_YD = 300.0f;
 
+// Saut LOINTAIN (30/09, option AiPlayerbot.Directeur.TeleportLointain, defaut 0) :
+// une presence d'action `L-<n>`, que le service n'emet qu'apres un `sans_cache`
+// (plaine nue, demande 47 du 30/09 aux Tarides : 4 refus sur 4). Le point est a
+// SAUT_LOINTAIN_MIN_YD-SAUT_LOINTAIN_MAX_YD du demandeur et n'a PAS a etre cache :
+// seule la distance garantit. Visibility.Distance.Continents = 100 yd (lu dans
+// worldserver.conf en service le 30/09) : le client ne recoit aucun objet au-dela
+// (WorldObject::CanSeeOrDetect -> IsWithinSightRange(GetSightRange), Object.cpp),
+// et 250 yd laissent 150 yd de marge au joueur qui avance vers le point. Toutes
+// les autres gardes du saut cache restent : sol sec, ciel ouvert (ToitAuDessus,
+// P-145), point relie au centre, aucun humain ni point de vue (HumainProcheSauf,
+// oeil de lynx compris) a SAUT_HUMAIN_YD, depart hors de vue, Wintergrasp, un saut
+// par bot en SAUT_REPOS_S.
+constexpr float SAUT_LOINTAIN_MIN_YD = 250.0f;
+constexpr float SAUT_LOINTAIN_MAX_YD = 350.0f;
+
 // Revue du 27/09 (M1) : a Wintergrasp un joueur voit a 175 yd
 // (VISIBILITY_DIST_WINTERGRASP, Object.cpp), pas a 100 : la marge de 150 yd ne
 // tient plus. Meme boite que WorldObject::IsInWintergrasp (Object.h), elargie
@@ -2168,6 +2183,9 @@ bool CacheAuJoueur(Map* map, Player* joueur, float x, float y, float sol)
 // +-6 yd du sol du centre (P-132, fenetre de P-145), sous le ciel ouvert
 // (ToitAuDessus, P-145 : jamais sous une ville), aucun humain a SAUT_HUMAIN_YD,
 // cache au joueur. Deux passes : hors de son champ d'abord, puis partout.
+// `lointain` (saut `L-`, 30/09) : a SAUT_LOINTAIN_MIN_YD-SAUT_LOINTAIN_MAX_YD du
+// joueur, et la ligne de vue n'est PAS jugee (la distance seule garantit) ; tout
+// le reste est identique.
 // -> essais faits ; `trouve` faux : aucun point.
 struct PointSaut
 {
@@ -2176,8 +2194,11 @@ struct PointSaut
     bool dansLeChamp = false;
     uint8 essais = 0;
 };
-PointSaut ChercherPointCache(Map* map, Player* joueur, float cx, float cy, float solCentre, float rayon)
+PointSaut ChercherPointCache(Map* map, Player* joueur, float cx, float cy, float solCentre, float rayon,
+                             bool lointain = false)
 {
+    float const dMin = lointain ? SAUT_LOINTAIN_MIN_YD : SAUT_JOUEUR_MIN_YD;
+    float const dMax = lointain ? SAUT_LOINTAIN_MAX_YD : SAUT_JOUEUR_MAX_YD;
     PointSaut r;
     std::vector<std::pair<float, float>> pts{{cx, cy}};
     for (float f : {0.5f, 0.9f})
@@ -2192,7 +2213,12 @@ PointSaut ChercherPointCache(Map* map, Player* joueur, float cx, float cy, float
         {
             float const jx = px - joueur->GetPositionX(), jy = py - joueur->GetPositionY();
             float const dj = std::sqrt(jx * jx + jy * jy);
-            if (dj < SAUT_JOUEUR_MIN_YD || dj > SAUT_JOUEUR_MAX_YD)
+            if (dj < dMin || dj > dMax)
+                continue;
+            // Revue du 30/09 (m3) : un point lointain peut etre jusqu'a 350 yd du joueur,
+            // donc dans la boite de Wintergrasp (visibilite 175 yd > SAUT_HUMAIN_YD) meme si
+            // bot et joueur en sont a plus de 300 yd : le point lui-meme est teste.
+            if (lointain && PresDeWintergrasp(map->GetId(), px, py))
                 continue;
             Position const p(px, py, solCentre);
             bool const champ = joueur->HasInArc(SAUT_CHAMP_RAD, &p);
@@ -2220,7 +2246,7 @@ PointSaut ChercherPointCache(Map* map, Player* joueur, float cx, float cy, float
             }
             if (HumainProcheSauf(WorldPosition(map->GetId(), px, py, sol), map->GetId(), SAUT_HUMAIN_YD, 0))
                 continue;
-            if (!CacheAuJoueur(map, joueur, px, py, sol))
+            if (!lointain && !CacheAuJoueur(map, joueur, px, py, sol))
                 continue;
             r.x = px;
             r.y = py;
@@ -2338,6 +2364,7 @@ struct Parole
     std::string texte;
     uint32 poseMs;     // getMSTime() a l'execution de la commande
     uint32 delaiMs;    // livraison au plus tot a poseMs + delaiMs
+    bool horsVue = false;   // ParoleAVue : deja differee une fois (compteur paroles_hors_vue)
 };
 std::vector<Parole> paroles;                           // fil monde seul
 std::deque<uint32> parolesAcceptees;                   // getMSTime des paroles acceptees, 60 s glissantes
@@ -2427,15 +2454,22 @@ void ExecuterParole(CoaDirCommande const& c)
     }
     parolesAcceptees.push_back(maintenantMs);
     derniereParoleBot[c.cible] = maintenantMs;
-    paroles.push_back(Parole{c.id, c.cible, c.joueur, c.canal, c.texte, maintenantMs, c.delaiS * IN_MILLISECONDS});
+    paroles.push_back(Parole{c.id, c.cible, c.joueur, c.canal, c.texte, maintenantMs, c.delaiS * IN_MILLISECONDS, false});
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Accuser(c, "execute", nullptr);
 }
 
-void JournaliserParole(Parole const& p, char const* statut, char const* raison)
+// `distance` : du locuteur au joueur a la livraison, -1 si inconnue (l'un des
+// deux absent, ou autre carte). `vu` : le joueur a-t-il le locuteur a son client
+// (Player::HaveAtClient) ? Say et Yell ne livrent qu'a ceux-la
+// (MessageDistDeliverer::SendPacket, GridNotifiers.h), donc au plus a la
+// visibilite (Visibility.Distance.Continents = 100 yd en service, lu le 30/09),
+// quel que soit ListenRange.Yell (300) : `livree vu=0` = dite, pas entendue.
+void JournaliserParole(Parole const& p, char const* statut, char const* raison, float distance = -1.0f,
+                       int vu = -1)
 {
-    LOG_INFO("playerbots", "coa directeur parole: id={} guid={} joueur={} canal={} statut={} raison={}", p.id, p.bot,
-             p.joueur, NomCanal(p.canal), statut, raison ? raison : "-");
+    LOG_INFO("playerbots", "coa directeur parole: id={} guid={} joueur={} canal={} statut={} raison={} distance={:.0f}"
+             " vu={}", p.id, p.bot, p.joueur, NomCanal(p.canal), statut, raison ? raison : "-", distance, vu);
 }
 
 // Canal de zone du bot, cherche COMME PlayerbotAI::SayToChannel (id
@@ -2488,6 +2522,9 @@ void LivrerParoles()
         Player* bot = ObjectAccessor::FindPlayerByLowGUID(p.bot);
         Player* joueur = ObjectAccessor::FindPlayerByLowGUID(p.joueur);
         PlayerbotAI* ia = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
+        bool const memeCarte = bot && joueur && bot->GetMapId() == joueur->GetMapId();
+        float const distance = memeCarte ? bot->GetExactDist(joueur) : -1.0f;
+        int const vu = (bot && joueur) ? (memeCarte && joueur->HaveAtClient(bot) ? 1 : 0) : -1;
         if (!bot || !ia)
             perdue = "locuteur_absent";
         else if (!joueur)
@@ -2507,20 +2544,39 @@ void LivrerParoles()
             }
             perdue = "indisponible";
         }
+        // 30/09 (demande 43) : `dire` et `crier` ne sont entendus que d'un joueur qui a le
+        // locuteur a son client (vu, plus haut). Option ParoleAVue : sinon la parole
+        // ATTEND (le locuteur ou le joueur peut encore s'approcher), au plus
+        // PAROLE_GRACE_MS apres son heure, puis `perdue raison=hors_vue`. Option a 0 :
+        // comme avant (dite, `livree vu=0`).
+        bool const aPortee = memeCarte && distance <= (p.canal == CoaDirCanal::Dire ? PAROLE_DIRE_YD : PAROLE_CRIER_YD);
+        if (!perdue && sPlayerbotAIConfig.directeurParoleAVue && aPortee && vu != 1 &&
+            (p.canal == CoaDirCanal::Dire || p.canal == CoaDirCanal::Crier))
+        {
+            if (!p.horsVue)
+            {
+                p.horsVue = true;
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAROLES_HORS_VUE);
+            }
+            if (ecoule < p.delaiMs + PAROLE_GRACE_MS)
+            {
+                restantes.push_back(std::move(p));
+                continue;
+            }
+            perdue = "hors_vue";
+        }
         if (!perdue)
         {
-            bool const memeCarte = bot->GetMapId() == joueur->GetMapId();
-            float const distance = memeCarte ? bot->GetExactDist(joueur) : 1e9f;
             switch (p.canal)
             {
                 case CoaDirCanal::Dire:
-                    if (distance > PAROLE_DIRE_YD)
+                    if (!memeCarte || distance > PAROLE_DIRE_YD)
                         perdue = "loin";
                     else
                         ia->Say(p.texte);
                     break;
                 case CoaDirCanal::Crier:
-                    if (distance > PAROLE_CRIER_YD)
+                    if (!memeCarte || distance > PAROLE_CRIER_YD)
                         perdue = "loin";
                     else
                         ia->Yell(p.texte);
@@ -2558,12 +2614,12 @@ void LivrerParoles()
         if (perdue)
         {
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAROLES_PERDUES);
-            JournaliserParole(p, "perdue", perdue);
+            JournaliserParole(p, "perdue", perdue, distance, vu);
         }
         else
         {
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAROLES_LIVREES);
-            JournaliserParole(p, "livree", reserve);
+            JournaliserParole(p, "livree", reserve, distance, vu);
         }
     }
     // Une commande executee pendant la boucle ? Impossible : on est dans
@@ -3788,10 +3844,21 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     }
     // Teleportation cachee (27/09) : un peupler d'action `T-<n>`, qui est une
     // ETAPE (le bot saute puis attend l'etape suivante) : les deux options.
-    bool const saut = presence && c.action.size() > 2 && c.action[0] == 'T' && c.action[1] == '-';
+    bool const sautCache = presence && c.action.size() > 2 && c.action[0] == 'T' && c.action[1] == '-';
+    // Saut lointain (30/09) : action `L-<n>`, memes controles que la `T-` sauf la
+    // ligne de vue, et des bornes a 250-350 yd du joueur. Exige en plus
+    // Directeur.TeleportLointain ; eteinte : refus `lointain_eteint` (le service
+    // fait alors marcher le bot).
+    bool const sautLointain = presence && c.action.size() > 2 && c.action[0] == 'L' && c.action[1] == '-';
+    bool const saut = sautCache || sautLointain;
     if (saut && (!sPlayerbotAIConfig.directeurTeleportCache || !sPlayerbotAIConfig.directeurEtapes))
     {
         Refuser(c, "teleport_eteint");
+        return;
+    }
+    if (sautLointain && !sPlayerbotAIConfig.directeurTeleportLointain)
+    {
+        Refuser(c, "lointain_eteint");
         return;
     }
     Player* demandeur = nullptr;   // presence : le joueur qui a demande, lu ici (fil monde)
@@ -3909,8 +3976,11 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         // pu bouger depuis). Le suivi le recale ensuite chaque seconde.
         // Teleportation cachee : le centre a SAUT_JOUEUR_MIN_YD-SAUT_JOUEUR_MAX_YD
         // du joueur (chaque point essaye l'est aussi, ChercherPointCache).
+        // Saut lointain : SAUT_LOINTAIN_MIN_YD-SAUT_LOINTAIN_MAX_YD, de meme.
         bool const horsBornes = compagnon
             ? centreJoueur > 1.0f   // le centre vient d'etre pris sur le joueur (plus haut)
+            : sautLointain ? (centreJoueur < SAUT_LOINTAIN_MIN_YD * SAUT_LOINTAIN_MIN_YD ||
+                              centreJoueur > SAUT_LOINTAIN_MAX_YD * SAUT_LOINTAIN_MAX_YD)
             : saut ? (centreJoueur < SAUT_JOUEUR_MIN_YD * SAUT_JOUEUR_MIN_YD ||
                       centreJoueur > SAUT_JOUEUR_MAX_YD * SAUT_JOUEUR_MAX_YD)
                    : (centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD ||
@@ -4149,12 +4219,15 @@ void ExecuterAffectation(CoaDirCommande const& recue)
                 return;
             }
         }
-        point = ChercherPointCache(map, demandeur, c.x, c.y, sol, c.rayon);
+        point = ChercherPointCache(map, demandeur, c.x, c.y, sol, c.rayon, sautLointain);
         if (!point.trouve)
         {
-            LOG_INFO("playerbots", "coa directeur teleport_cache: id={} guid={} joueur={} refus=sans_cache essais={}",
-                     c.id, c.cible, c.joueur, point.essais);
-            Refuser(c, "sans_cache");
+            // `sans_point` pour un saut lointain : aucun sol sur a 250-350 yd (le
+            // service compte les `sans_cache` a part, pour couper le saut cache).
+            char const* refus = sautLointain ? "sans_point" : "sans_cache";
+            LOG_INFO("playerbots", "coa directeur teleport_cache: id={} guid={} joueur={} refus={} essais={} mode={}",
+                     c.id, c.cible, c.joueur, refus, point.essais, sautLointain ? "lointain" : "cache");
+            Refuser(c, refus);
             return;
         }
         float const departX = bot->GetPositionX(), departY = bot->GetPositionY();
@@ -4175,12 +4248,14 @@ void ExecuterAffectation(CoaDirCommande const& recue)
             for (auto it = sautsFaits.begin(); it != sautsFaits.end();)
                 it = Maintenant() >= it->second + SAUT_REPOS_S ? sautsFaits.erase(it) : std::next(it);
         sautsFaits[c.cible] = Maintenant();
-        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_CACHES);
+        CoaDirecteur::Compter(sautLointain ? CoaDirecteur::COA_DIR_TELEPORTS_LOINTAINS
+                                           : CoaDirecteur::COA_DIR_TELEPORTS_CACHES);
         LOG_INFO("playerbots",
                  "coa directeur teleport_cache: id={} guid={} joueur={} de_x={:.1f} de_y={:.1f} a_x={:.1f} a_y={:.1f}"
-                 " a_z={:.1f} distance_joueur={:.0f} depart_joueur={:.0f} dans_le_champ={} essais={}",
+                 " a_z={:.1f} distance_joueur={:.0f} depart_joueur={:.0f} dans_le_champ={} essais={} mode={}",
                  c.id, c.cible, c.joueur, departX, departY, point.x, point.y, point.z, std::sqrt(px * px + py * py),
-                 std::sqrt(vx * vx + vy * vy), point.dansLeChamp ? 1 : 0, point.essais);
+                 std::sqrt(vx * vx + vy * vy), point.dansLeChamp ? 1 : 0, point.essais,
+                 sautLointain ? "lointain" : "cache");
     }
 
     uint32 const maintenant = Maintenant();
@@ -4455,7 +4530,8 @@ void Bilan()
              " paroles_en_file={} ciels_actifs={} meteos_actives={} compagnons={} approches={} ecartes_pacte={}"
              " pactes={} teleports_caches={} sauts_remis_idle={} primes={} chasseurs={} primes_tombees={}"
              " primes_echues={} primes_levees={} proies_imposees={} traques_prime={} meute_permise={}"
-             " morts_tracees={} morts_perdues={} primes_actives={} chasseurs_actifs={}",
+             " morts_tracees={} morts_perdues={} primes_actives={} chasseurs_actifs={} teleports_lointains={}"
+             " paroles_hors_vue={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -4481,7 +4557,8 @@ void Bilan()
              Lire(COA_DIR_PRIMES_TOMBEES), Lire(COA_DIR_PRIMES_ECHUES), Lire(COA_DIR_PRIMES_LEVEES),
              Lire(COA_DIR_PROIES_IMPOSEES), Lire(COA_DIR_TRAQUES_PRIME), Lire(COA_DIR_MEUTE_PERMISE),
              Lire(COA_DIR_MORTS_TRACEES), Lire(COA_DIR_MORTS_PERDUES), nbPrimes.load(std::memory_order_relaxed),
-             nbChasseurs.load(std::memory_order_relaxed));
+             nbChasseurs.load(std::memory_order_relaxed), Lire(COA_DIR_TELEPORTS_LOINTAINS),
+             Lire(COA_DIR_PAROLES_HORS_VUE));
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)

@@ -366,6 +366,9 @@ enum CoaDirCompteur : uint8
     COA_DIR_MEUTE_PERMISE,           // candidats admis par la meute au-dela de MaxAttackersPerTarget
     COA_DIR_MORTS_TRACEES,           // lignes `coa directeur mort:` ecrites
     COA_DIR_MORTS_PERDUES,           // evenements de mort perdus (file pleine)
+    // 30/09, en fin de la ligne bilan :
+    COA_DIR_TELEPORTS_LOINTAINS,     // presences `L-` posees : bot teleporte a 250-350 yd du joueur
+    COA_DIR_PAROLES_HORS_VUE,        // dire/crier differes : le joueur n'a pas le locuteur a son client
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);
