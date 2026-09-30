@@ -3919,6 +3919,33 @@ MissionLue LireMission(CoaDirCommande const& c, Player* bot, bool finale)
     return m;
 }
 
+// Teleportation cachee et saut lointain : controles du DEPART, communs a une
+// presence `peupler` et a un chasseur `chasser` (01/10, D4h). Fil monde,
+// cartes a l'arret (P-137). -> le code de refus, ou nul.
+char const* RefusDepartSaut(uint32 cible, Player* bot, Player* joueur, PlayerbotAI* ia, bool dejaSaute)
+{
+    auto const fait = sautsFaits.find(cible);
+    if (dejaSaute || (fait != sautsFaits.end() && Maintenant() < fait->second + SAUT_REPOS_S))
+        return "deja_saute";
+    if (bot->IsInCombat())
+        return "combat";
+    if (!bot->IsInWorld() || bot->IsBeingTeleported())
+        return "en_teleportation";
+    if (!joueur->IsInWorld() || joueur->IsBeingTeleported() || !joueur->IsAlive())
+        return "joueur_indisponible";
+    if (PresDeWintergrasp(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY()) ||
+        PresDeWintergrasp(joueur->GetMapId(), joueur->GetPositionX(), joueur->GetPositionY()))
+        return "wintergrasp";
+    float const ox = bot->GetPositionX() - joueur->GetPositionX();
+    float const oy = bot->GetPositionY() - joueur->GetPositionY();
+    if (ox * ox + oy * oy < SAUT_DEPART_MIN_YD * SAUT_DEPART_MIN_YD)
+        return "trop_pres";
+    // Personne ne le voit disparaitre (tout humain, le demandeur compris).
+    if (ia->HasPlayerNearby(SAUT_HUMAIN_YD))
+        return "depart_a_vue";
+    return nullptr;
+}
+
 // Verbes `reaffecter` et `alleger` (SPEC § 6) : meme effet cote jeu. Le bot
 // `cible` recoit le disque (carte, x, y, z, rayon) pour duree_s. Les controles
 // 6 a 9 sont ceux du § 4.4 puis du tableau « Controles propres » du § 6.3, dans
@@ -4023,6 +4050,10 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     // en plus de ceux de `reaffecter`. Le joueur qui demande est lu ici, fil
     // monde, cartes a l'arret (P-137).
     bool const presence = c.verbe == CoaDirVerbe::Peupler;
+    // Lot D4c, verbe `chasser` (plus bas). D4h (01/10) : un chasseur SAUTE aussi
+    // (`T-`, `L-`), hors de la vue du joueur prime, puis finit a pied : assez
+    // loin pour que sa chasse (guet, traque, embuscade) ait de la place.
+    bool const chasseur = c.verbe == CoaDirVerbe::Chasser;
     // Compagnons (27/09) : un peupler d'action `C-<n>` (l'emetteur admet
     // `[A-Z]-\d+`). Option eteinte : refus explicite, rien d'autre ne change.
     bool const compagnon = presence && c.action.size() > 2 && c.action[0] == 'C' && c.action[1] == '-';
@@ -4033,12 +4064,12 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     }
     // Teleportation cachee (27/09) : un peupler d'action `T-<n>`, qui est une
     // ETAPE (le bot saute puis attend l'etape suivante) : les deux options.
-    bool const sautCache = presence && c.action.size() > 2 && c.action[0] == 'T' && c.action[1] == '-';
+    bool const sautCache = (presence || chasseur) && c.action.size() > 2 && c.action[0] == 'T' && c.action[1] == '-';
     // Saut lointain (30/09) : action `L-<n>`, memes controles que la `T-` sauf la
     // ligne de vue, et des bornes a 250-350 yd du joueur. Exige en plus
     // Directeur.TeleportLointain ; eteinte : refus `lointain_eteint` (le service
     // fait alors marcher le bot).
-    bool const sautLointain = presence && c.action.size() > 2 && c.action[0] == 'L' && c.action[1] == '-';
+    bool const sautLointain = (presence || chasseur) && c.action.size() > 2 && c.action[0] == 'L' && c.action[1] == '-';
     bool const saut = sautCache || sautLointain;
     if (saut && (!sPlayerbotAIConfig.directeurTeleportCache || !sPlayerbotAIConfig.directeurEtapes))
     {
@@ -4101,48 +4132,11 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         }
         // Teleportation cachee : controles du DEPART, avant tout calcul de point.
         if (saut)
-        {
-            auto const fait = sautsFaits.find(c.cible);
-            if (dejaSaute || (fait != sautsFaits.end() && Maintenant() < fait->second + SAUT_REPOS_S))
+            if (char const* refus = RefusDepartSaut(c.cible, bot, joueur, ia, dejaSaute))
             {
-                Refuser(c, "deja_saute");
+                Refuser(c, refus);
                 return;
             }
-            if (bot->IsInCombat())
-            {
-                Refuser(c, "combat");
-                return;
-            }
-            if (!bot->IsInWorld() || bot->IsBeingTeleported())
-            {
-                Refuser(c, "en_teleportation");
-                return;
-            }
-            if (!joueur->IsInWorld() || joueur->IsBeingTeleported() || !joueur->IsAlive())
-            {
-                Refuser(c, "joueur_indisponible");
-                return;
-            }
-            if (PresDeWintergrasp(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY()) ||
-                PresDeWintergrasp(joueur->GetMapId(), joueur->GetPositionX(), joueur->GetPositionY()))
-            {
-                Refuser(c, "wintergrasp");
-                return;
-            }
-            float const ox = bot->GetPositionX() - joueur->GetPositionX();
-            float const oy = bot->GetPositionY() - joueur->GetPositionY();
-            if (ox * ox + oy * oy < SAUT_DEPART_MIN_YD * SAUT_DEPART_MIN_YD)
-            {
-                Refuser(c, "trop_pres");
-                return;
-            }
-            // Personne ne le voit disparaitre (tout humain, le demandeur compris).
-            if (ia->HasPlayerNearby(SAUT_HUMAIN_YD))
-            {
-                Refuser(c, "depart_a_vue");
-                return;
-            }
-        }
         // Compagnons : seulement un bot deja ARRIVE a sa presence (finale en
         // sejour, meme proprietaire, meme joueur). Il vient donc de l'anneau,
         // a pied : jamais un bot tire d'ailleurs qui surgirait pres du joueur.
@@ -4187,7 +4181,6 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     // et new rpg le mene (laisse, trajet pacifique : il ne chasse pas en
     // route, c'est voulu) ; la FINALE (sans `E-`) passe en SEJOUR a l'arrivee,
     // et la fabrique lui rend sa chasse.
-    bool const chasseur = c.verbe == CoaDirVerbe::Chasser;
     bool const etapeChasse = chasseur && c.action.size() > 2 && c.action[0] == 'E' && c.action[1] == '-';
     if (chasseur)
     {
@@ -4238,6 +4231,25 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         {
             Refuser(c, "carte");
             return;
+        }
+        demandeur = joueur;   // D4h : le joueur prime, pour ChercherPointCache
+        // D4h (01/10) : un chasseur qui SAUTE passe les memes controles de depart
+        // qu'une presence (ne pas disparaitre sous des yeux, pas en combat, pas
+        // deux fois en 15 min...). Le saut est une etape : il reste EN TRAJET, donc
+        // compose en mode RPG, jusqu'a l'etape suivante du service.
+        if (saut)
+        {
+            bool dejaSaute = false;
+            {
+                std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+                auto it = affectations.find(c.cible);
+                dejaSaute = it != affectations.end() && it->second.a.finS > maintenantS && it->second.a.saut;
+            }
+            if (char const* refus = RefusDepartSaut(c.cible, bot, joueur, ia, dejaSaute))
+            {
+                Refuser(c, refus);
+                return;
+            }
         }
         // Continuation : le bot porte deja une affectation `chasser` ACTIVE du
         // meme proprietaire pour ce joueur (etape precedente, redisposition).
@@ -4299,8 +4311,13 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         float const ex = c.x - joueur->GetPositionX();
         float const ey = c.y - joueur->GetPositionY();
         float const carre = ex * ex + ey * ey;
-        if (carre < CHASSEUR_CENTRE_MIN_YD * CHASSEUR_CENTRE_MIN_YD ||
-            (!etapeChasse && carre > CHASSEUR_CENTRE_MAX_YD * CHASSEUR_CENTRE_MAX_YD))
+        // D4h : un saut vise les bornes du saut (cache 150-260, lointain 250-350 yd).
+        bool const horsBornesChasse = sautLointain
+            ? (carre < SAUT_LOINTAIN_MIN_YD * SAUT_LOINTAIN_MIN_YD || carre > SAUT_LOINTAIN_MAX_YD * SAUT_LOINTAIN_MAX_YD)
+            : saut ? (carre < SAUT_JOUEUR_MIN_YD * SAUT_JOUEUR_MIN_YD || carre > SAUT_JOUEUR_MAX_YD * SAUT_JOUEUR_MAX_YD)
+                   : (carre < CHASSEUR_CENTRE_MIN_YD * CHASSEUR_CENTRE_MIN_YD ||
+                      (!etapeChasse && carre > CHASSEUR_CENTRE_MAX_YD * CHASSEUR_CENTRE_MAX_YD));
+        if (horsBornesChasse)
         {
             Refuser(c, "bornes");
             return;
@@ -4363,7 +4380,7 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     // pour tout autre verbe, aussi un mercenaire compose en mode RPG par une
     // affectation `chasser` en trajet (il retrouvera sa chasse a la fin de celle-ci).
     bool const enChasseApres = chasse || (!chasseur && ChasseurEnTrajet(c.cible));
-    if (chasseur ? !etapeChasse : (enChasseApres && !mercenaireRpg))
+    if (chasseur ? !(etapeChasse || saut) : (enChasseApres && !mercenaireRpg))
     {
         uint32 zone = 0, aire = 0;
         map->GetZoneAndAreaId(PHASEMASK_NORMAL, zone, aire, c.x, c.y, sol);
