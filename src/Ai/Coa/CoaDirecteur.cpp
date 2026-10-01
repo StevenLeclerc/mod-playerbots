@@ -5673,9 +5673,171 @@ public:
     }
 };
 
+// ================================================================== onglet « Bounty Hunting »
+//
+// D4 (01/10/2026, remontee R-20260930-2217) : l'addon client CoABounty
+// (coa-project/client/CoABounty) ajoute un 3e sous-onglet a la fenetre PvP
+// d'Ascension et DEMANDE ses donnees au serveur par un chuchotement d'addon a
+// soi-meme : prefixe `COABH`, texte `TOUT` (meme voie que CoABugReport.cpp).
+// Le serveur LIT seulement (coa_dir_arc, coa_dir_relation : ecrites par les
+// services du Directeur, P-134) et repond par des chuchotements d'addon :
+// `COABH\t<i>/<n>|<morceau>`, morceaux de 180 octets au plus. Le corps est fait
+// de lignes separees par `^`, champs separes par `|` :
+//   V|1                                         version du protocole
+//   P|arc|statut|etape|depuis_s|reste_s|plafond|simulee   prime en cours (ou `P|-`)
+//   H|arc|issue|etape|tenu_s|vague|tueur|fin_unix|simulee  primes closes, 4 au plus
+//   R|bot|nom|score|morts_du_joueur|morts_du_bot           rivaux, 4 au plus
+// (4 : la fenetre PvP n'en tient pas plus ; `simulee` vaut 1 sauf `false` explicite, comme primes.py)
+//   F                                           fin
+// Une demande par joueur toutes les ONGLET_INTERVALLE_MS au plus (le reste est
+// ignore, sans reponse). Requetes synchrones bornees (LIMIT), au fil du joueur,
+// sur des tables de quelques lignes : seulement a l'ouverture de l'onglet et a
+// son rafraichissement (10 s, addon). Aucun objet de jeu n'est lu, hors le
+// joueur lui-meme (son propre fil).
+namespace
+{
+constexpr char ONGLET_PREFIXE[] = "COABH\t";
+constexpr size_t ONGLET_MORCEAU = 180;
+constexpr uint32 ONGLET_INTERVALLE_MS = 2000;
+
+std::mutex verrouOnglet;   // CMSG_MESSAGECHAT est traite par le fil monde (PROCESS_THREADUNSAFE) : ceinture
+std::unordered_map<uint32, uint32> derniereDemandeOnglet;   // guid -> getMSTime()
+
+// Un champ du protocole : ni separateur de champ, ni de ligne, ni retour.
+std::string ChampOnglet(std::string v)
+{
+    for (char& ch : v)
+        if (ch == '|' || ch == '^' || ch == '\n' || ch == '\r' || ch == '\t')
+            ch = ' ';
+    if (v.size() > 48)
+        v.resize(48);
+    return v;
+}
+
+std::string ChampOnglet(Field const& f)
+{
+    return f.IsNull() ? std::string() : ChampOnglet(f.Get<std::string>());
+}
+
+std::string CorpsOnglet(uint32 guid)
+{
+    std::string corps = "V|1";
+    // Prime en cours (demande ou active).
+    QueryResult p = CharacterDatabase.Query(
+        "SELECT id, CAST(statut AS CHAR), IFNULL(etape, ''),"
+        " CAST(TIMESTAMPDIFF(SECOND, IFNULL(debut, cree_le), UTC_TIMESTAMP()) AS CHAR),"
+        " CAST(IFNULL(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue), -1) AS CHAR),"
+        " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.plafond')), ''),"
+        " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.simulee')), '')"
+        " FROM coa_dir_arc WHERE joueur = {} AND genre = 'prime' AND statut IN ('demande', 'actif')"
+        " ORDER BY id DESC LIMIT 1", guid);
+    if (p)
+    {
+        Field* f = p->Fetch();
+        corps += Acore::StringFormat("^P|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]),
+                                     ChampOnglet(f[2]), ChampOnglet(f[3]), ChampOnglet(f[4]), ChampOnglet(f[5]),
+                                     ChampOnglet(f[6]) == "false" ? 0 : 1);
+    }
+    else
+        corps += "^P|-";
+    // Primes closes : le resultat de D4h (params.resultat) quand il existe, sinon la duree mesuree.
+    if (QueryResult h = CharacterDatabase.Query(
+            "SELECT id, IFNULL(raison, ''), IFNULL(etape, ''),"
+            " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.resultat.tenu_s')), 'null'),"
+            " CAST(TIMESTAMPDIFF(SECOND, IFNULL(debut, cree_le), IFNULL(fin, cree_le)) AS CHAR)),"
+            " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.resultat.vague')), 'null'), ''),"
+            " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.resultat.tueur.nom')), 'null'), ''),"
+            " CAST(UNIX_TIMESTAMP(IFNULL(fin, cree_le)) AS CHAR), IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.simulee')), '')"
+            " FROM coa_dir_arc WHERE joueur = {} AND genre = 'prime' AND statut IN ('clos', 'refuse')"
+            " ORDER BY id DESC LIMIT 4", guid))
+    {
+        do
+        {
+            Field* f = h->Fetch();
+            corps += Acore::StringFormat("^H|{}|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]),
+                                         ChampOnglet(f[2]), ChampOnglet(f[3]), ChampOnglet(f[4]), ChampOnglet(f[5]),
+                                         ChampOnglet(f[6]), ChampOnglet(f[7]) == "false" ? 0 : 1);
+        } while (h->NextRow());
+    }
+    // Rivaux.
+    if (QueryResult r = CharacterDatabase.Query(
+            "SELECT r.bot, IFNULL(c.name, ''), r.score, r.morts_du_joueur, r.morts_du_bot FROM coa_dir_relation r"
+            " LEFT JOIN characters c ON c.guid = r.bot WHERE r.joueur = {} AND r.genre = 'rival'"
+            " ORDER BY r.score DESC, r.derniere DESC LIMIT 4", guid))
+    {
+        do
+        {
+            Field* f = r->Fetch();
+            corps += Acore::StringFormat("^R|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]), f[2].Get<int32>(),
+                                         f[3].Get<uint32>(), f[4].Get<uint32>());
+        } while (r->NextRow());
+    }
+    corps += "^F";
+    return corps;
+}
+}  // namespace
+
+class coa_directeur_onglet_playerscript : public PlayerScript
+{
+public:
+    coa_directeur_onglet_playerscript()
+        : PlayerScript("coa_directeur_onglet_playerscript", {PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT})
+    {
+    }
+
+    using PlayerScript::OnPlayerCanUseChat;
+
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& message,
+                            Player* receiver) override
+    {
+        if (type != CHAT_MSG_WHISPER || language != LANG_ADDON || !player ||
+            message.compare(0, sizeof(ONGLET_PREFIXE) - 1, ONGLET_PREFIXE) != 0)
+            return true;
+        // Le protocole est consomme dans tous les cas : jamais transmis a un autre joueur.
+        if (receiver != player || message.size() > 255)
+            return false;
+        if (message.substr(sizeof(ONGLET_PREFIXE) - 1) != "TOUT")
+            return false;
+        uint32 const guid = player->GetGUID().GetCounter();
+        uint32 const maintenantMs = getMSTime();
+        {
+            std::lock_guard<std::mutex> garde(verrouOnglet);
+            auto it = derniereDemandeOnglet.find(guid);
+            if (it != derniereDemandeOnglet.end() && getMSTimeDiff(it->second, maintenantMs) < ONGLET_INTERVALLE_MS)
+                return false;
+            if (derniereDemandeOnglet.size() > 512)
+                derniereDemandeOnglet.clear();
+            derniereDemandeOnglet[guid] = maintenantMs;
+        }
+        std::string const corps = CorpsOnglet(guid);
+        // Morceaux de ONGLET_MORCEAU octets au plus, jamais au milieu d'un caractere
+        // UTF-8 (revue m3) : la coupe recule sur un octet de continuation 10xxxxxx.
+        std::vector<std::string> morceaux;
+        for (size_t debut = 0; debut < corps.size();)
+        {
+            size_t fin = std::min(corps.size(), debut + ONGLET_MORCEAU);
+            while (fin < corps.size() && fin > debut + 1 && (static_cast<unsigned char>(corps[fin]) & 0xC0) == 0x80)
+                --fin;
+            morceaux.push_back(corps.substr(debut, fin - debut));
+            debut = fin;
+        }
+        size_t const n = morceaux.size();
+        for (size_t i = 0; i < n; ++i)
+        {
+            std::string const texte = Acore::StringFormat("{}{}/{}|{}", ONGLET_PREFIXE, i + 1, n, morceaux[i]);
+            WorldPacket paquet;
+            ChatHandler::BuildChatPacket(paquet, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(),
+                                         texte, 0, player->GetName(), player->GetName(), 0, false);
+            player->SendDirectMessage(&paquet);
+        }
+        return false;
+    }
+};
+
 void AddSC_coa_directeur()
 {
     new coa_directeur_commandscript();
     new coa_directeur_worldscript();
     new coa_directeur_playerscript();
+    new coa_directeur_onglet_playerscript();
 }
