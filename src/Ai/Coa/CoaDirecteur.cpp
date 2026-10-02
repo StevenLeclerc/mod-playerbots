@@ -4309,6 +4309,70 @@ char const* RefusDepartSaut(uint32 cible, Player* bot, Player* joueur, Playerbot
 // BAISSE (EquipAndSpecPersistence), refait dans tous les cas.
 
 constexpr uint32 PREPARATION_REPOS_S = 60;           // refus `deja_prepare` en deca
+// 02/10 (coa-project-c0, mesure JcJ) : Dereir, niveau 31, porte un niveau d'objet
+// moyen de 19 ; les chasseurs de son niveau 29 a 34 (1 344 a 2 273 PV contre 1 056).
+// A la preparation, l'equipement du chasseur est rapproche de celui de la cible par
+// la QUALITE, pas par un plafond de niveau d'objet : revue du 02/10, un plafond strict
+// (cible + 5) ne laisse passer presque aucun vert a ce niveau (0 vert d'armure ou
+// d'arme de niveau requis 22-31 et de niveau d'objet <= 24 dans acore_world), et la
+// fabrique se rabat alors sur des blancs et gris, non plafonnes et sans stats.
+// Echelle : le score mixte de la fabrique (niveau d'objet x 1,1 par qualite,
+// CalcMixedGearScore), emplacement vide = 0. Au-dessus de cible + ECART : verts au
+// plus, puis blancs au plus, jusqu'a passer sous la borne ; en dessous de cible -
+// ECART : un equipement ordinaire de la fabrique.
+constexpr uint32 PREPARATION_SCORE_ECART = 6;   // ~ 5 niveaux d'objet en vert (x 1,21)
+
+// Score mixte moyen, un emplacement vide comptant 0, sur les emplacements que compte
+// Player::GetAverageItemLevel (sans tabard, chemise, distance ni main gauche) MOINS
+// ceux que la fabrique ne remplit jamais au niveau `niveau` (InitEquipment : bijoux
+// sous 50, tete et cou sous 30, anneaux sous 20 ; contre-revue du 02/10 : sinon un
+// chasseur de niveau 31 reste « sous » un joueur qui porte un collier, a jamais).
+// Joueur et chasseur se mesurent au niveau du CHASSEUR. Heritage : son niveau d'objet
+// suit le porteur (ItemTemplate::GetItemLevelIncludingQuality), pas la table.
+uint32 ScoreEquipement(Player* p, uint32 niveau)
+{
+    uint32 somme = 0, n = 0;
+    for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
+    {
+        if (i == EQUIPMENT_SLOT_TABARD || i == EQUIPMENT_SLOT_RANGED || i == EQUIPMENT_SLOT_OFFHAND ||
+            i == EQUIPMENT_SLOT_BODY)
+            continue;
+        if (niveau < 50 && (i == EQUIPMENT_SLOT_TRINKET1 || i == EQUIPMENT_SLOT_TRINKET2))
+            continue;
+        if (niveau < 30 && (i == EQUIPMENT_SLOT_NECK || i == EQUIPMENT_SLOT_HEAD))
+            continue;
+        if (niveau < 20 && (i == EQUIPMENT_SLOT_FINGER1 || i == EQUIPMENT_SLOT_FINGER2))
+            continue;
+        ++n;
+        if (Item* it = p->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+            if (ItemTemplate const* proto = it->GetTemplate())
+            {
+                uint32 const ilvl = proto->Quality == ITEM_QUALITY_HEIRLOOM
+                                        ? uint32(proto->GetItemLevelIncludingQuality(uint8(p->GetLevel())))
+                                        : proto->ItemLevel;
+                somme += PlayerbotFactory::CalcMixedGearScore(ilvl, proto->Quality);
+            }
+    }
+    return n ? somme / n : 0;
+}
+
+// Contre-revue du 02/10 : un ecart qui ne se resorbe pas (chasseur encore trop haut
+// en blancs) referait le reequipement a chaque `P-` (une par 60 s). Un chasseur deja
+// au niveau, sur place, n'est reequipe qu'une fois par REEQUIPEMENT_REPOS_S.
+constexpr uint32 REEQUIPEMENT_REPOS_S = 1800;
+std::unordered_map<uint32, uint32> reequipesLe;   // sous verrouPrepares
+
+// Reequipe `bot` a son niveau, qualite au plus `qualite` (0 : celle de la conf), sans
+// plafond de niveau d'objet. Tout ote d'abord : InitEquipment(false) garde un objet
+// en place quand il ne trouve rien pour son emplacement. Munitions refaites (revue :
+// un arc remplace par un fusil garderait ses fleches).
+void Reequiper(Player* bot, uint32 qualite)
+{
+    PlayerbotFactory::DestroyEquippedGear(bot);
+    PlayerbotFactory fabrique(bot, bot->GetLevel(), qualite, 0);
+    fabrique.InitEquipment(false);
+    fabrique.InitAmmo();
+}
 constexpr size_t PREPARATIONS_EN_FILE_MAX = 16;      // au-dela : refus `plafond`
 std::deque<CoaDirCommande> preparations;             // fil monde seul
 // guid -> Maintenant() de la derniere preparation FAITE. Ecrit par le fil monde ;
@@ -4728,7 +4792,20 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         Refuser(c, "carte");
         return false;
     }
-    if (!changeNiveau && !changeCarte)
+    // 02/10 (revue) : un chasseur deja au niveau, sur la carte du joueur, est quand meme
+    // reequipe si son equipement s'ecarte de celui de la cible (ScoreEquipement).
+    uint32 const scoreCibleTot = ScoreEquipement(joueur, bot->GetLevel()),
+                 scoreBotTot = ScoreEquipement(bot, bot->GetLevel());
+    bool ecartEquipement = scoreBotTot > scoreCibleTot + PREPARATION_SCORE_ECART ||
+                           scoreBotTot + PREPARATION_SCORE_ECART < scoreCibleTot;
+    if (ecartEquipement && !changeNiveau && !changeCarte)
+    {
+        std::lock_guard<std::mutex> garde(verrouPrepares);
+        auto it = reequipesLe.find(c.cible);
+        if (it != reequipesLe.end() && Maintenant() < it->second + REEQUIPEMENT_REPOS_S)
+            ecartEquipement = false;
+    }
+    if (!changeNiveau && !changeCarte && !ecartEquipement)
     {
         LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
                  " carte_apres={} duree_ms=0 motif=deja_au_niveau", c.id, c.cible, avant, avant, carteAvant, carteAvant);
@@ -4751,7 +4828,8 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         return false;
     }
     // Pas deux preparations FAITES du meme bot en PREPARATION_REPOS_S (niveau ou
-    // carte : un `deja_au_niveau` sur place ne coute rien et ne compte pas).
+    // carte : un `deja_au_niveau` sur place ne coute rien et ne compte pas ; un `reequipe`
+    // sur place, lui, compte, et il est en plus borne par REEQUIPEMENT_REPOS_S).
     {
         if (PrepareDepuisMoinsDe(c.cible, PREPARATION_REPOS_S))
         {
@@ -4819,6 +4897,36 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         PlayerbotFactory fabrique(bot, niveau);
         fabrique.Randomize(false);
     }
+    // Equipement (02/10) : lu APRES la fabrique (elle a pu reequiper au nouveau niveau).
+    uint32 const scoreJoueur = ScoreEquipement(joueur, bot->GetLevel());
+    uint32 const scoreAvant = ScoreEquipement(bot, bot->GetLevel());
+    uint32 scoreApres = scoreAvant;
+    uint32 reequipe = 0;   // qualite du dernier reequipement, 0 : aucun
+    if (bot->IsMounted() && (scoreAvant > scoreJoueur + PREPARATION_SCORE_ECART ||
+                             scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur))
+        bot->Dismount();
+    if (scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur)
+    {
+        Reequiper(bot, 0);
+        reequipe = sPlayerbotAIConfig.randomGearQualityLimit;
+        scoreApres = ScoreEquipement(bot, bot->GetLevel());
+    }
+    for (uint32 qualite : {uint32(ITEM_QUALITY_UNCOMMON), uint32(ITEM_QUALITY_NORMAL)})
+    {
+        if (scoreApres <= scoreJoueur + PREPARATION_SCORE_ECART)
+            break;
+        Reequiper(bot, qualite);
+        reequipe = qualite;
+        scoreApres = ScoreEquipement(bot, bot->GetLevel());
+    }
+    if (reequipe)
+    {
+        std::lock_guard<std::mutex> garde(verrouPrepares);
+        if (reequipesLe.size() > 256)
+            for (auto it = reequipesLe.begin(); it != reequipesLe.end();)
+                it = Maintenant() >= it->second + REEQUIPEMENT_REPOS_S ? reequipesLe.erase(it) : std::next(it);
+        reequipesLe[c.cible] = Maintenant();
+    }
     // Le saut entre cartes : TeleportTo LOINTAIN (Player::TeleportTo pose
     // IsBeingTeleportedFar ; le bot quitte sa carte et n'entre dans la nouvelle
     // qu'a l'accuse de teleportation, rendu par PlayerbotHolder::UpdateSessions
@@ -4849,9 +4957,12 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     }
     float const pjx = point.x - joueur->GetPositionX(), pjy = point.y - joueur->GetPositionY();
     LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
-             " carte_apres={} duree_ms={} motif={} point={} distance_joueur={:.0f} essais={} recherche_ms={}", c.id,
-             c.cible, avant, apres, carteAvant, carteApres, dureeMs, changeNiveau ? "prepare" : "deja_au_niveau",
-             point.source, deplacer ? std::sqrt(pjx * pjx + pjy * pjy) : 0.0f, point.essais, rechercheMs);
+             " carte_apres={} duree_ms={} motif={} point={} distance_joueur={:.0f} essais={} recherche_ms={}"
+             " score_joueur={} score_avant={} score_apres={} reequipe={}", c.id,
+             c.cible, avant, apres, carteAvant, carteApres, dureeMs,
+             changeNiveau ? "prepare" : (reequipe ? "reequipe" : "deja_au_niveau"),
+             point.source, deplacer ? std::sqrt(pjx * pjx + pjy * pjy) : 0.0f, point.essais, rechercheMs,
+             scoreJoueur, scoreAvant, scoreApres, reequipe);
     // Ceinture : la fabrique ne doit toucher ni la guilde ni le niveau demande.
     if (bot->GetGuildId() != guilde || (changeNiveau && apres != niveau))
         LOG_ERROR("playerbots", "coa directeur reserve_ecart: id={} guid={} guilde_avant={} guilde_apres={}"
