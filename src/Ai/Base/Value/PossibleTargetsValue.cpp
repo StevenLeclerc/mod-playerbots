@@ -130,6 +130,15 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
             return false;
         }
 
+        // CoA -- reserve de chasseurs, revue M4 (02/10) : un membre de la reserve
+        // prepare HORS PRIME (`P-0`) est AU REPOS 30 min, ou jusqu'a la pose d'un
+        // `chasser` : il ne convoite aucun joueur. Meme place et memes exceptions
+        // que la suspension (riposte permise : l'autodefense a rendu vrai plus
+        // haut). Sans repos : un chargement atomique.
+        if (CoaDirecteur::EnRepos(bot->GetGUID().GetCounter()) && !bot->InBattleground() && !bot->InArena() &&
+            !(bot->duel && bot->duel->Opponent == unit))
+            return false;
+
         // Skip restrictions in BG/Arena
         if (bot->InBattleground() || bot->InArena())
             return true;

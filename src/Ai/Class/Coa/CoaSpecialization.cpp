@@ -18,6 +18,8 @@
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "SharedDefines.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
 
 #include <algorithm>
@@ -322,6 +324,96 @@ static bool FirstBuildComplaint(uint8 classId, uint32 specializationId, uint8 le
     return complained.insert(key).second;
 }
 
+/*
+ * EMBUSCADE (02/10) -- la specialisation d'embuscade d'une classe CoA.
+ *
+ * Celle dont une capacite PROPRE (SpecId non nul, pas un don de classe) porte une
+ * furtivite -- aura SPELL_AURA_MOD_STEALTH sur le lanceur, ou dans un sort
+ * declenche a deux niveaux au plus -- ou une ouverture SPELL_ATTR0_ONLY_STEALTHED,
+ * active (pas passive) et non canalisee. La plus fournie ; a egalite, le plus petit
+ * id. Lu dans les donnees (GetAscensionClassAbilities, Spell.dbc), au premier
+ * appel, une fois (magic static). Sonde du 02/10 (sonde-specs-embuscade.py, sur
+ * CharacterAdvancement.dbc) : Witch Doctor -> 4 Shadowhunting (Shadowstalker
+ * 807040), Reaper -> 55 Soul (Shade 573038) ; les furtivites des autres classes
+ * de la reserve sont des dons de CLASSE (Elude 801345 et Flank 804940 du Ranger,
+ * Skulk 800843 du Venomancer, Underwalk 800797 du Reaper, Runeshroud 500288 et
+ * Phase Out 500671 du Runemaster, Witching Shroud 805770 du Witch Hunter,
+ * Twisted Sight 532229 du Felsworn) : aucune specialisation ne les porte mieux.
+ *
+ * UNE EXCEPTION ECRITE, celle que le commanditaire a nommee : le Venomancer
+ * (CLASS_PROPHET, 29) prend Stalking (53) et sa Spider Form (800841, d723518) --
+ * ses capacites de furtivite et d'ouverture (Skulk, Arachnophobia, Lure, Parasite)
+ * sont de classe, et Stalking est sa specialisation de melee d'embuscade.
+ * 0 : aucune (la regle ordinaire vaut).
+ */
+static bool PorteFurtivite(SpellInfo const* info, uint8 profondeur = 0)
+{
+    for (SpellEffectInfo const& effet : info->Effects)
+    {
+        if (effet.Effect == SPELL_EFFECT_APPLY_AURA && effet.ApplyAuraName == SPELL_AURA_MOD_STEALTH &&
+            effet.TargetA.GetTarget() == TARGET_UNIT_CASTER)
+            return true;
+        if (profondeur < 2 && effet.TriggerSpell && effet.Effect == SPELL_EFFECT_TRIGGER_SPELL)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effet.TriggerSpell))
+                if (PorteFurtivite(declenche, profondeur + 1))
+                    return true;
+    }
+    return false;
+}
+
+static uint32 SpecialisationDEmbuscade(uint8 classId)
+{
+    static std::unordered_map<uint8, uint32> const table = []
+    {
+        std::unordered_map<uint8, uint32> parClasse;
+        for (uint8 classe = 1; classe < MAX_CLASSES; ++classe)
+        {
+            if (!IsAscensionCustomClassId(classe))
+                continue;
+            std::set<uint32> specs;
+            std::unordered_map<uint32, std::set<uint32>> capacites;   // spec -> premiers rangs
+            for (AscensionClassAbility const& a : GetAscensionClassAbilities(classe))
+            {
+                if (!a.SpecId || IsExcludedSpecialization(a.SpecId))
+                    continue;
+                specs.insert(a.SpecId);
+                SpellInfo const* info = sSpellMgr->GetSpellInfo(a.SpellId);
+                if (!info || info->IsPassive() || info->IsChanneled())
+                    continue;
+                if (PorteFurtivite(info) || info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED))
+                    capacites[a.SpecId].insert(a.FirstSpellId);
+            }
+            uint32 meilleure = 0;
+            size_t score = 0;
+            for (uint32 spec : specs)   // ordre croissant : a egalite, le plus petit id
+            {
+                // Revue m5 : seulement une specialisation de DEGATS.
+                if (RoleOf(classe, spec) != CoaRole::Dps)
+                    continue;
+                auto const it = capacites.find(spec);
+                if (it != capacites.end() && it->second.size() > score)
+                {
+                    score = it->second.size();
+                    meilleure = spec;
+                }
+            }
+            constexpr uint32 Stalking = 53;
+            if (classe == CLASS_PROPHET && specs.count(Stalking))
+                meilleure = Stalking;
+            // Revue m5 : jamais un role de SOIN ni de tank (ceinture pour Stalking) --
+            // sinon rien, et la regle par role vaut. Lu dans CoaSpecStrategies.h le
+            // 02/10 : 13/4, 29/53 et 30/55 sont Dps.
+            if (meilleure && RoleOf(classe, meilleure) != CoaRole::Dps)
+                meilleure = 0;
+            if (meilleure)
+                parClasse[classe] = meilleure;
+        }
+        return parClasse;
+    }();
+    auto const it = table.find(classId);
+    return it != table.end() ? it->second : 0;
+}
+
 // A stable number per bot and purpose, so the same bot keeps the same role and specialization
 // across logins and restarts (splitmix64's finaliser, cut to 32 bits).
 static uint32 Hash(uint32 value, uint32 salt)
@@ -340,6 +432,27 @@ bool EnsureCoaSpecialization(Player* bot)
     // Characters of real players, even played through the bot AI, keep their own choice.
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
         return false;
+
+    // Embuscade (02/10, option Directeur.Embuscade) : un membre de la RESERVE de
+    // chasseurs (guilde de Directeur.ReserveGuildes) prend la specialisation
+    // d'embuscade de sa classe, s'il y en a une -- a la preparation `P-`
+    // (Randomize -> ResetStrategies -> cette fonction), et a chaque composition
+    // ensuite, sans quoi la regle par role ci-dessous la defairait. Sa forme suit
+    // (CoaBuffAction, CoaChassePrendreSaForme). Lecture de la chaine de conf
+    // depuis le fil du bot : meme contrat que les autres lecteurs de la reserve
+    // (PlayerbotAIConfig.h, directeurReserveGuildes).
+    if (sPlayerbotAIConfig.directeurEmbuscade && sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+    {
+        if (uint32 const embuscade = SpecialisationDEmbuscade(bot->getClass()))
+        {
+            uint32 const avant = GetAscensionActiveSpecialization(bot);
+            if (avant == embuscade || !SwitchAscensionSpecialization(bot, embuscade))
+                return false;
+            LOG_INFO("playerbots", "coa: {} (class {}, level {}) took ambush specialization {} (reserve, was {})",
+                     bot->GetName(), bot->getClass(), bot->GetLevel(), embuscade, avant);
+            return true;
+        }
+    }
 
     std::array<std::vector<uint32>, 3> const byRole = SpecializationsByRole(bot->getClass());
 

@@ -6,6 +6,7 @@
 
 #include "CheckMountStateAction.h"
 #include "AreaDefines.h"
+#include "CoaDirecteur.h"
 #include "BattleGroundTactics.h"
 #include "BattlegroundEY.h"
 #include "BattlegroundWS.h"
@@ -19,6 +20,25 @@
 
 static constexpr uint32 SPELL_COLD_WEATHER_FLYING = 54197;
 static constexpr float PARACHUTE_LAND_THRESHOLD = 15.0f;
+// CoA -- embuscade des chasseurs de prime (02/10) : la borne de
+// CoaChasseAction::MontureInterditeYd (Ai/Coa/CoaChasse.h).
+static constexpr float COA_MONTURE_INTERDITE_YD = 300.0f;
+
+// CoA -- embuscade (02/10). Le bot est-il le chasseur d'une prime (option
+// Directeur.Embuscade, prime non AFK) a moins de COA_MONTURE_INTERDITE_YD de son
+// prime ? Le prime n'est lu que sur la carte du bot (botAI->GetUnit : fil du bot).
+// Mesure de l'arc 5 (02/10, 14:55 Paris) : les chasseurs arrivaient « en monture a
+// fond » -- cette action, a 1,0, les remontait a chaque tick ou la chasse rendait
+// faux (aucune cible courante : shouldMount). Sans chasseur : un chargement atomique.
+static bool CoaChasseurPresDeSonPrime(PlayerbotAI* botAI, Player* bot)
+{
+    CoaDirecteur::EtatEmbuscade emb;
+    if (!CoaDirecteur::Embuscade(bot->GetGUID().GetCounter(), &emb))
+        return false;
+    Unit* prime = botAI->GetUnit(ObjectGuid::Create<HighGuid::Player>(emb.joueur));
+    return prime && prime->IsInWorld() && prime->GetMapId() == bot->GetMapId() &&
+           bot->GetExactDist2d(prime) < COA_MONTURE_INTERDITE_YD;
+}
 
 // Define the static map / init bool for caching bot preferred mount data globally
 std::unordered_map<uint32, PreferredMountCache> CheckMountStateAction::mountCache;
@@ -77,6 +97,17 @@ bool CheckMountStateAction::Execute(Event /*event*/)
             bot->RemoveAurasByType(SPELL_AURA_FEATHER_FALL);
     }
     ClearStaleFlightFlags();
+
+    // CoA -- embuscade (02/10) : a pied pres de son prime, et jamais remonte.
+    if (CoaChasseurPresDeSonPrime(botAI, bot))
+    {
+        if (bot->IsMounted() && !bot->IsFlying())
+        {
+            Dismount();
+            return true;
+        }
+        return false;
+    }
 
     // Determine if there are no attackers
     bool noAttackers = !AI_VALUE2(bool, "combat", "self target") || !AI_VALUE(uint8, "attacker count");

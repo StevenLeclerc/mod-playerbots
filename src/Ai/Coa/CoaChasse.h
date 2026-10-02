@@ -12,11 +12,15 @@
 #include "CoaPostes.h"
 #include "Creature.h"
 #include "GridTerrainData.h"
+#include "LastMovementValue.h"
 #include "Log.h"
 #include "Map.h"
 #include "MercenaryRewards.h"
+#include "MotionMaster.h"
 #include "NewRpgBaseAction.h"
 #include "ObjectGuid.h"
+#include "PathGenerator.h"
+#include "SpellAuraEffects.h"
 #include "Player.h"
 #include "PlayerbotAIConfig.h"
 #include "Random.h"
@@ -176,6 +180,12 @@ void CoaChasseCompteDecrochage();
  */
 bool CoaChasseEntrerEnFurtivite(PlayerbotAI* botAI, Player* bot, float distance);
 uint32 CoaChasseOuvrirEnFurtif(PlayerbotAI* botAI, Player* bot, Unit* cible, bool& connue);
+// Embuscade (02/10) : la FORME de sa specialisation (posture KIND_STANCE ; pour un
+// Venomancer Stalking, Spider Form 800841, apres avoir quitte Beetle Form, regle de
+// d723518), prise AVANT la furtivite : CoaBuffAction ne la pose pas tant que le
+// bot est monte, et se tait pour un chasseur furtif. Rend vrai si un sort est
+// parti. Hors combat, a pied, pas furtif. Compte dans « buff » de coa usage.
+bool CoaChassePrendreSaForme(PlayerbotAI* botAI, Player* bot);
 
 /*
  * LE SEUIL DE PV, UN SEUL CORPS POUR LES DEUX ACTIONS.
@@ -597,6 +607,10 @@ public:
         //
         // IsInFlight : MoveFarTo rend true SANS RIEN FAIRE quand le bot est sur
         // un taxi (NewRpgBaseAction.cpp:49-51). Le tick serait brule pour rien.
+        // Revue M1 (embuscade) : un combat vu ici depuis le dernier passage de
+        // l'approche dit que la furtivite perdue a ete ROMPUE (Embusquer).
+        if (bot->IsInCombat())
+            combatDepuisVu = true;
         if (!bot->IsAlive() || bot->IsInCombat() || bot->IsInFlight() || bot->InBattleground())
             return false;
 
@@ -1100,6 +1114,74 @@ private:
     uint32 dernierEssaiPlace = 0;
     bool placeLibre = false;
 
+    // Embuscade (02/10, option Directeur.Embuscade). Etat de l'approche, propre a
+    // ce bot (une instance d'action par bot), remis a neuf a chaque traque
+    // (LancerLaTraque) -- sauf le compte des replis, qui vaut pour une PRIME
+    // (`primeDesReplis`) et survit aux traques de cette prime.
+    bool approcheDite = false;       // ligne motif=approche ecrite pour cette traque
+    bool demonteDit = false;         // ligne motif=demonte ecrite pour cette traque
+    bool assautVu = false;           // ligne motif=assaut ecrite pour cet assaut
+    bool enPosition = false;         // ligne motif=position ecrite pour cette arrivee
+    bool furtifPrecedent = false;    // furtif au passage precedent (furtivite perdue -> repli)
+    // Revue M1 : duree restante de l'aura de furtivite au passage precedent (ms ;
+    // -1 sans fin), et l'heure de ce passage. Une aura partie alors qu'il lui
+    // restait plus que le temps ecoule (+ une marge) a ete ROMPUE ; sinon elle a
+    // fini son temps (Shadowstalker 807040 : 20 s, Shade 573038 : 10 s) et ce
+    // n'est pas un reperage.
+    int32 furtifResteMs = -1;
+    uint32 furtifVuMs = 0;
+    uint32 pvAuVu = 0;               // PV au passage precedent : une baisse = touche
+    bool combatDepuisVu = false;     // combat vu par isUseful depuis le passage precedent
+    // Revue M2 : la position du joueur au calcul du point (point fige en position).
+    float joueurAuCalculX = 0.0f, joueurAuCalculY = 0.0f;
+    bool pointValide = false;        // point d'attente calcule
+    float pointX = 0.0f, pointY = 0.0f, pointZ = 0.0f;
+    uint32 prochainCalculMs = 0;     // getMSTime() du prochain recalage du point
+    uint32 primeDesReplis = 0;       // id de la prime des replis comptes
+    uint8 replis = 0;
+    bool enRepli = false;
+    uint32 debutRepliMs = 0;
+    uint32 dureeRepliMs = 0;
+    time_t prochaineForme = 0;
+
+    // Jamais de monture a moins de MontureInterditeYd du prime ; la monture est
+    // permise au-dela (CheckMountStateAction lit la meme borne).
+    static constexpr float MontureInterditeYd = 300.0f;
+    // Furtivite (et forme avant elle) des ce rayon.
+    static constexpr float DistanceFurtiviteEmbuscadeYd = 120.0f;
+    // Point d'attente : 25-35 yd (30 a decouvert, 25 furtif : il ouvre au contact).
+    static constexpr float AttenteDecouvertYd = 30.0f;
+    static constexpr float AttenteFurtifYd = 25.0f;
+    // Arrive a son point en deca ; quitte la position au-dela de SortiePositionYd.
+    static constexpr float ArriveeYd = 3.0f;
+    static constexpr float SortiePositionYd = 8.0f;
+    // Recalage du point (et pas de deplacement le plus long) : 1,5 s.
+    static constexpr uint32 RecalageMs = 1500;
+    // A decouvert, au pas sous ce rayon (proie immobile seulement).
+    static constexpr float MarcheYd = 80.0f;
+    // Route a couvert : bord du cone avant (60 deg) + 15 deg de marge, pas angulaire
+    // de 60 deg au plus, rapprochement de 40 yd au plus par etape.
+    static constexpr float BordConeRad = float(M_PI) * 75.0f / 180.0f;
+    static constexpr float PasAngulaireRad = float(M_PI) / 3.0f;
+    static constexpr float PasRadialYd = 40.0f;
+    // Reperage avant l'assaut, a decouvert : le joueur le cible, a ce rayon.
+    static constexpr float ViseYd = 60.0f;
+    // Revue B1 : apres l'assaut, un chasseur au-dela de ce rayon garde l'approche
+    // discrete (sans l'attente) ; en deca, la fin de course de l'assaut. Meme
+    // valeur que EMB_PROCHE_YD (CoaDirecteur.cpp).
+    static constexpr float ProcheAssautYd = 60.0f;
+    // Revue M2 : en position, le point est fige ; recale seulement si le bot entre
+    // dans le cone avant, sort de cette couronne, ou si le joueur a bouge de
+    // RecalageJoueurYd depuis le calcul.
+    static constexpr float PositionMinYd = 20.0f;
+    static constexpr float PositionMaxYd = 40.0f;
+    static constexpr float RecalageJoueurYd = 8.0f;
+    // Revue M1 : marge de la fin naturelle d'une furtivite (ms).
+    static constexpr uint32 MargeFinFurtiviteMs = 750;
+    // Repli : 2 au plus par prime, 30-60 s, a RepliYd du joueur.
+    static constexpr uint8 ReplisMax = 2;
+    static constexpr float RepliYd = 90.0f;
+
     // Furtivite a partir de 100 yd de la proie (P-167, B : « vers 80-100 yd »).
     static constexpr float DistanceFurtivitePrimeYd = 100.0f;
     // Sous ce rayon, l'approche furtive vise un point DANS LE DOS de la proie.
@@ -1249,6 +1331,20 @@ private:
         attentePlace = false;
         dernierEssaiPlace = 0;
         prochaineFurtivite = 0;
+        // Embuscade (02/10) : approche neuve.
+        approcheDite = false;
+        demonteDit = false;
+        assautVu = false;
+        enPosition = false;
+        furtifPrecedent = bot->HasAuraType(SPELL_AURA_MOD_STEALTH);
+        furtifResteMs = DureeFurtiviteRestanteMs();
+        furtifVuMs = getMSTime();
+        pvAuVu = bot->GetHealth();
+        combatDepuisVu = false;
+        pointValide = false;
+        prochainCalculMs = 0;
+        enRepli = false;
+        prochaineForme = 0;
         CoaChasseCompteTraque();
         if (imposee)
         {
@@ -1554,6 +1650,53 @@ private:
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TRAQUES_PRIME);
         }
 
+        // Embuscade (02/10). Option Directeur.Embuscade, prime non AFK, chasse
+        // allumee (CoaDirecteur::Embuscade) : sans elle, tout ce qui suit est la
+        // traque P-167 a l'identique. Avec elle : jamais monte a moins de
+        // MontureInterditeYd, et AVANT l'assaut de la prime, l'approche discrete
+        // (Embusquer) ; APRES, la fin de course P-167 (ouverture furtive au contact,
+        // ou l'attaque ordinaire, que NearestEnemyPlayersValue rend des l'assaut),
+        // sans reprendre de furtivite.
+        CoaDirecteur::EtatEmbuscade emb;
+        bool const embuscade = CoaDirecteur::Embuscade(bot->GetGUID().GetCounter(), &emb) &&
+                               emb.joueur == primeDeLaTraque;
+        if (embuscade)
+        {
+            // Pas en vol (taxi, ou monture volante en l'air : il tomberait).
+            if (bot->IsMounted() && distance < MontureInterditeYd && !bot->IsInFlight() && !bot->IsFlying())
+            {
+                if (bot->isMoving())
+                    bot->StopMoving();
+                bot->RemoveAurasByType(SPELL_AURA_MOUNTED);
+                if (!demonteDit)
+                {
+                    demonteDit = true;
+                    LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=demonte distance={}",
+                             bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, uint32(distance));
+                }
+                return true;
+            }
+            if (!emb.assaut)
+            {
+                assautVu = false;
+                return Embusquer(cible, distance, emb, false);
+            }
+            if (!assautVu)
+            {
+                assautVu = true;
+                enRepli = false;
+                enPosition = false;
+                LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=assaut raison={} distance={} furtif={}",
+                         bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, emb.raison, uint32(distance),
+                         bot->HasAuraType(SPELL_AURA_MOD_STEALTH) ? 1 : 0);
+            }
+            // Revue B1 : assaut donne, mais loin -- il garde l'approche discrete
+            // (furtive ou a couvert), sans s'arreter a son point, jusqu'a
+            // ProcheAssautYd ; il ne court pas en ligne droite a decouvert.
+            if (distance > ProcheAssautYd)
+                return Embusquer(cible, distance, emb, true);
+        }
+
         bool const furtif = bot->HasAuraType(SPELL_AURA_MOD_STEALTH);
         if (furtif)
             furtifParLaPrime = true;
@@ -1563,8 +1706,10 @@ private:
             debutContact = 0;
             // B. Une fois par repli au plus ; une classe sans furtivite rend
             // faux au premier test (ClassHas) et attend le repli.
+            // Embuscade : pas apres l'assaut (elle est prise, ou pas, pendant
+            // l'approche) -- la reprendre retarderait l'ouverture des autres.
             time_t const maintenant = time(nullptr);
-            if (sPlayerbotAIConfig.wildPvpStealthAmbush && distance <= DistanceFurtivitePrimeYd &&
+            if (!embuscade && sPlayerbotAIConfig.wildPvpStealthAmbush && distance <= DistanceFurtivitePrimeYd &&
                 maintenant >= prochaineFurtivite)
             {
                 if (CoaChasseEntrerEnFurtivite(botAI, bot, distance))
@@ -1678,6 +1823,376 @@ private:
         float z = cible->GetPositionZ();
         bot->UpdateAllowedPositionZ(x, y, z);
         return MoveTo(cible->GetMapId(), x, y, z, false, false, false, false, MovementPriority::MOVEMENT_COMBAT);
+    }
+
+    /*
+     * EMBUSCADE (02/10) -- l'approche, de la detection au signal d'assaut.
+     *
+     * Ce que le commanditaire a vu (arc 5, 02/10 vers 14:55 Paris) : « Ils arrivent
+     * en monture a fond sur moi, ils me collent et ils m'attaquent. » Mesure dans
+     * CoaBots.log (12:55-12:58 UTC) : ni motif=furtif, ni engage, ni attente. Lu :
+     * des 60 yd (20 yd pour un bot moins vigoureux que le joueur),
+     * EnemyPlayerValue rendait le prime, « attack enemy player » (55) prenait le
+     * tick, et la chasse (2,0) n'avait plus la parole ; et « check mount state »
+     * (1,0), a chaque tick ou la chasse rendait faux, remontait le bot (aucune
+     * cible courante -> shouldMount). D'ou, ici et ailleurs :
+     *   - NearestEnemyPlayersValue::AcceptUnit ne rend plus le prime avant
+     *     l'assaut (riposte permise) ; CheckMountStateAction ne monte plus un
+     *     chasseur a MontureInterditeYd de son prime ;
+     *   - la position du prime est lue dans le joueur (botAI->GetUnit, meme carte,
+     *     fil du bot : Traquer l'a deja verifie), sans aucune visibilite exigee ;
+     *   - forme puis furtivite des DistanceFurtiviteEmbuscadeYd ; sans furtivite,
+     *     route a couvert hors du cone avant, au pas sous MarcheYd ;
+     *   - point d'attente sur l'angle de SA place (le fil monde l'attribue :
+     *     CoaDirecteur::EMBUSCADE_ANGLES_DEG), recale toutes les RecalageMs ;
+     *   - repli (furtivite perdue, ou cible par le joueur), ReplisMax par prime.
+     * Toujours appelee hors combat (isUseful), prime vivant, meme carte, hors
+     * sanctuaire, treves testees : les gardes de Traquer() ont passe.
+     */
+    // `assaut` (revue B1) : l'assaut est donne et le bot est encore loin -- ni
+    // repli, ni attente a son point : il s'en approche a couvert, et
+    // TraquerLaPrime reprend la main a ProcheAssautYd.
+    bool Embusquer(Unit* cible, float distance, CoaDirecteur::EtatEmbuscade const& emb, bool assaut)
+    {
+        bool const furtif = bot->HasAuraType(SPELL_AURA_MOD_STEALTH);
+        uint32 const maintenantMs = getMSTime();
+        time_t const maintenantS = time(nullptr);
+        if (primeDesReplis != emb.prime)
+        {
+            primeDesReplis = emb.prime;
+            replis = 0;
+        }
+        uint8 const place = emb.place < CoaDirecteur::EMBUSCADE_PLACES ? emb.place : 0;
+        float const angleRel = CoaDirecteur::EMBUSCADE_ANGLES_DEG[place] * float(M_PI) / 180.0f;
+        if (!approcheDite)
+        {
+            approcheDite = true;
+            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=approche place={} angle={} distance={}"
+                     " furtif={}", bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, uint32(place),
+                     uint32(CoaDirecteur::EMBUSCADE_ANGLES_DEG[place]), uint32(distance), furtif ? 1 : 0);
+        }
+
+        // 1. Repli en cours : il s'eloigne a RepliYd, puis attend la fin du delai.
+        if (assaut)
+            enRepli = false;
+        if (enRepli)
+        {
+            if (GetMSTimeDiffToNow(debutRepliMs) < dureeRepliMs)
+            {
+                if (distance < RepliYd - 5.0f)
+                {
+                    float x = 0.0f, y = 0.0f, z = 0.0f;
+                    PointSurLaDroite(cible, RepliYd, x, y, z);
+                    if (Avancer(x, y, z, false))
+                        return true;
+                }
+                return TenirLaPosition();
+            }
+            enRepli = false;
+            enPosition = false;
+            pointValide = false;
+            furtifPrecedent = furtif;
+            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=approche raison=retour_repli"
+                     " distance={}", bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, uint32(distance));
+        }
+
+        // 2. Repere avant l'assaut : furtivite perdue (un coup, une fin de duree, un
+        // combat), ou cible par le joueur a decouvert. Il rompt, ReplisMax fois par
+        // prime au plus ; au-dela, il tient (s'il est attaque, la riposte -- et le
+        // signal d) du fil monde -- prennent la suite).
+        // Revue M1 : « perdue » seulement si l'aura est partie AVANT sa fin (un coup,
+        // un sort, un combat : la chasse n'a pas la parole en combat, et a sa reprise
+        // l'aura avait encore du temps). Fin naturelle : il la reprend quand sa
+        // recharge le permet (etape 3), et tient a couvert d'ici la.
+        int32 const resteMs = DureeFurtiviteRestanteMs();
+        bool const finNaturelle = furtifResteMs >= 0 &&
+                                  uint32(furtifResteMs) <= GetMSTimeDiffToNow(furtifVuMs) + MargeFinFurtiviteMs;
+        bool const touche = bot->GetHealth() < pvAuVu || combatDepuisVu;
+        bool const perdue = furtifPrecedent && !furtif && (touche || !finNaturelle);
+        pvAuVu = bot->GetHealth();
+        combatDepuisVu = false;
+        bool const vise = !furtif && distance <= ViseYd && cible->GetTarget() == bot->GetGUID();
+        furtifPrecedent = furtif;
+        furtifResteMs = resteMs;
+        furtifVuMs = maintenantMs;
+        if (!assaut && (perdue || vise) && replis < ReplisMax)
+        {
+            ++replis;
+            enRepli = true;
+            enPosition = false;
+            debutRepliMs = maintenantMs;
+            dureeRepliMs = urand(30 * IN_MILLISECONDS, 60 * IN_MILLISECONDS);
+            furtifParLaPrime = false;
+            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=repli raison={} n={} duree_s={}"
+                     " distance={}", bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque,
+                     perdue ? "furtivite_perdue" : "vu", uint32(replis), dureeRepliMs / IN_MILLISECONDS, uint32(distance));
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            PointSurLaDroite(cible, RepliYd, x, y, z);
+            Avancer(x, y, z, false);
+            return true;
+        }
+
+        // 3. La forme de sa specialisation, des MontureInterditeYd (il y est a pied),
+        // puis la furtivite des DistanceFurtiviteEmbuscadeYd. Un echec de
+        // furtivite (recharge globale apres la forme, sort en recharge) se retente
+        // 3 s plus tard ; une classe sans furtivite rend faux au premier test.
+        if (!furtif && !bot->IsMounted())
+        {
+            if (maintenantS >= prochaineForme)
+            {
+                prochaineForme = maintenantS + 5;
+                if (CoaChassePrendreSaForme(botAI, bot))
+                    return true;
+            }
+            if (sPlayerbotAIConfig.wildPvpStealthAmbush && distance <= DistanceFurtiviteEmbuscadeYd &&
+                maintenantS >= prochaineFurtivite)
+            {
+                if (CoaChasseEntrerEnFurtivite(botAI, bot, distance))
+                {
+                    furtifParLaPrime = true;
+                    furtifPrecedent = true;
+                    // L'aura n'est posee qu'au lancement : sa duree se lit au
+                    // passage suivant (-1 d'ici la : « sans fin »).
+                    furtifResteMs = -1;
+                    furtifVuMs = maintenantMs;
+                    LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=furtif distance={}",
+                             bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, uint32(distance));
+                    return true;
+                }
+                prochaineFurtivite = maintenantS + 3;
+            }
+        }
+
+        // 4. Le point d'attente, recale toutes les RecalageMs sur la position et
+        // l'orientation du joueur. Lu sur le terrain (sol sec, pas de toit, ligne de
+        // vue : CoaDirecteur::PointDEmbuscade), puis joignable par mmap quand le bot
+        // en est a moins de 80 yd (au-dela, un chemin long rend INCOMPLETE sans rien
+        // dire du point). Introuvable : le point precedent ; aucun : derriere, au sol
+        // du joueur.
+        float const attente = furtif ? AttenteFurtifYd : AttenteDecouvertYd;
+        // Revue M2 : en position, le point est FIGE (le joueur qui tourne sur place
+        // ne fait plus tourner ses chasseurs autour de lui). Il ne se recale que si
+        // le bot entre dans le cone avant, sort de la couronne
+        // PositionMinYd-PositionMaxYd, ou si le joueur a bouge de RecalageJoueurYd.
+        bool recaler = !pointValide;
+        if (enPosition && pointValide)
+        {
+            float const phiBot = AngleVuDe(cible, bot->GetPositionX(), bot->GetPositionY());
+            float const dJoueur = bot->GetExactDist2d(cible);
+            recaler = std::fabs(phiBot) < BordConeRad || dJoueur < PositionMinYd || dJoueur > PositionMaxYd ||
+                      cible->GetExactDist2d(joueurAuCalculX, joueurAuCalculY) > RecalageJoueurYd;
+        }
+        else if (maintenantMs >= prochainCalculMs)
+            recaler = true;
+        if (recaler)
+        {
+            prochainCalculMs = maintenantMs + RecalageMs;
+            joueurAuCalculX = cible->GetPositionX();
+            joueurAuCalculY = cible->GetPositionY();
+            float const angle = cible->GetOrientation() + angleRel;
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            bool ok = CoaDirecteur::PointDEmbuscade(bot->GetMap(), cible->GetPositionX(), cible->GetPositionY(),
+                                                    cible->GetPositionZ(), angle, attente, x, y, z);
+            if (ok && pointValide && std::hypot(x - pointX, y - pointY) <= ArriveeYd)
+                ok = false;   // le point n'a pas bouge : rien a verifier de plus
+            else if (ok && !Joignable(x, y, z))
+                ok = false;
+            if (ok)
+            {
+                pointX = x;
+                pointY = y;
+                pointZ = z;
+                pointValide = true;
+            }
+            else if (!pointValide)
+            {
+                // Revue m4 : le repli est verifie par mmap comme les autres --
+                // d'abord le point brut de sa place (sol du joueur), puis la
+                // droite joueur -> bot a la meme distance. Aucun joignable (seul
+                // cas : a 80 yd ou moins, joueur hors maillage) : le point brut,
+                // vers lequel le chemin partiel le rapproche -- tenir sur place a
+                // 60-80 yd ne donnerait jamais d'assaut (ni a, ni b, c, e).
+                float rz = cible->GetPositionZ();
+                bot->UpdateAllowedPositionZ(x, y, rz);
+                float lx = 0.0f, ly = 0.0f, lz = 0.0f;
+                PointSurLaDroite(cible, attente, lx, ly, lz);
+                if (Joignable(x, y, rz))
+                {
+                    pointX = x;
+                    pointY = y;
+                    pointZ = rz;
+                    pointValide = true;
+                }
+                else if (Joignable(lx, ly, lz))
+                {
+                    pointX = lx;
+                    pointY = ly;
+                    pointZ = lz;
+                    pointValide = true;
+                }
+                else
+                {
+                    pointX = x;
+                    pointY = y;
+                    pointZ = rz;
+                    pointValide = true;
+                }
+            }
+        }
+
+        float const dPoint = bot->GetExactDist2d(pointX, pointY);
+        // Revue B1 : apres l'assaut, pas d'attente au point (TraquerLaPrime reprend
+        // la main a ProcheAssautYd, en deca de la couronne d'attente).
+        if (dPoint <= ArriveeYd && !assaut)
+        {
+            if (!enPosition)
+            {
+                enPosition = true;
+                LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=position angle={} distance={}"
+                         " furtif={}", bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque,
+                         uint32(CoaDirecteur::EMBUSCADE_ANGLES_DEG[place]), uint32(distance), furtif ? 1 : 0);
+            }
+            if (bot->isMoving())
+                bot->StopMoving();
+            return TenirLaPosition();
+        }
+        if (enPosition && dPoint > SortiePositionYd)
+            enPosition = false;
+
+        // 5. La route : directement au point s'il est proche et hors du cone avant ;
+        // sinon une etape a couvert (EtapeACouvert). Au pas a decouvert sous
+        // MarcheYd tant que le joueur ne bouge pas ; en courant sinon.
+        float x = pointX, y = pointY, z = pointZ;
+        float const phi = AngleVuDe(cible, bot->GetPositionX(), bot->GetPositionY());
+        if (!(distance <= attente + 10.0f && std::fabs(phi) >= BordConeRad))
+            EtapeACouvert(cible, distance, attente, phi, angleRel, x, y, z);
+        bool const marche = !furtif && distance <= MarcheYd && !cible->isMoving();
+        if (Avancer(x, y, z, marche))
+            return true;
+        // Pas en cours (verrou de mouvement) : la main, sans rien faire d'autre.
+        return false;
+    }
+
+    // Le point est-il joignable par mmap ? Seulement verifie a 80 yd du bot au
+    // plus : au-dela, un chemin long rend INCOMPLETE sans rien dire du point.
+    bool Joignable(float x, float y, float z)
+    {
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            return false;
+        if (bot->GetExactDist2d(x, y) > 80.0f)
+            return true;
+        PathGenerator chemin(bot);
+        chemin.CalculatePath(x, y, z, false);
+        return !(chemin.GetPathType() & PATHFIND_NOPATH);
+    }
+
+    // Duree restante (ms) de l'aura de furtivite la plus longue du bot ; -1 sans
+    // fin (ou sans aura : la valeur n'est lue que si le bot etait furtif).
+    int32 DureeFurtiviteRestanteMs() const
+    {
+        int32 reste = -2;
+        for (AuraEffect const* effet : bot->GetAuraEffectsByType(SPELL_AURA_MOD_STEALTH))
+        {
+            if (!effet || !effet->GetBase())
+                continue;
+            int32 const d = effet->GetBase()->GetDuration();
+            if (d < 0)
+                return -1;
+            reste = std::max(reste, d);
+        }
+        return reste == -2 ? -1 : reste;
+    }
+
+    // Angle de (x, y) vu de `cible`, relatif a son orientation, dans [-pi, pi].
+    static float AngleVuDe(Unit const* cible, float x, float y)
+    {
+        float a = std::atan2(y - cible->GetPositionY(), x - cible->GetPositionX()) - cible->GetOrientation();
+        while (a > float(M_PI))
+            a -= 2.0f * float(M_PI);
+        while (a < -float(M_PI))
+            a += 2.0f * float(M_PI);
+        return a;
+    }
+
+    // Le point a `rayon` du joueur sur la droite joueur -> bot (sol par
+    // UpdateAllowedPositionZ). A distance nulle : l'orientation du bot.
+    void PointSurLaDroite(Unit* cible, float rayon, float& x, float& y, float& z)
+    {
+        float const angle = bot->GetExactDist2d(cible) > 0.5f ? cible->GetAngle(bot) : bot->GetOrientation();
+        x = cible->GetPositionX() + std::cos(angle) * rayon;
+        y = cible->GetPositionY() + std::sin(angle) * rayon;
+        z = bot->GetPositionZ();
+        bot->UpdateAllowedPositionZ(x, y, z);
+    }
+
+    /*
+     * Une etape a couvert : de l'angle `phi` du bot vers l'angle `theta` de sa
+     * place (relatifs a l'orientation du joueur), par l'ARRIERE -- jamais par
+     * l'angle 0 --, d'au plus PasAngulaireRad, jamais a moins de BordConeRad de
+     * l'avant, en se rapprochant d'au plus PasRadialYd. Dans le cone avant, il
+     * s'ecarte sur le flanc sans approcher (rayon garde, borne a 120 yd).
+     */
+    void EtapeACouvert(Unit* cible, float distance, float attente, float phi, float theta, float& x, float& y, float& z)
+    {
+        while (theta > float(M_PI))
+            theta -= 2.0f * float(M_PI);
+        float delta = theta - phi;
+        while (delta > float(M_PI))
+            delta -= 2.0f * float(M_PI);
+        while (delta < -float(M_PI))
+            delta += 2.0f * float(M_PI);
+        // L'arc court passe-t-il par l'avant (angle 0) ? Signes opposes et somme
+        // des ecarts a l'avant sous pi : oui -> l'autre sens, par l'arriere.
+        if ((phi >= 0.0f) != (theta >= 0.0f) && std::fabs(phi) + std::fabs(theta) < float(M_PI))
+            delta += delta > 0.0f ? -2.0f * float(M_PI) : 2.0f * float(M_PI);
+        float a = phi + std::clamp(delta, -PasAngulaireRad, PasAngulaireRad);
+        while (a > float(M_PI))
+            a -= 2.0f * float(M_PI);
+        while (a < -float(M_PI))
+            a += 2.0f * float(M_PI);
+        if (std::fabs(a) < BordConeRad)
+            a = (a >= 0.0f ? 1.0f : -1.0f) * BordConeRad;
+        float rayon = std::max(attente, distance - PasRadialYd);
+        if (std::fabs(phi) < BordConeRad)
+            rayon = std::max(rayon, std::min(distance, 120.0f));
+        float const absolu = cible->GetOrientation() + a;
+        x = cible->GetPositionX() + std::cos(absolu) * rayon;
+        y = cible->GetPositionY() + std::sin(absolu) * rayon;
+        z = cible->GetPositionZ();
+        bot->UpdateAllowedPositionZ(x, y, z);
+    }
+
+    /*
+     * Un pas vers (x, y, z), au pas (`marche`) ou en courant, chemin mmap
+     * (MotionMaster::MovePoint, generatePath). Le verrou « last movement » est
+     * pose en MOVEMENT_COMBAT pour au plus RecalageMs : le point se recale donc
+     * toutes les 1,5 s au plus, et « move random » (1,5, NORMAL) ne le fait pas
+     * deriver. Faux si le bot ne peut pas bouger, si un pas court encore, ou s'il
+     * est deja la.
+     */
+    bool Avancer(float x, float y, float z, bool marche)
+    {
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            return false;
+        if (!IsMovingAllowed() || IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+            return false;
+        float const d = bot->GetExactDist(x, y, z);
+        if (d < 0.5f)
+            return false;
+        UpdateMovementState();
+        if (bot->IsSitState())
+            bot->SetStandState(UNIT_STAND_STATE_STAND);
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (!mm)
+            return false;
+        mm->Clear();
+        mm->MovePoint(0, x, y, z, marche ? FORCED_MOVEMENT_WALK : FORCED_MOVEMENT_NONE, 0.0f, 0.0f, true, false);
+        float const vitesse = bot->GetSpeed(marche ? MOVE_WALK : MOVE_RUN);
+        float const delai = std::min(vitesse > 0.1f ? 1000.0f * d / vitesse : float(RecalageMs), float(RecalageMs));
+        Value<LastMovement&>* dernier = context->GetValue<LastMovement&>("last movement");
+        if (dernier)
+            dernier->Get().Set(bot->GetMapId(), x, y, z, bot->GetOrientation(), delai, MovementPriority::MOVEMENT_COMBAT);
+        return true;
     }
 
     // Le prime passe-t-il les regles de l'ENGAGEMENT ? « nearest enemy players »
@@ -3179,8 +3694,35 @@ public:
         }
         if (prime)
         {
+            // Embuscade (02/10) : avant l'assaut, il ne court pas se montrer a
+            // 20 yd du joueur ; il revient a DecrochageEmbuscadeYd, d'ou sa chasse
+            // reprend l'approche a couvert.
+            CoaDirecteur::EtatEmbuscade emb;
+            bool const sousEmbuscade = CoaDirecteur::Embuscade(bot->GetGUID().GetCounter(), &emb);
+            float const dx = prime->GetPositionX() - bot->GetPositionX();
+            float const dy = prime->GetPositionY() - bot->GetPositionY();
+            float const loin = std::sqrt(dx * dx + dy * dy);
             if (!IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
-                MoveTo(prime, CoaChasseAction::PorteeEngagementFaible, MovementPriority::MOVEMENT_COMBAT);
+            {
+                // Revue (M-R1) : sous embuscade, jamais la droite vers le joueur
+                // tant que l'assaut n'est pas donne, ou au-dela de ProcheAssautYd :
+                // il rejoint le point de SA place (arriere, flancs), plus pres de
+                // 30 yd, jamais sous ProcheAssautYd + 10. Le MoveTo(prime, 20)
+                // d'origine ne vaut qu'assaut donne et deja a portee.
+                if (sousEmbuscade && (!emb.assaut || loin > ProcheAssautDecrochageYd))
+                {
+                    uint8 const place = emb.place < CoaDirecteur::EMBUSCADE_PLACES ? emb.place : 0;
+                    float const angle = prime->GetOrientation() +
+                                        CoaDirecteur::EMBUSCADE_ANGLES_DEG[place] * float(M_PI) / 180.0f;
+                    float const cible = std::max(ProcheAssautDecrochageYd + 10.0f, loin - 30.0f);
+                    float x = 0.0f, y = 0.0f, z = 0.0f;
+                    CoaDirecteur::PointDEmbuscade(bot->GetMap(), prime->GetPositionX(), prime->GetPositionY(),
+                                                  prime->GetPositionZ(), angle, cible, x, y, z);
+                    MoveTo(bot->GetMapId(), x, y, z, false, false, false, false, MovementPriority::MOVEMENT_COMBAT);
+                }
+                else
+                    MoveTo(prime, CoaChasseAction::PorteeEngagementFaible, MovementPriority::MOVEMENT_COMBAT);
+            }
         }
         else if (!IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
             MoveAway(agresseur, sPlayerbotAIConfig.fleeDistance, false);
@@ -3235,6 +3777,10 @@ private:
     static constexpr float SeuilAchevementPct = 35.0f;
 
     static constexpr float SeuilVieDecrochagePrimePct = 35.0f;
+    // Embuscade (02/10) : distance au prime d'un decrochage avant l'assaut.
+    static constexpr float DecrochageEmbuscadeYd = 50.0f;
+    // Meme seuil que CoaChasseAction::ProcheAssautYd (prive) : 60 yd.
+    static constexpr float ProcheAssautDecrochageYd = 60.0f;
 
     bool DecrocherPourLaPrime()
     {

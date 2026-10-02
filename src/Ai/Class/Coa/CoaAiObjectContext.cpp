@@ -2381,6 +2381,13 @@ bool CoaChasseEntrerEnFurtivite(PlayerbotAI* botAI, Player* bot, float distance)
         int32 const duree = spell.info->GetMaxDuration();
         if (duree > 0 && float(duree) / float(IN_MILLISECONDS) * ApprocheFurtiveYdParS < distance)
             continue;
+        // Embuscade (02/10) : jamais une furtivite CANALISEE -- Twisted Sight 532229
+        // du Felsworn (AttributesEx 0x00022004 : SPELL_ATTR1_IS_CHANNELED, lu dans
+        // Spell.dbc) lie la vue a un oeil invoque : le bot resterait plante a
+        // canaliser au lieu d'approcher. Revue m6 : seulement sous
+        // Directeur.Embuscade = 1 -- a 0, la traque P-167 a l'identique.
+        if (sPlayerbotAIConfig.directeurEmbuscade && spell.info->IsChanneled())
+            continue;
 
         SpellCastResult const check = StrictCheck(bot, spell.info, bot);
         if (check != SPELL_CAST_OK)
@@ -2399,6 +2406,57 @@ bool CoaChasseEntrerEnFurtivite(PlayerbotAI* botAI, Player* bot, float distance)
     }
 
     RecordUsage(USAGE_STEALTH, nullptr);
+    return false;
+}
+
+bool CoaChassePrendreSaForme(PlayerbotAI* botAI, Player* bot)
+{
+    if (!botAI || !bot || !ClassHas(bot, KIND_STANCE))
+        return false;
+    if (bot->IsInCombat() || bot->IsMounted() || bot->IsInFlight() || !bot->IsAlive() ||
+        bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+        return false;
+
+    // Le filtre des postures de CoaBuffAction, postures seules.
+    std::vector<Usable> const postures = KnownAbilities(botAI, bot, [](uint16 kind)
+        { return (kind & KIND_STANCE) && !(kind & KIND_STEALTH) &&
+                 !(kind & (KIND_HOSTILE | KIND_DAMAGE | KIND_TAUNT | KIND_HEAL | KIND_CONTROL)); });
+    if (postures.empty())
+        return false;
+
+    // La regle de d723518 (CoaBuffAction) : un Venomancer Stalking ne prend que
+    // Spider Form, apres avoir quitte Beetle Form. Toute autre classe : une
+    // posture seulement s'il n'en porte aucune.
+    constexpr uint32 SpiderForm = 800841;
+    constexpr uint32 StalkingSpecialization = 53;
+    constexpr uint32 BeetleForm = 803183;
+    bool const wantsSpider = bot->getClass() == CLASS_PROPHET &&
+        GetAscensionActiveSpecialization(bot) == StalkingSpecialization &&
+        std::any_of(postures.begin(), postures.end(), [](Usable const& spell) { return spell.info->Id == SpiderForm; });
+    bool const inStance = wantsSpider ? bot->HasAura(SpiderForm) :
+        std::any_of(postures.begin(), postures.end(), [bot](Usable const& spell) { return bot->HasAura(spell.info->Id); });
+    if (inStance)
+        return false;
+    if (wantsSpider && bot->HasAura(BeetleForm))
+        bot->RemoveAurasDueToSpell(BeetleForm);
+
+    for (Usable const& spell : postures)
+    {
+        if (wantsSpider && spell.info->Id != SpiderForm)
+            continue;
+        SpellCastResult const check = StrictCheck(bot, spell.info, bot);
+        if (check != SPELL_CAST_OK)
+        {
+            RecordFailure(USAGE_BUFF, spell.info->Id, uint16(check));
+            continue;
+        }
+        if (botAI->CastSpell(spell.info->Id, bot))
+        {
+            RecordUsage(USAGE_BUFF, spell.info);
+            return true;
+        }
+        RecordFailure(USAGE_BUFF, spell.info->Id, FAILURE_REFUSED);
+    }
     return false;
 }
 

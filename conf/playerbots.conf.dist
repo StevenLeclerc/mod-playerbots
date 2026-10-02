@@ -3553,6 +3553,24 @@ AiPlayerbot.Directeur.PrimeTraqueSecondes = 120
 #        Default: 360
 AiPlayerbot.Directeur.PrimeDetectionYd = 360
 
+#    AiPlayerbot.Directeur.Embuscade
+#        Embuscade des chasseurs de prime (02/10). 1 : un chasseur designe (sous la strategie
+#        « coa chasse ») n'attaque pas son prime avant l'ASSAUT de la prime (riposte permise) ; il
+#        descend de monture a moins de 300 yd du joueur et n'y remonte pas ; il connait la position
+#        du joueur ; il prend sa forme puis sa furtivite des 120 yd, ou, sans furtivite, contourne
+#        par les flancs ou l'arriere (hors du cone de 120 deg devant le joueur, au pas sous 80 yd) ;
+#        il attend a 25-35 yd sur un angle qui lui est propre (180, 120, 240, 150, 210, 90, 270,
+#        165 deg) et le recale toutes les 1,5 s. Le fil monde donne l'assaut, une fois par prime :
+#        a) tous les chasseurs actifs en position, ou 20 s apres le premier ; b) le joueur en
+#        combat contre autre chose ; c) le joueur sous 50 % de PV ; d) un chasseur furtif repere,
+#        ou attaque. Apres l'assaut, la meute vaut au moins le plafond de la prime. Repli (2 au plus
+#        par chasseur et par prime) : furtivite perdue ou cible par le joueur avant l'assaut.
+#        Membres de la reserve : specialisation d'embuscade (CoaSpecialization.cpp) ; une
+#        preparation P- qui change le niveau deplace aussi le bot sur un point sur (600-1 200 yd,
+#        loin des creatures hostiles fortes). 0 : comportement d'avant, relu a chaud.
+#        Default: 1
+AiPlayerbot.Directeur.Embuscade = 1
+
 #    AiPlayerbot.Directeur.ReserveGuildes
 #        Reserve de chasseurs (coa-project/docs/CONCEPTION-reserve-chasseurs.md) : identifiants de
 #        guilde separes par des virgules, par exemple "12,13" (une guilde par faction). Lecture stricte :

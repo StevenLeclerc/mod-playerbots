@@ -238,12 +238,38 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
                          (bot->GetVictim() == unit && !(primeAfk && estLePrime && enemy->GetVictim() != bot));
     if (chasseur && !primeEnFace && !riposte)
         return false;
+    // Embuscade (02/10, option Directeur.Embuscade) : AVANT l'assaut de la prime
+    // (etat du fil monde, CoaDirecteur::Embuscade), le chasseur ne convoite PAS son
+    // prime -- ni « attack enemy player » (55), ni la traque ordinaire ne le
+    // designent ; c'est la chasse (« coa chasse », 2,0) qui le mene a couvert a son
+    // point d'attente. La riposte reste permise. Seulement s'il porte « coa chasse »
+    // (classe CoA, composition de chasse) : sans elle, personne ne le menerait, et
+    // il garde la regle d'avant. APRES l'assaut, la meute vaut au moins le plafond
+    // de la prime : chacun ouvre en meme temps. Sans chasseur : rien de plus.
+    // Relecture : la meute de l'assaut vaut AUSSI en riposte -- un chasseur qui
+    // frappe deja son prime (GetVictim) est une « riposte » au sens de ce test, et
+    // garder pour lui la meute ordinaire le ferait lacher sa cible quand les autres
+    // chasseurs engagent avec lui.
+    uint32 plafondAssaut = 0;
+    if (primeEnFace)
+    {
+        CoaDirecteur::EtatEmbuscade emb;
+        if (CoaDirecteur::Embuscade(bot->GetGUID().GetCounter(), &emb) &&
+            botAI->HasStrategy("coa chasse", BOT_STATE_NON_COMBAT))
+        {
+            if (!emb.assaut && !riposte)
+                return false;
+            if (emb.assaut)
+                plafondAssaut = emb.plafond;
+        }
+    }
     uint32 const plafondNormal = sPlayerbotAIConfig.wildPvpMaxAttackersPerTarget;
     if (botEstMercenaire && MercenaryRewards::instance().IsUnderTruce(enemy->GetGUID().GetRawValue()))
         return false;
     if (botEstMercenaire)
     {
-        uint32 const plafond = primeEnFace ? sPlayerbotAIConfig.directeurPrimeMeute : plafondNormal;
+        uint32 const plafond =
+            primeEnFace ? std::max(sPlayerbotAIConfig.directeurPrimeMeute, plafondAssaut) : plafondNormal;
         if (!MercenaryAttackSlotFree(bot, enemy, plafond))
             return false;
         // Ce que la meute a permis au-dela du plafond ordinaire (mesure § 6.6).
@@ -324,6 +350,11 @@ Unit* EnemyPlayerValue::Calculate()
     // engage) et 3 (riposte de groupe) ne sont pas touchees par ce garde.
     bool const approcheFurtive = imposee && sPlayerbotAIConfig.wildPvpChasse && sPlayerbotAIConfig.wildPvpTraque &&
                                  bot->HasAuraType(SPELL_AURA_MOD_STEALTH);
+    // Embuscade (02/10) : assaut donne, le prime se designe a la portee FORTE
+    // (60 yd hors champ de bataille) quels que soient les PV : un chasseur a son
+    // point d'attente (25-35 yd) ouvre au signal au lieu de s'approcher a 20 yd.
+    CoaDirecteur::EtatEmbuscade emb;
+    bool const assautDonne = imposee && CoaDirecteur::Embuscade(bot->GetGUID().GetCounter(), &emb) && emb.assaut;
 
     // 1. Check units we are currently in PvP combat with.
     std::vector<Unit*> targets;
@@ -394,7 +425,8 @@ Unit* EnemyPlayerValue::Calculate()
         // Aggro weak enemies from further away.
         // If controlling mobile vehicle only agro close enemies (otherwise will never reach objective)
         uint32 const aggroDistance = controllingVehicle                                               ? 5.0f
-                                     : (controllingCannon || bot->GetHealth() > pTarget->GetHealth()) ? maxAggroDistance
+                                     : (controllingCannon || bot->GetHealth() > pTarget->GetHealth() ||
+                                        (assautDonne && estLePrime(pTarget)))                          ? maxAggroDistance
                                                                                                       : 20.0f;
         if (!bot->IsWithinDist(pTarget, aggroDistance))
             continue;

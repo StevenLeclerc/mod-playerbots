@@ -157,8 +157,57 @@ bool ProieImposee(uint32 botLow, uint32* joueur, uint32* id = nullptr);
 // preparation et le saut du service. Aucune preparation faite : un chargement.
 bool PrepareRecemment(uint32 guidLow);
 
+// Revue M4 (02/10). Tout fil, chemin chaud : le bot est-il AU REPOS apres une
+// preparation hors prime `P-0` (30 min, ou jusqu'a la pose d'un `chasser`) ? Lu par
+// PossibleTargetsValue::AcceptUnit : il ne convoite alors aucun joueur, riposte
+// permise. PrepareRecemment le couvre aussi. Sans repos : un chargement atomique.
+bool EnRepos(uint32 guidLow);
+
 bool ChasseurDe(uint32 botLow, uint32* joueur = nullptr, uint32* id = nullptr, bool* afk = nullptr,
                 bool* reserve = nullptr);
+
+// ------------------------------------------------------------------ embuscade (02/10)
+//
+// Option Directeur.Embuscade (defaut 1). UN ETAT PAR PRIME, « assaut donne »,
+// ECRIT par le fil monde seul (SuivreEmbuscades, chaque seconde, cartes a
+// l'arret : il lit le joueur et ses chasseurs, P-137), sous le verrou exclusif
+// des consignes, avec la PLACE de chaque chasseur (indice dans
+// EMBUSCADE_ANGLES_DEG, attribuee a son arrivee, rendue a son depart). Les fils
+// de carte le LISENT (Embuscade) sous le verrou partage, apres le compteur
+// atomique des chasseurs. Avant l'assaut, aucune attaque d'initiative du chasseur
+// sur son prime (NearestEnemyPlayersValue::AcceptUnit) ; la riposte reste.
+struct EtatEmbuscade
+{
+    uint32 joueur = 0;       // guid bas du prime
+    uint32 id = 0;           // commande `chasser` en cours (journal)
+    uint32 prime = 0;        // commande `prime` (id de la prime : borne des replis)
+    uint32 plafond = 1;      // chasseurs de la prime, au plus (meute de l'assaut)
+    bool reserve = false;
+    bool assaut = false;     // l'assaut de CETTE prime est donne
+    char raison = '-';       // a, b, c, d (voir SuivreEmbuscades)
+    uint8 place = 0xFF;      // 0xFF : pas encore attribuee (la seconde suivante)
+};
+
+// Angles d'attente, en degres, relatifs a l'orientation du joueur (0 = devant) :
+// l'arriere puis les flancs, hors du cone de 120 degres devant lui.
+constexpr uint8 EMBUSCADE_PLACES = 8;
+constexpr float EMBUSCADE_ANGLES_DEG[EMBUSCADE_PLACES] = {180.0f, 120.0f, 240.0f, 150.0f, 210.0f, 90.0f, 270.0f, 165.0f};
+
+// Tout fil, chemin chaud : le BOT `botLow` est-il un chasseur dont la prime court,
+// joueur non AFK, option Directeur.Embuscade ET chasse allumees (WildPvp.Chasse et
+// WildPvp.Traque) ? Sans chasseur : un chargement atomique. `sortie` (non nul)
+// n'est ecrite que si la reponse est vraie.
+bool Embuscade(uint32 botLow, EtatEmbuscade* sortie);
+
+// Le point d'attente d'un chasseur : a `distance` du joueur (jx, jy, jz), sur
+// l'angle ABSOLU `angle` (radians), sol sec a +-6 yd du joueur (P-132, P-145),
+// pas sous un toit, en ligne de vue du joueur (modeles). Essaie l'angle, puis
+// +-15 et +-30 degres, a distance, distance - 5 et distance + 5 ; -> faux si
+// aucun (x, y, z restent le premier candidat, non verifie). `carte` : la carte
+// DU BOT, depuis son fil (GetGridHeight peut creer la grille, comme
+// TirerDansLeDisque). Arithmetique et sondes de terrain seulement.
+bool PointDEmbuscade(Map* carte, float jx, float jy, float jz, float angle, float distance, float& x, float& y,
+                     float& z);
 
 // ------------------------------------------------------------------ lot D2b
 //

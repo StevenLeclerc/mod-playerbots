@@ -470,6 +470,14 @@ public:
     uint32 directeurPrimeMeute;               // mercenaires engages ensemble sur le prime, au plus
     uint32 directeurPrimeTraqueSecondes;      // traque d'un chasseur vers son prime
     uint32 directeurPrimeDetectionYd;         // portee a laquelle un chasseur lit son prime
+    // Embuscade des chasseurs de prime (02/10, apres l'arc 5) : approche discrete
+    // (a pied sous 300 yd, furtive des 120 yd ou a couvert hors du cone de 120 deg
+    // devant le joueur), point d'attente propre a chaque chasseur a 25-35 yd,
+    // ASSAUT coordonne par prime (fil monde : CoaDirecteur SuivreEmbuscades),
+    // aucune attaque d'initiative sur le prime avant l'assaut, repli borne.
+    // Specialisation d'embuscade pour les membres de la reserve. Vrai par
+    // defaut ; 0 rend le comportement d'avant (traque P-167), a chaud.
+    bool directeurEmbuscade;
     // Reserve de chasseurs (02/10, coa-project/docs/CONCEPTION-reserve-chasseurs.md) :
     // identifiants de guilde separes par des virgules ("12,13"). Un mercenaire dont
     // GetGuildId() y figure est un « chasseur de reserve ». Vide (defaut) : aucun.

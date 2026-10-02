@@ -517,6 +517,18 @@ struct Prime
     // ecrit sous le verrou exclusif ; les fils de carte ne lisent que cette
     // copie (ChasseurDe, ProieImposee). Un prime AFK n'est la proie de personne.
     bool afk = false;
+    // Embuscade (02/10, option Directeur.Embuscade). Fil monde seul
+    // (SuivreEmbuscades), sous le verrou exclusif ; les fils de carte ne lisent
+    // que `assaut`, `raisonAssaut` et `places` (Embuscade, verrou partage).
+    bool assaut = false;
+    char raisonAssaut = '-';
+    uint32 premierEnPositionS = 0;   // Maintenant() du premier chasseur en position, 0 : aucun
+    uint32 calmeDepuisS = 0;         // assaut donne, aucun chasseur actif depuis (0 : il en reste)
+    uint32 procheDepuisS = 0;        // sans assaut, un chasseur a EMB_PROCHE_YD depuis (raison e), 0 : aucun
+    // Revue M3 : id de la PREMIERE prime d'une suite de reposes de meme origine
+    // (relevement du plafond) -- borne des replis, qui ne repart pas a zero.
+    uint32 idOrigine = 0;
+    std::array<uint32, CoaDirecteur::EMBUSCADE_PLACES> places{};   // guid bas du chasseur par place, 0 libre
 };
 std::unordered_map<uint32, Prime> primes;   // cle : guid bas du joueur
 std::atomic<uint32> nbPrimes{0};
@@ -3366,6 +3378,20 @@ void ExecuterPrime(CoaDirCommande const& c)
             {
                 remplace = true;
                 ancienne = it->second;
+                // Revue M3 (embuscade) : une REPOSE de meme origine (le service
+                // releve le plafond en reposant la prime) garde l'etat de
+                // l'embuscade et l'id d'origine des replis. Un autre proprietaire
+                // (`manuel` sur une prime `arc`...) repart de zero.
+                if (ancienne.origine == c.origine && ancienne.finS > Maintenant())
+                {
+                    nouvelle.assaut = ancienne.assaut;
+                    nouvelle.raisonAssaut = ancienne.raisonAssaut;
+                    nouvelle.places = ancienne.places;
+                    nouvelle.premierEnPositionS = ancienne.premierEnPositionS;
+                    nouvelle.calmeDepuisS = ancienne.calmeDepuisS;
+                    nouvelle.procheDepuisS = ancienne.procheDepuisS;
+                    nouvelle.idOrigine = ancienne.idOrigine ? ancienne.idOrigine : ancienne.id;
+                }
             }
             primes[c.cible] = nouvelle;
             nbPrimes.store(static_cast<uint32>(primes.size()), std::memory_order_relaxed);
@@ -3557,6 +3583,16 @@ void SuivrePrimes()
                 if (it == primes.end() || it->second.id != p.id)
                     continue;
                 it->second.afk = afk;
+                // Revue m3 (embuscade) : a l'entree en AFK, l'assaut est rendu ;
+                // au retour, l'approche reprend a couvert.
+                if (afk)
+                {
+                    it->second.assaut = false;
+                    it->second.raisonAssaut = '-';
+                    it->second.premierEnPositionS = 0;
+                    it->second.calmeDepuisS = 0;
+                    it->second.procheDepuisS = 0;
+                }
                 faits.emplace_back(it->second, afk);
             }
         }
@@ -3590,6 +3626,233 @@ void SuivrePrimes()
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECHUES);
         FinirPrime(f.p, naturelle ? nullptr : "leve", naturelle ? nullptr : f.motif, f.motif, f.tueur, f.chasseur,
                    true);
+    }
+}
+
+// ------------------------------------------------------------------ embuscade (02/10)
+//
+// Option Directeur.Embuscade. Chaque seconde, fil monde, APRES SuivrePrimes (une
+// prime finie n'a plus d'assaut a donner) : pour chaque prime, ses chasseurs (les
+// affectations `chasser` de ce joueur), lus sur le joueur et sur eux, cartes a
+// l'arret (P-137 : World::Update appelle OnWorldUpdate apres sMapMgr->Update, qui
+// attend les fils de carte). Seul ecrivain de Prime::assaut, ::places,
+// ::premierEnPositionS, ::calmeDepuisS (P-134).
+//
+// ACTIF : connecte, en vie, meme carte que le joueur, a PrimeDetectionYd au plus.
+// EN POSITION : actif, a pied, a EMB_POSITION_MIN_YD-EMB_POSITION_MAX_YD du joueur,
+// hors du cone de 120 degres devant lui -- ou furtif (il ne se voit pas).
+// L'ASSAUT est donne, une fois, par la premiere raison vraie, dans cet ordre :
+//   d) le joueur voit un chasseur furtif a EMB_REPERE_YD (CanSeeOrDetect joueur ->
+//      bot, sans test de distance : la detection de furtivite porte la sienne), ou
+//      il est en combat avec un chasseur (ou son familier) ;
+//   b) il est en combat avec autre chose ;
+//   c) il est sous 50 % de ses PV ;
+//   a) tous les actifs sont en position, ou EMB_ATTENTE_S apres le premier (le
+//      compte repart de zero des que plus personne n'est en position, revue m1) ;
+//   e) un chasseur a EMB_PROCHE_YD depuis EMB_PROCHE_S (revue M5).
+// b, c et e exigent un chasseur EN POSITION ou a EMB_PROCHE_YD (revue B1 : sans
+// cela, un joueur en combat contre une creature donnait l'assaut a des chasseurs
+// encore a 200-360 yd). Sans chasseur actif, aucun assaut. L'assaut RETOMBE
+// (ligne raison=retombe) apres EMB_RETOMBE_S sans AUCUN chasseur actif (revue B1 :
+// un chasseur encore en approche ne fait plus retomber l'assaut) : une vague
+// suivante s'approche alors de nouveau a couvert. A l'entree en AFK, l'assaut est
+// remis a faux (SuivrePrimes, revue m3).
+constexpr float EMB_POSITION_MIN_YD = 18.0f;
+constexpr float EMB_POSITION_MAX_YD = 40.0f;
+constexpr float EMB_CONE_DEMI_RAD = float(M_PI) / 3.0f;   // 60 degres de part et d'autre de l'orientation
+constexpr float EMB_REPERE_YD = 60.0f;
+constexpr float EMB_ENGAGE_YD = 45.0f;
+constexpr uint32 EMB_ATTENTE_S = 20;
+constexpr uint32 EMB_RETOMBE_S = 15;
+// Revue B1 : b, c et e ne valent que si un chasseur est en position OU a
+// EMB_PROCHE_YD du joueur ; apres l'assaut, un chasseur plus loin garde l'approche
+// discrete (CoaChasse.h, ProcheAssautYd, meme valeur).
+constexpr float EMB_PROCHE_YD = 60.0f;
+// Revue M5 : un chasseur a EMB_PROCHE_YD depuis EMB_PROCHE_S sans assaut (le joueur
+// bouge, personne ne tient son point) : raison e.
+constexpr uint32 EMB_PROCHE_S = 45;
+
+// Angle de (x, y) vu du joueur, relatif a son orientation, dans [-pi, pi].
+float AngleVuDuJoueur(Player const* j, float x, float y)
+{
+    float a = std::atan2(y - j->GetPositionY(), x - j->GetPositionX()) - j->GetOrientation();
+    while (a > float(M_PI))
+        a -= 2.0f * float(M_PI);
+    while (a < -float(M_PI))
+        a += 2.0f * float(M_PI);
+    return a;
+}
+
+void SuivreEmbuscades()
+{
+    if (!sPlayerbotAIConfig.directeurEmbuscade || !nbPrimes.load(std::memory_order_relaxed) ||
+        !nbChasseurs.load(std::memory_order_relaxed))
+        return;
+    uint32 const maintenant = Maintenant();
+    struct Vue
+    {
+        Prime p;
+        std::vector<uint32> chasseurs;   // guid bas, tries (places attribuees dans cet ordre)
+    };
+    std::vector<Vue> vues;
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        vues.reserve(primes.size());
+        for (auto const& [j, p] : primes)
+            if (p.finS > maintenant)
+                vues.push_back(Vue{p, {}});
+        for (auto const& [guid, f] : affectations)
+            if (f.a.chasseur && f.a.finS > maintenant)
+                for (Vue& v : vues)
+                    if (v.p.joueur == f.joueur)
+                        v.chasseurs.push_back(guid);
+    }
+    float const detection = float(sPlayerbotAIConfig.directeurPrimeDetectionYd);
+    struct Ecrit
+    {
+        uint32 joueur, id;
+        bool assaut;
+        char raison;
+        uint32 premier, calme, proche;
+        std::array<uint32, CoaDirecteur::EMBUSCADE_PLACES> places;
+    };
+    std::vector<Ecrit> ecrits;
+    for (Vue& v : vues)
+    {
+        Prime& p = v.p;
+        std::sort(v.chasseurs.begin(), v.chasseurs.end());
+        // Les places : rendues au depart du chasseur, attribuees a son arrivee (la
+        // plus basse libre). Stables tant qu'il reste : son angle ne saute pas.
+        for (uint32& g : p.places)
+            if (g && !std::binary_search(v.chasseurs.begin(), v.chasseurs.end(), g))
+                g = 0;
+        for (uint32 g : v.chasseurs)
+        {
+            if (std::find(p.places.begin(), p.places.end(), g) != p.places.end())
+                continue;
+            auto libre = std::find(p.places.begin(), p.places.end(), 0u);
+            if (libre != p.places.end())
+                *libre = g;
+        }
+        Player* j = JoueurConnecte(p.joueur);
+        // Relecture : prime AFK -- ses chasseurs se tiennent a 100 yd (CoaChasse.h) ;
+        // aucun assaut n'est donne ni ne retombe pendant ce temps (sinon un combat
+        // ou des PV bas pendant l'AFK le donneraient, et il partirait au retour).
+        bool const lisible = j && j->IsInWorld() && !j->IsBeingTeleported() && j->IsAlive() && !p.afk;
+        uint32 actifs = 0, enPosition = 0, proches = 0;
+        char raison = 0;
+        if (lisible)
+        {
+            for (uint32 g : v.chasseurs)
+            {
+                Player* b = JoueurConnecte(g);
+                if (!b || !b->IsInWorld() || b->IsBeingTeleported() || !b->IsAlive() || b->GetMapId() != j->GetMapId())
+                    continue;
+                float const d = b->GetExactDist2d(j);
+                if (d > detection)
+                    continue;
+                ++actifs;
+                bool const furtif = b->HasAuraType(SPELL_AURA_MOD_STEALTH);
+                bool const horsCone = std::fabs(AngleVuDuJoueur(j, b->GetPositionX(), b->GetPositionY())) >= EMB_CONE_DEMI_RAD;
+                if (d >= EMB_POSITION_MIN_YD && d <= EMB_POSITION_MAX_YD && !b->IsMounted() && (furtif || horsCone))
+                    ++enPosition;
+                bool const enCombat = b->IsInCombatWith(j);
+                if (enCombat || d <= EMB_PROCHE_YD)
+                    ++proches;
+                if (!raison && (enCombat || (furtif && d <= EMB_REPERE_YD && j->CanSeeOrDetect(b))))
+                    raison = 'd';
+            }
+            // b) et d) par les references de combat du JOUEUR : un chasseur (ou ce
+            // qu'il controle) -> d ; toute autre unite -> b.
+            if (!raison && j->IsInCombat())
+            {
+                auto const classer = [&](Unit* autre)
+                {
+                    if (!autre)
+                        return;
+                    Unit* maitre = autre->GetCharmerOrOwnerOrSelf();
+                    bool const chasseur = maitre && maitre->IsPlayer() &&
+                                          std::binary_search(v.chasseurs.begin(), v.chasseurs.end(),
+                                                             maitre->GetGUID().GetCounter());
+                    if (chasseur)
+                        raison = 'd';
+                    else if (raison != 'd')
+                        raison = 'b';
+                };
+                for (auto const& [guid, ref] : j->GetCombatManager().GetPvPCombatRefs())
+                    classer(ref->GetOther(j));
+                for (auto const& [guid, ref] : j->GetCombatManager().GetPvECombatRefs())
+                    classer(ref->GetOther(j));
+            }
+            if (!raison && j->GetHealthPct() < 50.0f)
+                raison = 'c';
+            // Revue B1 : b et c seulement si un chasseur est en position ou proche.
+            bool const aPortee = enPosition || proches;
+            if ((raison == 'b' || raison == 'c') && !aPortee)
+                raison = 0;
+            // Revue m1 : plus personne en position -> le compte de a repart de zero.
+            if (!enPosition)
+                p.premierEnPositionS = 0;
+            else if (!p.premierEnPositionS)
+                p.premierEnPositionS = maintenant;
+            if (!raison && actifs &&
+                (enPosition == actifs || (p.premierEnPositionS && maintenant >= p.premierEnPositionS + EMB_ATTENTE_S)))
+                raison = 'a';
+            // Revue M5 : e.
+            if (p.assaut || !proches)
+                p.procheDepuisS = 0;
+            else if (!p.procheDepuisS)
+                p.procheDepuisS = maintenant;
+            if (!raison && proches && p.procheDepuisS && maintenant >= p.procheDepuisS + EMB_PROCHE_S)
+                raison = 'e';
+        }
+        bool const avant = p.assaut;
+        if (!p.assaut && lisible && actifs && raison)
+        {
+            p.assaut = true;
+            p.raisonAssaut = raison;
+            p.calmeDepuisS = 0;
+            p.procheDepuisS = 0;
+            LOG_INFO("playerbots", "coa directeur assaut: prime={} joueur={} chasseurs={} en_position={} raison={}",
+                     p.id, p.joueur, actifs, enPosition, raison);
+        }
+        else if (avant && lisible)
+        {
+            // L'assaut retombe sans aucun chasseur ACTIF pendant EMB_RETOMBE_S
+            // (revue B1 : un chasseur en approche le tient).
+            if (actifs)
+                p.calmeDepuisS = 0;
+            else if (!p.calmeDepuisS)
+                p.calmeDepuisS = maintenant;
+            else if (maintenant >= p.calmeDepuisS + EMB_RETOMBE_S)
+            {
+                p.assaut = false;
+                p.raisonAssaut = '-';
+                p.premierEnPositionS = 0;
+                p.calmeDepuisS = 0;
+                LOG_INFO("playerbots", "coa directeur assaut: prime={} joueur={} chasseurs={} en_position={} raison=retombe",
+                         p.id, p.joueur, actifs, enPosition);
+            }
+        }
+        ecrits.push_back(Ecrit{p.joueur, p.id, p.assaut, p.raisonAssaut, p.premierEnPositionS, p.calmeDepuisS,
+                               p.procheDepuisS, p.places});
+    }
+    if (ecrits.empty())
+        return;
+    std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+    for (Ecrit const& e : ecrits)
+    {
+        auto it = primes.find(e.joueur);
+        // La prime a pu etre remplacee entre les deux verrous (fil monde seul :
+        // impossible aujourd'hui, garde par l'id quand meme).
+        if (it == primes.end() || it->second.id != e.id)
+            continue;
+        it->second.assaut = e.assaut;
+        it->second.raisonAssaut = e.raison;
+        it->second.premierEnPositionS = e.premier;
+        it->second.calmeDepuisS = e.calme;
+        it->second.procheDepuisS = e.proche;
+        it->second.places = e.places;
     }
 }
 
@@ -3647,6 +3910,8 @@ void Entretien(uint32 diff)
     // affectations.
     DrainerMorts();
     SuivrePrimes();
+    // Embuscade (02/10) : apres les primes (une prime finie n'a plus d'assaut).
+    SuivreEmbuscades();
     LeverEchues();
     LeverSuspensionsEchues();
     LeverSuspensionsMaitreHumain();
@@ -4051,6 +4316,50 @@ std::mutex verrouPrepares;
 std::unordered_map<uint32, uint32> preparesLe;
 std::atomic<uint32> nbPrepares{0};
 
+// Revue M4 (decision du coordinateur, 02/10) : le REPOS d'un membre de la reserve
+// prepare par `P-0` (hors prime, sans affectation). REPOS_RESERVE_S a partir de la
+// preparation, il ne convoite AUCUN joueur (PossibleTargetsValue::AcceptUnit, meme
+// place et memes exceptions que MercenaireSuspendu : la riposte -- l'autodefense,
+// testee avant -- reste permise ; champ de bataille, arene, duel permis). Un seul
+// proprietaire (P-134) : le fil monde, sous le verrou exclusif des consignes ;
+// lecteurs (CoaDirecteur::EnRepos) sous le verrou partage apres le compteur
+// atomique. Le repos tombe des qu'une affectation `chasser` est posee sur le bot
+// (ExecuterAffectation), au bus eteint, et a son terme (lu, puis purge a la pose
+// suivante). Il protege aussi le bot de la teleportation aleatoire
+// (PrepareRecemment, lu par RandomPlayerbotMgr::RandomTeleport).
+constexpr uint32 REPOS_RESERVE_S = 30 * MINUTE;
+std::unordered_map<uint32, uint32> reposReserve;   // guid bas -> Maintenant() de fin
+std::atomic<uint32> nbRepos{0};
+
+void PoserRepos(uint32 guid, uint32 finS)
+{
+    std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+    for (auto it = reposReserve.begin(); it != reposReserve.end();)
+        it = it->second <= Maintenant() ? reposReserve.erase(it) : std::next(it);
+    reposReserve[guid] = finS;
+    nbRepos.store(static_cast<uint32>(reposReserve.size()), std::memory_order_relaxed);
+}
+
+// -> vrai si un repos a ete leve (journal).
+bool LeverRepos(uint32 guid)
+{
+    if (!nbRepos.load(std::memory_order_relaxed))
+        return false;
+    std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+    bool const leve = reposReserve.erase(guid) != 0;
+    nbRepos.store(static_cast<uint32>(reposReserve.size()), std::memory_order_relaxed);
+    return leve;
+}
+
+void ViderRepos()
+{
+    if (!nbRepos.load(std::memory_order_relaxed))
+        return;
+    std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+    reposReserve.clear();
+    nbRepos.store(0, std::memory_order_relaxed);
+}
+
 bool PrepareDepuisMoinsDe(uint32 guid, uint32 secondes)
 {
     if (!nbPrepares.load(std::memory_order_relaxed))
@@ -4125,7 +4434,64 @@ struct PointCarte
     char const* source = "-";   // cache (cellules de creatures) ou couronne
 };
 
-bool PointCarteSur(Map* map, Player* joueur, float x, float y, float zDepart, float& sol)
+// Embuscade (02/10, mesure du 02/10 a 14:57:13 Paris : Allinan, prepare du niveau
+// 53 au niveau 26 SUR PLACE, tue par les creatures de son ancienne zone avant son
+// saut, `preparation:mort`). Une creature HOSTILE et FORTE (niveau max >= niveau
+// vise + PREP_CREATURE_ECART_NIVEAU, ou elite d'un niveau au moins egal) a-t-elle
+// un point d'apparition a PREP_CREATURES_YD de (x, y) ? Lu dans les DONNEES
+// d'apparition (ObjectMgr, par grille de 533 yd), et non dans les grilles
+// chargees : le point est d'ordinaire dans une grille que personne n'a chargee, et
+// ses creatures n'y apparaitront qu'a l'arrivee du bot. Les creatures de
+// creature_multispawn (id2, id3) ne sont pas lues : limite assumee. Hostile : le
+// gabarit de faction de la creature est hostile a celui du bot, ou aux joueurs.
+// Fil monde (donnees statiques de ObjectMgr).
+constexpr float PREP_CREATURES_YD = 60.0f;
+constexpr int32 PREP_CREATURE_ECART_NIVEAU = 3;
+
+bool CreatureForteAutour(uint32 carte, float x, float y, Player* bot, uint32 niveau)
+{
+    FactionTemplateEntry const* moi = bot->GetFactionTemplateEntry();
+    std::array<uint32, 4> grilles{};
+    size_t nb = 0;
+    for (float const dx : {-PREP_CREATURES_YD, PREP_CREATURES_YD})
+        for (float const dy : {-PREP_CREATURES_YD, PREP_CREATURES_YD})
+        {
+            float gx = x + dx, gy = y + dy;
+            if (!Acore::IsValidMapCoord(gx, gy))
+                continue;
+            uint32 const id = Acore::ComputeGridCoord(gx, gy).GetId();
+            if (std::find(grilles.begin(), grilles.begin() + nb, id) == grilles.begin() + nb)
+                grilles[nb++] = id;
+        }
+    float const r2 = PREP_CREATURES_YD * PREP_CREATURES_YD;
+    for (size_t i = 0; i < nb; ++i)
+    {
+        CellObjectGuids const& cellule = sObjectMgr->GetGridObjectGuids(uint16(carte), 0, grilles[i]);
+        for (ObjectGuid::LowType const spawn : cellule.creatures)
+        {
+            CreatureData const* d = sObjectMgr->GetCreatureData(spawn);
+            if (!d || d->mapid != carte)
+                continue;
+            float const ex = d->posX - x, ey = d->posY - y;
+            if (ex * ex + ey * ey > r2)
+                continue;
+            CreatureTemplate const* modele = sObjectMgr->GetCreatureTemplate(d->id);
+            if (!modele)
+                continue;
+            bool const forte = int32(modele->maxlevel) >= int32(niveau) + PREP_CREATURE_ECART_NIVEAU ||
+                               (modele->rank > CREATURE_ELITE_NORMAL && int32(modele->maxlevel) >= int32(niveau));
+            if (!forte)
+                continue;
+            FactionTemplateEntry const* sienne = sFactionTemplateStore.LookupEntry(modele->faction);
+            // Faction inconnue : prudence, le point est refuse.
+            if (!moi || !sienne || sienne->IsHostileTo(*moi) || sienne->IsHostileToPlayers())
+                return true;
+        }
+    }
+    return false;
+}
+
+bool PointCarteSur(Map* map, Player* joueur, Player* bot, uint32 niveau, float x, float y, float zDepart, float& sol)
 {
     float const dx = x - joueur->GetPositionX(), dy = y - joueur->GetPositionY();
     float const d2 = dx * dx + dy * dy;
@@ -4141,7 +4507,10 @@ bool PointCarteSur(Map* map, Player* joueur, float x, float y, float zDepart, fl
     map->GetZoneAndAreaId(PHASEMASK_NORMAL, zone, aire, x, y, sol);
     if (sPlayerbotAIConfig.CoaLieuSansPvp(zone, aire))
         return false;
-    return !HumainProcheSauf(WorldPosition(map->GetId(), x, y, sol), map->GetId(), SAUT_HUMAIN_YD, 0);
+    if (HumainProcheSauf(WorldPosition(map->GetId(), x, y, sol), map->GetId(), SAUT_HUMAIN_YD, 0))
+        return false;
+    // Embuscade (02/10) : loin des creatures hostiles fortes (option eteinte : la regle d'avant).
+    return !sPlayerbotAIConfig.directeurEmbuscade || !CreatureForteAutour(map->GetId(), x, y, bot, niveau);
 }
 
 PointCarte ChercherPointCarte(Map* map, Player* joueur, Player* bot, uint32 niveau)
@@ -4168,7 +4537,7 @@ PointCarte ChercherPointCarte(Map* map, Player* joueur, Player* bot, uint32 nive
                 break;
             ++r.essais;
             float sol = 0.0f;
-            if (PointCarteSur(map, joueur, p[0], p[1], p[2], sol))
+            if (PointCarteSur(map, joueur, bot, niveau, p[0], p[1], p[2], sol))
             {
                 r.trouve = true;
                 r.x = p[0];
@@ -4230,7 +4599,15 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         return false;
     }
     uint32 const niveau = static_cast<uint32>(c.valeur);
+    // Preparation HORS PRIME (02/10, demande du service) : `P-0` (arc 0) prepare
+    // la reserve A L'AVANCE au niveau d'un humain en ligne qui n'a pas encore de
+    // prime. La prime active n'est alors pas exigee ; a sa place, une fois le
+    // joueur trouve, les controles d'ExecuterPrime sur lui (humain, MJ, champ de
+    // bataille, carte, regle, defi). Le reste est le meme : reserve, repos, occupe,
+    // file, un Randomize par tick, deplacement sur, aucune affectation.
+    bool const horsPrime = c.action == "P-0";
     // Controles de `chasser` qui s'appliquent : prime active...
+    if (!horsPrime)
     {
         bool primeActive = false;
         {
@@ -4313,11 +4690,33 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         Refuser(c, joueur ? "joueur_indisponible" : "hors_ligne");
         return false;
     }
+    // `P-0` : les controles d'ExecuterPrime (§ 6.2, dans son ordre), sur le joueur.
+    if (horsPrime)
+    {
+        char const* refus = !Humain(joueur)                                   ? "pas_humain"
+                            : joueur->IsGameMaster()                          ? "mj"
+                            : (joueur->InBattleground() || joueur->InArena()) ? "champ_de_bataille"
+                            : !CarteDeSuspension(joueur->GetMapId())          ? "carte"
+                            : !HighRisk(joueur)                               ? "regle"
+                            : (!defisLus || DefiBloquant(joueur))             ? "defi"
+                                                                              : nullptr;
+        if (refus)
+        {
+            Refuser(c, refus);
+            return false;
+        }
+    }
     uint32 const avant = bot->GetLevel();
     uint32 const carteAvant = bot->GetMapId();
     uint32 const carteJoueur = joueur->GetMapId();
     bool const changeNiveau = avant != niveau;
     bool const changeCarte = carteAvant != carteJoueur;
+    // Embuscade (02/10, mesure : Allinan, 53 -> 26 sur place a 14:57:13 Paris, tue
+    // avant son saut, `preparation:mort`) : une preparation qui change le NIVEAU
+    // deplace aussi le bot, meme deja sur la carte du joueur, sur le meme point sur
+    // (ChercherPointCarte : 600-1 200 yd du joueur, hors de vue, loin des creatures
+    // hostiles fortes). Memes controles de depart qu'un changement de carte.
+    bool const deplacer = changeCarte || (changeNiveau && sPlayerbotAIConfig.directeurEmbuscade);
     // Monde ouvert seulement (continents, Outreterre, Norfendre) : jamais une
     // instance, un champ de bataille ou une carte de banc.
     // Le bot aussi : on ne le tire pas d'une instance ou d'une carte de banc.
@@ -4330,6 +4729,12 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     {
         LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
                  " carte_apres={} duree_ms=0 motif=deja_au_niveau", c.id, c.cible, avant, avant, carteAvant, carteAvant);
+        if (horsPrime)
+        {
+            PoserRepos(c.cible, Maintenant() + REPOS_RESERVE_S);
+            LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos repos={}", c.id, c.cible,
+                     c.joueur, REPOS_RESERVE_S);
+        }
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
         Accuser(c, "execute", nullptr);
         return false;
@@ -4376,7 +4781,7 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     // recherche est aussi mesuree a part (recherche_ms).
     uint32 const debutMs = getMSTime();
     uint32 rechercheMs = 0;
-    if (changeCarte)
+    if (deplacer)
     {
         if (ia->HasPlayerNearby(SAUT_HUMAIN_YD))
         {
@@ -4421,7 +4826,8 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     // `deja_saute` (il est borne, lui, par deja_prepare et par sa propre garde).
     uint32 carteApres = carteAvant;
     bool sautRefuse = false;
-    if (changeCarte)
+    // Meme carte (embuscade) : un TeleportTo PROCHE, meme fil, meme garde de depart.
+    if (deplacer)
     {
         if (CoaDirecteur::Sauter(bot, WorldLocation(carteJoueur, point.x, point.y, point.z + 0.5f, bot->GetOrientation())))
             carteApres = carteJoueur;   // engage : effectif a l'accuse (tick suivant)
@@ -4442,11 +4848,18 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
              " carte_apres={} duree_ms={} motif={} point={} distance_joueur={:.0f} essais={} recherche_ms={}", c.id,
              c.cible, avant, apres, carteAvant, carteApres, dureeMs, changeNiveau ? "prepare" : "deja_au_niveau",
-             point.source, changeCarte ? std::sqrt(pjx * pjx + pjy * pjy) : 0.0f, point.essais, rechercheMs);
+             point.source, deplacer ? std::sqrt(pjx * pjx + pjy * pjy) : 0.0f, point.essais, rechercheMs);
     // Ceinture : la fabrique ne doit toucher ni la guilde ni le niveau demande.
     if (bot->GetGuildId() != guilde || (changeNiveau && apres != niveau))
         LOG_ERROR("playerbots", "coa directeur reserve_ecart: id={} guid={} guilde_avant={} guilde_apres={}"
                   " niveau_demande={} niveau_apres={}", c.id, c.cible, guilde, bot->GetGuildId(), niveau, apres);
+    // Revue M4 : `P-0` reussie (niveau et saut faits) : le repos commence ici.
+    if (horsPrime && !sautRefuse)
+    {
+        PoserRepos(c.cible, Maintenant() + REPOS_RESERVE_S);
+        LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos repos={}", c.id, c.cible,
+                 c.joueur, REPOS_RESERVE_S);
+    }
     if (sautRefuse)
     {
         // TeleportTo a refuse (Player::TeleportTo : carte interdite, en combat de
@@ -5140,6 +5553,10 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     }
     if (chasseur)
     {
+        // Revue M4 : une affectation `chasser` met fin au repos d'un `P-0`.
+        if (LeverRepos(c.cible))
+            LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos_fini raison=chasser", c.id,
+                     c.cible, c.joueur);
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_CHASSEURS);
         LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=pose etape={} remplace={} reserve={}",
                  c.cible, c.joueur, c.id, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0, nouvelle.a.reserve ? 1 : 0);
@@ -5710,6 +6127,7 @@ void CoaDirecteur::TraiterBus(uint32 diff)
         PurgerMortsEnTrajet();
         PurgerPactes();
         ViderPreparations("bus_eteint");
+        ViderRepos();
         source->Vidanger([](CoaDirCommande const& c)
         {
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_RECUES);
@@ -5801,7 +6219,17 @@ bool CoaDirecteur::ChasseurDe(uint32 botLow, uint32* joueur, uint32* id, bool* a
 
 bool CoaDirecteur::PrepareRecemment(uint32 guidLow)
 {
-    return PrepareDepuisMoinsDe(guidLow, PREPARATION_REPOS_S);
+    // Revue M4 : un bot au repos `P-0` n'est pas teleporte au hasard non plus.
+    return PrepareDepuisMoinsDe(guidLow, PREPARATION_REPOS_S) || EnRepos(guidLow);
+}
+
+bool CoaDirecteur::EnRepos(uint32 guidLow)
+{
+    if (!nbRepos.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto it = reposReserve.find(guidLow);
+    return it != reposReserve.end() && it->second > Maintenant();
 }
 
 bool CoaDirecteur::ProieImposee(uint32 botLow, uint32* joueur, uint32* id)
@@ -5817,6 +6245,74 @@ bool CoaDirecteur::ProieImposee(uint32 botLow, uint32* joueur, uint32* id)
     if (id)
         *id = i;
     return true;
+}
+
+bool CoaDirecteur::Embuscade(uint32 botLow, EtatEmbuscade* sortie)
+{
+    // LA QUESTION D'ABORD : sans chasseur, un chargement atomique.
+    if (!nbChasseurs.load(std::memory_order_relaxed))
+        return false;
+    if (!sPlayerbotAIConfig.directeurEmbuscade || !sPlayerbotAIConfig.wildPvpChasse || !sPlayerbotAIConfig.wildPvpTraque)
+        return false;
+    uint32 const maintenant = Maintenant();
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto it = affectations.find(botLow);
+    if (it == affectations.end() || !it->second.a.chasseur || it->second.a.finS <= maintenant)
+        return false;
+    auto p = primes.find(it->second.joueur);
+    // Meme regle que ProieImposee : un prime AFK n'est la proie de personne.
+    if (p == primes.end() || p->second.finS <= maintenant || p->second.afk)
+        return false;
+    if (sortie)
+    {
+        sortie->joueur = it->second.joueur;
+        sortie->id = it->second.a.id;
+        sortie->prime = p->second.idOrigine ? p->second.idOrigine : p->second.id;
+        sortie->plafond = p->second.plafond;
+        sortie->reserve = it->second.a.reserve;
+        sortie->assaut = p->second.assaut;
+        sortie->raison = p->second.raisonAssaut;
+        sortie->place = 0xFF;
+        for (uint8 i = 0; i < EMBUSCADE_PLACES; ++i)
+            if (p->second.places[i] == botLow)
+                sortie->place = i;
+    }
+    return true;
+}
+
+bool CoaDirecteur::PointDEmbuscade(Map* carte, float jx, float jy, float jz, float angle, float distance, float& x,
+                                   float& y, float& z)
+{
+    x = jx + distance * std::cos(angle);
+    y = jy + distance * std::sin(angle);
+    z = jz;
+    if (!carte)
+        return false;
+    static constexpr float ECARTS[] = {0.0f, 0.26f, -0.26f, 0.52f, -0.52f};   // 0, +-15, +-30 degres
+    static constexpr float DECALAGES[] = {0.0f, -5.0f, 5.0f};
+    for (float const dd : DECALAGES)
+        for (float const e : ECARTS)
+        {
+            float const r = std::max(5.0f, distance + dd);
+            float const px = jx + r * std::cos(angle + e);
+            float const py = jy + r * std::sin(angle + e);
+            float sol = 0.0f;
+            // Laisse de hauteur (P-145) : un sol a plus de 6 yd du joueur est un
+            // autre etage (pont, rempart, falaise) : essai perdu.
+            if (!SolSec(carte, px, py, jz + Z_OFFSET_FIND_HEIGHT, sol) || std::fabs(sol - jz) > TIRAGE_ECART_Z)
+                continue;
+            if (ToitAuDessus(carte, px, py, sol, jz))
+                continue;
+            // Ligne de vue des tetes (+ 1,5 yd) : modeles seulement (Map::isInLineOfSight).
+            if (!carte->isInLineOfSight(px, py, sol + 1.5f, jx, jy, jz + 1.5f, PHASEMASK_NORMAL, LINEOFSIGHT_ALL_CHECKS,
+                                        VMAP::ModelIgnoreFlags::Nothing))
+                continue;
+            x = px;
+            y = py;
+            z = sol;
+            return true;
+        }
+    return false;
 }
 
 bool CoaDirecteur::AffectationDe(uint32 guidLow, Affectation* sortie)
