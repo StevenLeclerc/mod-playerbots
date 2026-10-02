@@ -792,7 +792,7 @@ bool PlayerbotAIConfig::Initialize()
     directeurMaxChasseursParPrime = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.MaxChasseursParPrime", 4);
     directeurPrimeMeute = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeMeute", 2);
     directeurPrimeTraqueSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeTraqueSecondes", 120);
-    directeurPrimeDetectionYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeDetectionYd", 250);
+    directeurPrimeDetectionYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeDetectionYd", 360);  // P-167 : 250 -> 360
     // Un plafond nul rendrait toute prime `bornes` sans le dire ; une meute nulle
     // interdirait au chasseur d'engager son propre prime.
     if (directeurMaxChasseursParPrime < 1)

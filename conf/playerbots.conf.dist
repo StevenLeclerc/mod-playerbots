@@ -3502,6 +3502,13 @@ AiPlayerbot.Directeur.Missions = 0
 #    mercenaire de la chasse (classe CoA) : EN TRAJET il est compose en mode RPG (new rpg le mene, etapes
 #    `E-` comprises, trajet pacifique) ; arrive, il retrouve sa chasse, lit son prime jusqu'a
 #    PrimeDetectionYd et ne convoite personne d'autre.
+#    Approche (P-167) : pour ce seul couple, la visibilite se lit « le chasseur voit-il son prime ».
+#    Un chasseur de classe furtive prend sa furtivite a 100 yd du prime (WildPvp.StealthAmbush),
+#    va au contact, dans son dos si possible, et ouvre par un sort « seulement furtif » (Flank du
+#    Ranger) s'il en connait un ; sinon, ou si l'ouverture ne part pas en 4 s, il rompt la furtivite
+#    et l'attaque ordinaire prend la main. A portee sans engagement, il ne rentre pas a son poste :
+#    il se rapproche et retente jusqu'a PrimeTraqueSecondes. Lignes `coa directeur chasse: … motif=`
+#    `furtif`, `engage` (ouverture=<sort>|0) et `traque_fin` (raison=) dans CoaBots.log.
 #
 #    AiPlayerbot.Directeur.TracerMorts
 #        Une ligne `coa directeur mort:` pour toute mort ou un HUMAIN est victime ou tueur (PvP, PvE,
@@ -3529,14 +3536,19 @@ AiPlayerbot.Directeur.MaxChasseursParPrime = 4
 AiPlayerbot.Directeur.PrimeMeute = 2
 
 #    AiPlayerbot.Directeur.PrimeTraqueSecondes
-#        chasser : duree maximale d'une traque vers le prime (45 s pour une traque ordinaire).
-#        Bornes 45-600.
+#        chasser : duree maximale d'une traque vers le prime (45 s pour une traque ordinaire), approche
+#        furtive et nouvelles tentatives au contact comprises ; a son terme, le chasseur rentre a son
+#        poste et peut repartir en traque. Bornes 45-600.
 #        Default: 120
 AiPlayerbot.Directeur.PrimeTraqueSecondes = 120
 
 #    AiPlayerbot.Directeur.PrimeDetectionYd
 #        chasser : distance a laquelle un chasseur en guet lit son prime par son guid (« nearest enemy
 #        players » ne porte qu'a 75 yd). Au-dela de la visibilite (100 yd) : le joueur voit arriver le
-#        chasseur a pied. Bornes 90-400.
-#        Default: 250
-AiPlayerbot.Directeur.PrimeDetectionYd = 250
+#        chasseur a pied. Bornes 90-400. Le service (exploitation/directeur/primes.py) lit cette ligne
+#        dans le fichier de conf et verifie que l'anneau le plus large de ses vagues, plus le disque de
+#        40 yd et une marge, reste en deca : sinon les chasseurs arrivent hors de detection (P-167).
+#        Il faut au moins 300 yd pour les anneaux actuels (vague 1 : 240 + 40 + 20). Defaut passe de
+#        250 a 360 le 02/10 (P-167), la valeur en service depuis le 01/10.
+#        Default: 360
+AiPlayerbot.Directeur.PrimeDetectionYd = 360

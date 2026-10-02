@@ -21,6 +21,7 @@
 #include "Spell.h"
 #include "SpellAuras.h"
 #include "SpellInfo.h"
+#include "ServerFacade.h"
 #include "SpellMgr.h"
 #include "Strategy.h"
 #include "Trigger.h"
@@ -1766,6 +1767,12 @@ public:
         // donc false.
         if (bot->IsInCombat() || bot->IsMounted() || bot->IsInFlight() || !bot->IsAlive())
             return RecordUsage(USAGE_BUFF, nullptr);
+        // P-167 : un sort lance rompt la furtivite (Elude 801345 porte
+        // AURA_INTERRUPT_FLAG_CAST). Le chasseur d'une prime en approche furtive
+        // ne se rebuffe pas. Les autres bots ne passent pas ce test (aura d'abord).
+        if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH) &&
+            CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), nullptr))
+            return RecordUsage(USAGE_BUFF, nullptr);
 
         std::vector<Usable> const spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & (KIND_BUFF | KIND_STANCE)) && !(kind & KIND_STEALTH) &&
@@ -1969,6 +1976,15 @@ public:
         if (bot->IsInCombat() || !bot->IsAlive() || bot->IsMounted() || bot->IsInFlight())
             return false;
         if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+            return false;
+
+        // P-167 : la furtivite du chasseur d'une prime appartient a sa traque
+        // (CoaChasse.h, TraquerLaPrime : des 100 yd, et rompue a la fin de la
+        // traque). Un second ecrivain la poserait hors traque, ou personne ne le
+        // menerait au contact (EnemyPlayerValue.cpp, approcheFurtive). Memes
+        // interrupteurs que cette valeur. Sans chasseur : un chargement atomique.
+        if (sPlayerbotAIConfig.wildPvpChasse && sPlayerbotAIConfig.wildPvpTraque &&
+            CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), nullptr))
             return false;
 
         // « enemy player target » porte deja toutes les regles de cible : camp, zones
@@ -2326,6 +2342,89 @@ void CoaChasseCompteRetour() { RecordUsage(USAGE_RETOUR, nullptr); }
 void CoaChasseCompteDecrochage() { RecordUsage(USAGE_DECROCHAGE, nullptr); }
 void CoaChasseComptePosteCatalogue() { RecordUsage(USAGE_POSTE_CATALOGUE, nullptr); }
 void CoaChasseComptePostePeuple() { RecordUsage(USAGE_POSTE_PEUPLE, nullptr); }
+
+/*
+ * P-167 -- les deux ponts de l'approche furtive d'une prime (declares et
+ * expliques dans Ai/Coa/CoaChasse.h). Ils ne sont appeles que par la traque
+ * d'un chasseur designe (CoaChasseAction::TraquerLaPrime) : aucun autre bot ne
+ * passe ici.
+ */
+
+// Vitesse d'approche prudente d'un bot furtif (la course vaut 7 yd/s ; Underwalk
+// 800797 ralentit de 21 % : CONCEPTION-mercenaire-chasseur.md § 2.3). Sert a ne
+// pas lancer a 100 yd une furtivite breve qui tomberait en route.
+constexpr float ApprocheFurtiveYdParS = 5.0f;
+
+bool CoaChasseEntrerEnFurtivite(PlayerbotAI* botAI, Player* bot, float distance)
+{
+    if (!botAI || !bot || !ClassHas(bot, KIND_STEALTH))
+        return false;
+    if (bot->IsInCombat() || bot->IsMounted() || bot->IsInFlight() || !bot->IsAlive() ||
+        bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+        return false;
+
+    // Le meme filtre que CoaStealthAction : une furtivite, jamais un sort hostile.
+    std::vector<Usable> const spells = KnownAbilities(botAI, bot, [](uint16 kind)
+        { return (kind & KIND_STEALTH) && !(kind & (KIND_HOSTILE | KIND_DAMAGE)); });
+
+    for (Usable const& spell : spells)
+    {
+        int32 const duree = spell.info->GetMaxDuration();
+        if (duree > 0 && float(duree) / float(IN_MILLISECONDS) * ApprocheFurtiveYdParS < distance)
+            continue;
+
+        SpellCastResult const check = StrictCheck(bot, spell.info, bot);
+        if (check != SPELL_CAST_OK)
+        {
+            RecordFailure(USAGE_STEALTH, spell.info->Id, uint16(check));
+            continue;
+        }
+
+        if (botAI->CastSpell(spell.info->Id, bot))
+        {
+            RecordUsage(USAGE_STEALTH, spell.info);
+            return true;
+        }
+
+        RecordFailure(USAGE_STEALTH, spell.info->Id, FAILURE_REFUSED);
+    }
+
+    RecordUsage(USAGE_STEALTH, nullptr);
+    return false;
+}
+
+uint32 CoaChasseOuvrirEnFurtif(PlayerbotAI* botAI, Player* bot, Unit* cible, bool& connue)
+{
+    connue = false;
+    if (!botAI || !bot || !cible || !bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+        return 0;
+
+    bool const tank = GetCoaRole(bot) == CoaRole::Tank;
+    std::vector<Usable> ouvertures = KnownAbilities(botAI, bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
+    // « Seulement furtif », et jamais un controle (revue m1) : un Venomancer
+    // ouvrirait par Arachnophobia 804970, une peur, et la proie fuirait.
+    ouvertures.erase(std::remove_if(ouvertures.begin(), ouvertures.end(), [](Usable const& spell)
+        { return !spell.info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) || (spell.kind & KIND_CONTROL); }),
+        ouvertures.end());
+    if (ouvertures.empty())
+        return 0;
+    connue = true;
+
+    // Face a la proie AVANT le filtre d'orientation de DropUncastableHere (Flank
+    // porte FacingCasterFlags = 1, lu dans Spell.dbc) ; arrete, pour que la
+    // marche en cours ne remette pas l'orientation de son trajet.
+    if (bot->isMoving())
+        bot->StopMoving();
+    ServerFacade::instance().SetFacingTo(bot, cible);
+
+    DropUncastableHere(bot, cible, ouvertures);
+    if (ouvertures.empty())
+        return 0;
+
+    SpellInfo const* const cast = CastFirst(botAI, bot, ouvertures, cible, USAGE_ATTACK);
+    RecordUsage(USAGE_ATTACK, cast);
+    return cast ? cast->Id : 0;
+}
 
 /*
  * La classe du poste tire. `classe` est un CoaSourcePoste (Ai/Coa/CoaPostes.h) :

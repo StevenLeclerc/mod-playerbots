@@ -155,6 +155,29 @@ void CoaChasseCompteRetour();
 void CoaChasseCompteDecrochage();
 
 /*
+ * P-167 -- l'approche furtive du chasseur d'une prime. Deux ponts de plus, pour
+ * la meme raison que les compteurs ci-dessus : KnownAbilities, StrictCheck,
+ * CastFirst et RecordUsage vivent dans l'espace de noms anonyme de
+ * CoaAiObjectContext.cpp, ouvert apres l'inclusion de cet en-tete.
+ *
+ * CoaChasseEntrerEnFurtivite : lance sur soi le premier sort de furtivite
+ * (KIND_STEALTH) connu et lancable, hors combat, a pied, pas deja furtif. Une
+ * furtivite BREVE (duree finie) n'est retenue que si elle tient la distance a
+ * couvrir (`distance` yd) : Witching Shroud (3 s) lancee a 100 yd tomberait en
+ * route. Rend vrai si un sort est parti. Compte dans « stealth » de coa usage.
+ *
+ * CoaChasseOuvrirEnFurtif : furtif, au contact de `cible`, lance la premiere
+ * ouverture « seulement furtif » (SPELL_ATTR0_ONLY_STEALTHED : Flank du Ranger,
+ * ses dix rangs 804940, 805082-805088, 582530-582531, liste de IsRangerFlank,
+ * AscensionClassMechanics.cpp) connue et lancable, face a la cible, et qui n'est
+ * pas un controle (KIND_CONTROL : une peur ferait fuir la proie). Rend l'id du
+ * sort parti, 0 sinon ; `connue` dit si le bot en connait au moins une.
+ * Compte dans « attack » de coa usage.
+ */
+bool CoaChasseEntrerEnFurtivite(PlayerbotAI* botAI, Player* bot, float distance);
+uint32 CoaChasseOuvrirEnFurtif(PlayerbotAI* botAI, Player* bot, Unit* cible, bool& connue);
+
+/*
  * LE SEUIL DE PV, UN SEUL CORPS POUR LES DEUX ACTIONS.
  *
  * Il sert a TROIS endroits, et c'est ce qui rend ses bords si couteux a se
@@ -640,6 +663,13 @@ public:
         if (bot->IsInCombat())
             return false;
 
+        // P-167 : la furtivite d'une prime ne survit pas a sa traque. Hors d'une
+        // traque imposee, un chasseur furtif cacherait son prime a « enemy player
+        // target » (EnemyPlayerValue.cpp, approcheFurtive) sans que personne ne
+        // le mene : on la rompt. Sans furtivite : un test d'aura.
+        if (etat != CoaEtatChasse::Traque || !traqueImposee)
+            QuitterLaFurtiviteDeLaPrime();
+
         // On relit le lieu depuis le DBC a chaque tick, et non pvpInfo.IsInNoPvPArea,
         // qui est faux dans les 31 sous-aires de capitale recensees (P-126).
         // GetZoneId()/GetAreaId() sont les valeurs rafraichies paresseusement par
@@ -799,7 +829,7 @@ public:
                 //
                 // CoA -- Directeur, lot D4c (SPEC-directeur-D4.md § 6.3, points 2
                 // et 3) : un CHASSEUR DESIGNE ne tire aucune proie au hasard. Il
-                // lit son prime PAR SON GUID, jusqu'a PrimeDetectionYd (250 yd :
+                // lit son prime PAR SON GUID, jusqu'a PrimeDetectionYd (360 yd par defaut depuis P-167 :
                 // « nearest enemy players » ne porte qu'a 75, et son disque est a
                 // 120-300 yd du joueur), et ne traque que lui. Sans chasseur : un
                 // chargement atomique, puis le code d'origine.
@@ -817,6 +847,14 @@ public:
                         etat = CoaEtatChasse::Traque;
                         debutTraque = getMSTime();
                         traqueImposee = imposee;
+                        // P-167 : etat de l'approche, neuf a chaque traque.
+                        primeDeLaTraque = imposee ? primeGuid : 0;
+                        chasseDeLaTraque = imposee ? chasseId : 0;
+                        engagementCompte = false;
+                        debutContact = 0;
+                        attentePlace = false;
+                        dernierEssaiPlace = 0;
+                        prochaineFurtivite = 0;
                         CoaChasseCompteTraque();
                         if (imposee)
                         {
@@ -1010,6 +1048,55 @@ private:
     // duree de la prime, PrimeDetectionYd et PrimeTraqueSecondes). Remis a faux
     // a toute sortie de traque (PasserEnRetour, Oublier).
     bool traqueImposee = false;
+    // P-167 : le prime et la commande `chasser` de la traque en cours (journal).
+    uint32 primeDeLaTraque = 0;
+    uint32 chasseDeLaTraque = 0;
+
+    // P-167 : l'approche de la prime. `furtifParLaPrime` : la furtivite en cours
+    // a ete prise par cette traque (rompue a sa fin). `prochaineFurtivite` : repli
+    // apres un echec de furtivite (heure, s) ; remis a zero au DEBUT de chaque
+    // traque (le repli ne vaut que dans la traque qui l'a pose). `debutContact` :
+    // premier tick au contact de la proie, 0 sinon. `engagementCompte` :
+    // traques_prime compte une fois par traque. `attentePlace` : furtif, au
+    // contact, l'engagement est refuse (meute pleine...) : il recule a
+    // ApprocheDosYd, furtif, et relit sa place toutes les DelaiScanProieMs
+    // (`dernierEssaiPlace`, `placeLibre` : la derniere lecture). debutContact,
+    // engagementCompte et attentePlace sont remis a zero a toute sortie de traque.
+    bool furtifParLaPrime = false;
+    time_t prochaineFurtivite = 0;
+    uint32 debutContact = 0;
+    bool engagementCompte = false;
+    bool attentePlace = false;
+    uint32 dernierEssaiPlace = 0;
+    bool placeLibre = false;
+
+    // Furtivite a partir de 100 yd de la proie (P-167, B : « vers 80-100 yd »).
+    static constexpr float DistanceFurtivitePrimeYd = 100.0f;
+    // Sous ce rayon, l'approche furtive vise un point DANS LE DOS de la proie.
+    static constexpr float ApprocheDosYd = 12.0f;
+    // Le point vise, derriere la proie (de centre a centre).
+    static constexpr float DosYd = 2.0f;
+    // MoveTo(cible, d) s'arrete a d yd des bords (GetDistance retire les rayons).
+    static constexpr float ContactYd = 1.0f;
+    // Au contact mais de face : on cherche le dos au plus 2,5 s, puis on ouvre.
+    static constexpr uint32 AttenteDosMs = 2500;
+    // Au contact, l'ouverture a 4 s pour partir (recharge globale, energie) ;
+    // au-dela, la furtivite est rompue et l'attaque ordinaire prend la main.
+    static constexpr uint32 AttenteOuvertureMs = 4000;
+    static constexpr time_t RepliFurtiviteSecondes = 10;
+    // Apres une furtivite rompue au contact sans ouverture : ne pas la reprendre
+    // aussitot (sinon furtif / visible en boucle si l'engagement est refuse).
+    static constexpr time_t RepliApresContactSecondes = 20;
+
+    void QuitterLaFurtiviteDeLaPrime()
+    {
+        if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH) &&
+            (furtifParLaPrime || CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), nullptr)))
+            bot->RemoveAurasByType(SPELL_AURA_MOD_STEALTH);
+        furtifParLaPrime = false;
+        debutContact = 0;
+        attentePlace = false;
+    }
 
     /*
      * REARMER LE COMPTEUR D'ENLISEMENT DE MoveFarTo, ET POURQUOI IL LE FAUT.
@@ -1090,7 +1177,11 @@ private:
     {
         etat = CoaEtatChasse::Retour;
         proie = ObjectGuid::Empty;
+        // P-167 : la furtivite prise pour la prime finit avec sa traque.
+        if (traqueImposee)
+            QuitterLaFurtiviteDeLaPrime();
         traqueImposee = false;
+        engagementCompte = false;
         debutRoute = getMSTime();
         RearmerEnlisement();
     }
@@ -1100,7 +1191,10 @@ private:
         etat = CoaEtatChasse::Choix;
         poste = WorldPosition();
         proie = ObjectGuid::Empty;
+        if (traqueImposee)
+            QuitterLaFurtiviteDeLaPrime();
         traqueImposee = false;
+        engagementCompte = false;
     }
 
     // Le seuil de decrochage, en pourcentage de PV. Le corps est CoaPvSousLeSeuil,
@@ -1128,7 +1222,7 @@ private:
         // l'instance de l'action.
         if (!sPlayerbotAIConfig.wildPvpTraque)
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("traque_eteinte");
             return false;
         }
 
@@ -1138,14 +1232,14 @@ private:
         if (traqueImposee && (!CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid) ||
                               proie.GetCounter() != primeGuid))
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("prime_finie");
             return false;
         }
         uint32 const dureeMaxMs =
             traqueImposee ? sPlayerbotAIConfig.directeurPrimeTraqueSecondes * IN_MILLISECONDS : DureeTraqueMaxMs;
         if (GetMSTimeDiffToNow(debutTraque) >= dureeMaxMs)
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("duree");
             return false;
         }
 
@@ -1156,7 +1250,7 @@ private:
         if (!cible || !cible->IsInWorld() || !cible->IsAlive() || !cible->IsPlayer() ||
             cible->GetMapId() != bot->GetMapId())
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("proie_perdue");
             return false;
         }
 
@@ -1174,7 +1268,7 @@ private:
         if (CoaDirecteur::SousTreve(cible->GetGUID().GetCounter()) ||
             CoaDirecteur::MercenaireSuspendu(bot->GetGUID().GetCounter()) || CoaDirecteur::EnTrajetPacifique(bot))
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("treve_ou_trajet");
             return false;
         }
 
@@ -1182,7 +1276,7 @@ private:
         float const portee = traqueImposee ? float(sPlayerbotAIConfig.directeurPrimeDetectionYd) : PorteeDetection();
         if (distance > portee)
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("hors_detection");
             return false;
         }
         // Lot D4c : la treve de 60 s apres une mort (MercenaryRewards) n'est
@@ -1190,7 +1284,7 @@ private:
         // prime ne passe pas par « nearest enemy players », qui la teste.
         if (traqueImposee && MercenaryRewards::instance().IsUnderTruce(cible->GetGUID().GetRawValue()))
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("treve_mort");
             return false;
         }
 
@@ -1201,7 +1295,7 @@ private:
         // couterait un balayage de grille de 100 yd pour rendre la meme reponse.
         if (!AttackersValue::IsPossibleTarget(cible, bot))
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("cible_impossible");
             return false;
         }
 
@@ -1215,9 +1309,13 @@ private:
         // muet, jusqu'a DureeTraqueMaxMs.
         if (sPlayerbotAIConfig.CoaLieuSansPvp(cible->GetZoneId(), cible->GetAreaId()))
         {
-            AbandonnerLaTraque();
+            AbandonnerLaTraque("lieu_sans_pvp");
             return false;
         }
+
+        // P-167 (B, C, D) : la traque d'une prime a sa propre fin de course.
+        if (traqueImposee)
+            return TraquerLaPrime(cible, distance);
 
         // INVARIANT 1. A portee d'engagement, la chasse se tait : « attack enemy
         // player » (55) et « coa stealth » (56) doivent prendre le tick. On
@@ -1228,8 +1326,6 @@ private:
         // proie reste, elle, dans « nearest enemy players ».
         if (distance <= PorteeEngagement(cible))
         {
-            if (traqueImposee)
-                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TRAQUES_PRIME);
             PasserEnRetour();
             return false;
         }
@@ -1267,12 +1363,228 @@ private:
      *
      * Si le poste n'est plus valable, Oublier() rend a CHOIX.
      */
-    void AbandonnerLaTraque()
+    void AbandonnerLaTraque(char const* raison = nullptr)
     {
+        // P-167 : la fin d'une traque de prime se dit, une ligne par traque
+        // (motif=traque_fin). Les traques ordinaires restent muettes.
+        if (traqueImposee && raison)
+            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=traque_fin raison={} engage={}",
+                     bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, raison,
+                     engagementCompte ? 1 : 0);
         if (PosteEncoreValable())
             PasserEnRetour();
         else
             Oublier();
+    }
+
+    /*
+     * P-167 -- LA TRAQUE D'UNE PRIME, de la detection au premier coup.
+     *
+     * Appelee par Traquer() une fois tous ses gardes passes (prime en cours,
+     * duree PrimeTraqueSecondes, proie vivante sur la carte, treves, cible
+     * possible, lieu PvP). Trois choses changent pour ce seul couple :
+     *
+     *   B. Le chasseur prend sa furtivite des DistanceFurtivitePrimeYd (100 yd),
+     *      hors combat, et non plus a 20 yd par « coa ambush » (qui se tait pour
+     *      lui : CoaAiObjectContext.cpp, CoaAmbushTrigger).
+     *   C. Furtif, il va au contact, dans le dos de la proie si possible ; la,
+     *      il lance lui-meme l'ouverture « seulement furtif » (Flank). POURQUOI
+     *      LUI ET PAS « attack enemy player » : celle-ci arme le coup d'arme
+     *      (Unit::Attack), et le premier coup d'arme retire toute aura marquee
+     *      AURA_INTERRUPT_FLAG_MELEE_ATTACK (Unit::AttackerStateUpdate) -- Elude
+     *      801345 la porte (AuraInterruptFlags 0x23c07, lu dans Spell.dbc), de
+     *      meme que tout sort lance (FLAG_CAST). Le coup d'arme partait avant
+     *      l'ouverture. Pendant l'approche, « enemy player target » ne designe
+     *      pas le prime (EnemyPlayerValue.cpp, approcheFurtive) : la chasse
+     *      garde donc la parole jusqu'au contact. L'ouverture n'est lancee que
+     *      si le prime est dans « nearest enemy players », c'est-a-dire s'il
+     *      passe les regles de l'engagement (meute PrimeMeute, treve de 60 s,
+     *      maitre, zones interdites) : l'invariant 2 tient. Refuse, il recule
+     *      a ApprocheDosYd SANS rompre sa furtivite et attend une place (revue
+     *      M1). Sans ouverture connue, ou si elle ne part pas en
+     *      AttenteOuvertureMs, la furtivite est rompue et l'attaque ordinaire
+     *      prend la main.
+     *   D. A portee d'engagement sans engagement (denivele, ligne de vue,
+     *      meute), il ne rentre plus au poste : il se rapproche et retente,
+     *      jusqu'a PrimeTraqueSecondes.
+     */
+    bool TraquerLaPrime(Unit* cible, float distance)
+    {
+        // Proie sur un taxi : on ne la suit pas a pied sous son trajet (D la
+        // garderait sinon jusqu'a hors_detection). Le guet la relira a l'arrivee.
+        if (cible->IsInFlight())
+        {
+            AbandonnerLaTraque("proie_en_vol");
+            return false;
+        }
+
+        if (!engagementCompte && distance <= PorteeEngagement(cible))
+        {
+            engagementCompte = true;
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TRAQUES_PRIME);
+        }
+
+        bool const furtif = bot->HasAuraType(SPELL_AURA_MOD_STEALTH);
+        if (furtif)
+            furtifParLaPrime = true;
+
+        if (!furtif)
+        {
+            debutContact = 0;
+            // B. Une fois par repli au plus ; une classe sans furtivite rend
+            // faux au premier test (ClassHas) et attend le repli.
+            time_t const maintenant = time(nullptr);
+            if (sPlayerbotAIConfig.wildPvpStealthAmbush && distance <= DistanceFurtivitePrimeYd &&
+                maintenant >= prochaineFurtivite)
+            {
+                if (CoaChasseEntrerEnFurtivite(botAI, bot, distance))
+                {
+                    furtifParLaPrime = true;
+                    LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=furtif distance={}",
+                             bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, uint32(distance));
+                    return true;
+                }
+                prochaineFurtivite = maintenant + RepliFurtiviteSecondes;
+            }
+
+            // D. A decouvert : « attack enemy player » (55) prend le tick des que
+            // l'engagement est permis. Si la chasse a encore la parole a portee,
+            // il est refuse. Par denivele ou ligne de vue (le prime est pourtant
+            // dans « nearest enemy players ») : on se rapproche jusqu'au contact.
+            // Par les regles (meute pleine, treve...) : on se tient a portee
+            // d'engagement, sans coller la proie a decouvert (revue M1).
+            // Distinguer les deux : « nearest enemy players » exige aussi la ligne
+            // de vue (NearestUnitsValue). Absent de la liste ET en vue : ce sont
+            // les regles qui refusent.
+            if (distance > PorteeEngagement(cible))
+                return MoveTo(cible, PorteeEngagement(cible), MovementPriority::MOVEMENT_COMBAT);
+            if (!PlaceLibre(cible, false) && bot->IsWithinLOSInMap(cible))
+                return TenirLaPosition();
+            return MoveTo(cible, ContactYd, MovementPriority::MOVEMENT_COMBAT);
+        }
+
+        // C. Furtif.
+        bool const dansLeDos = !cible->HasInArc(float(M_PI), bot);
+
+        // Revue M1 : engagement refuse au contact (meute pleine) -- il ne rompt
+        // pas sa furtivite : il recule a ApprocheDosYd, reste cache, et relit sa
+        // place toutes les DelaiScanProieMs. Une place libre le renvoie au dos.
+        if (attentePlace)
+        {
+            if (PlaceLibre(cible, false))
+            {
+                attentePlace = false;
+                LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=place_libre distance={}",
+                         bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, uint32(distance));
+            }
+            else
+            {
+                debutContact = 0;
+                if (distance < ApprocheDosYd - 2.0f || distance > ApprocheDosYd + 6.0f)
+                    return MoveTo(cible, ApprocheDosYd, MovementPriority::MOVEMENT_COMBAT);
+                return TenirLaPosition();
+            }
+        }
+
+        if (bot->IsWithinMeleeRange(cible))
+        {
+            if (!debutContact)
+                debutContact = getMSTime();
+            uint32 const auContactMs = GetMSTimeDiffToNow(debutContact);
+            if (dansLeDos || auContactMs >= AttenteDosMs)
+            {
+                bool connue = false;
+                uint32 ouverture = 0;
+                bool const permis = PlaceLibre(cible, true);
+                if (!permis)
+                {
+                    attentePlace = true;
+                    debutContact = 0;
+                    LOG_INFO("playerbots",
+                             "coa directeur chasse: bot={} joueur={} id={} motif=attente raison=engagement_refuse",
+                             bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque);
+                    return MoveTo(cible, ApprocheDosYd, MovementPriority::MOVEMENT_COMBAT);
+                }
+                ouverture = CoaChasseOuvrirEnFurtif(botAI, bot, cible, connue);
+                if (ouverture)
+                {
+                    LOG_INFO("playerbots",
+                             "coa directeur chasse: bot={} joueur={} id={} motif=engage ouverture={} dos={} distance={}",
+                             bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, ouverture,
+                             dansLeDos ? 1 : 0, uint32(distance));
+                    furtifParLaPrime = false;
+                    debutContact = 0;
+                    return true;
+                }
+                // Engagement permis. Sans ouverture connue : la main tout de suite.
+                // Ouverture qui ne part pas : apres AttenteOuvertureMs au contact.
+                if (!connue || auContactMs >= AttenteOuvertureMs)
+                {
+                    // L'attaque ordinaire prend la main : la furtivite rompue,
+                    // « enemy player target » rend le prime (s'il est permis).
+                    bot->RemoveAurasByType(SPELL_AURA_MOD_STEALTH);
+                    LOG_INFO("playerbots",
+                             "coa directeur chasse: bot={} joueur={} id={} motif=engage ouverture=0 raison={} dos={}",
+                             bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque,
+                             connue ? "ouverture_refusee" : "sans_ouverture",
+                             dansLeDos ? 1 : 0);
+                    furtifParLaPrime = false;
+                    debutContact = 0;
+                    prochaineFurtivite = time(nullptr) + RepliApresContactSecondes;
+                    return true;
+                }
+            }
+        }
+        else
+            debutContact = 0;
+
+        if (distance > ApprocheDosYd)
+            return MoveTo(cible, ContactYd, MovementPriority::MOVEMENT_COMBAT);
+
+        // Le point dans le dos : DosYd derriere la proie, sur son orientation.
+        float const angle = cible->GetOrientation() + float(M_PI);
+        float x = cible->GetPositionX() + std::cos(angle) * DosYd;
+        float y = cible->GetPositionY() + std::sin(angle) * DosYd;
+        float z = cible->GetPositionZ();
+        bot->UpdateAllowedPositionZ(x, y, z);
+        return MoveTo(cible->GetMapId(), x, y, z, false, false, false, false, MovementPriority::MOVEMENT_COMBAT);
+    }
+
+    // Le prime passe-t-il les regles de l'ENGAGEMENT ? « nearest enemy players »
+    // est NearestEnemyPlayersValue : AcceptUnit y applique meute, treves, maitre
+    // et zones (EnemyPlayerValue.cpp). Lu seulement au contact (balayage de grille
+    // de 75 yd par lecture : voir DelaiScanProieMs).
+    bool PrimeAPortee(Unit* cible)
+    {
+        Value<GuidVector>* proches = context->GetValue<GuidVector>("nearest enemy players");
+        if (!proches)
+            return false;
+        GuidVector const liste = proches->Get();
+        return std::find(liste.begin(), liste.end(), cible->GetGUID()) != liste.end();
+    }
+
+    // Rester sur place en attendant une place, sans deriver (« move random »,
+    // 1,5, reprendrait sinon le tick) : le patron du GUET -- rendre la main tant
+    // que le verrou de mouvement court, sinon en poser un court. MoveTo de la
+    // traque passe en MOVEMENT_COMBAT, au-dessus de ce verrou NORMAL.
+    bool TenirLaPosition()
+    {
+        if (IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL))
+            return false;
+        return ForceToWait(urand(1000, 2000));
+    }
+
+    // PrimeAPortee, relue au plus toutes les DelaiScanProieMs (chaque lecture
+    // est un balayage de grille) ; `fraiche` force la lecture (au contact, juste
+    // avant l'ouverture : la meute doit etre lue au moment du coup).
+    bool PlaceLibre(Unit* cible, bool fraiche)
+    {
+        if (fraiche || !dernierEssaiPlace || GetMSTimeDiffToNow(dernierEssaiPlace) >= DelaiScanProieMs)
+        {
+            dernierEssaiPlace = getMSTime();
+            placeLibre = PrimeAPortee(cible);
+        }
+        return placeLibre;
     }
 
     // Voir l'en-tete de PorteeEngagementForte : 60 yd si le bot a plus de PV que
@@ -1464,7 +1776,8 @@ private:
     /*
      * LOT D4c (SPEC-directeur-D4.md § 6.3, point 2) : la proie d'un chasseur
      * designe, lue PAR SON GUID. Les memes tests que ChoisirProie -- vivante,
-     * joueur, meme carte, pas deja a portee d'engagement, hors lieu sans PvP
+     * joueur, meme carte (P-167 : SANS la borne basse « pas deja a portee
+     * d'engagement » de ChoisirProie, voir le corps), hors lieu sans PvP
      * (invariant 3), AttackersValue::IsPossibleTarget (invariant 2) -- sans la
      * portee de « nearest enemy players » : PrimeDetectionYd a la place. Plus
      * les deux gardes que « nearest enemy players » aurait appliquees et que
@@ -1490,8 +1803,17 @@ private:
         if (!unite || !unite->IsInWorld() || !unite->IsAlive() || !unite->IsPlayer() ||
             unite->GetMapId() != bot->GetMapId())
             return ObjectGuid::Empty;
+        // P-167 (D) : plus de borne basse. Une proie deja a portee d'engagement
+        // et que « attack enemy player » n'a pas prise (denivele, ligne de vue,
+        // meute, ou chasseur furtif : EnemyPlayerValue.cpp, approcheFurtive) se
+        // traque quand meme : la traque d'une prime va jusqu'au contact. Si
+        // l'engagement est permis, la chasse n'a pas la parole (isUseful).
         float const distance = bot->GetExactDist(unite);
-        if (distance > float(sPlayerbotAIConfig.directeurPrimeDetectionYd) || distance <= PorteeEngagement(unite))
+        if (distance > float(sPlayerbotAIConfig.directeurPrimeDetectionYd))
+            return ObjectGuid::Empty;
+        // P-167 : meme garde que TraquerLaPrime (sans lui, traque et abandon
+        // « proie_en_vol » toutes les DelaiScanProieMs).
+        if (unite->IsInFlight())
             return ObjectGuid::Empty;
         if (sPlayerbotAIConfig.CoaLieuSansPvp(unite->GetZoneId(), unite->GetAreaId()))
             return ObjectGuid::Empty;

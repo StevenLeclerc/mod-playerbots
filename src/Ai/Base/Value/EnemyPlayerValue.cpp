@@ -241,11 +241,17 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MEUTE_PERMISE);
     }
 
+    // CoA -- P-167 (A). Le test amont « enemy->CanSeeOrDetect(bot) » demande si
+    // la PROIE voit le bot : un bot furtif perd donc sa cible. Pour le SEUL couple
+    // chasseur designe -> son prime, on lit le bon sens (le bot voit-il sa proie ?).
+    // Tout autre couple garde le test amont, a l'identique, et a la meme place
+    // dans la chaine (evalue seulement si les tests moins chers ont passe).
     if (enemy && (mercenaire || (botAI->IsOpposing(enemy) && enemy->IsPvP())) &&
         !sPlayerbotAIConfig.IsPvpProhibited(enemy->GetZoneId(), enemy->GetAreaId()) &&
         !enemy->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NON_ATTACKABLE_2) &&
         ((inCannon || !enemy->HasFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_NOT_SELECTABLE))) &&
-        /*!enemy->HasStealthAura() && !enemy->HasInvisibilityAura()*/ enemy->CanSeeOrDetect(bot) &&
+        /*!enemy->HasStealthAura() && !enemy->HasInvisibilityAura()*/
+        (primeEnFace ? bot->CanSeeOrDetect(enemy) : enemy->CanSeeOrDetect(bot)) &&
         !(enemy->HasSpiritOfRedemptionAura()))
     {
         // If with master, only attack if master is PvP flagged.
@@ -278,13 +284,36 @@ Unit* EnemyPlayerValue::Calculate()
             controllingVehicle = true;
     }
 
+    // CoA -- P-167. Le chasseur designe d'une prime, et son prime (guid bas d'un
+    // JOUEUR : la comparaison n'est faite que sur un joueur, un compteur de
+    // creature pouvant valoir le meme nombre). Sans chasseur : un chargement
+    // atomique, et `voit` est le test amont.
+    uint32 primeGuid = 0;
+    bool const imposee = CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid);
+    auto const estLePrime = [&](Unit const* u) {
+        return imposee && u->IsPlayer() && u->GetGUID().GetCounter() == primeGuid;
+    };
+    // (A) Pour ce seul couple : le bot voit-il sa proie ? Ailleurs : la proie
+    // voit-elle le bot (test amont, inchange).
+    auto const voit = [&](Unit* u) { return estLePrime(u) ? bot->CanSeeOrDetect(u) : u->CanSeeOrDetect(bot); };
+    // (C) Approche furtive : un chasseur FURTIF ne designe pas son prime ici
+    // (etape 2). C'est la traque (CoaChasse.h, TraquerLaPrime) qui le mene au
+    // contact, dans le dos, puis lance l'ouverture ou rompt la furtivite et lui
+    // rend la main. Sans cela, l'attaque partirait a 20 ou 60 yd et le premier
+    // sort ou le premier coup d'arme romprait la furtivite avant l'ouverture.
+    // Memes interrupteurs que la traque (WildPvp.Chasse et WildPvp.Traque) :
+    // si la chasse ne tourne pas, rien n'est cache. Les etapes 1 (combat deja
+    // engage) et 3 (riposte de groupe) ne sont pas touchees par ce garde.
+    bool const approcheFurtive = imposee && sPlayerbotAIConfig.wildPvpChasse && sPlayerbotAIConfig.wildPvpTraque &&
+                                 bot->HasAuraType(SPELL_AURA_MOD_STEALTH);
+
     // 1. Check units we are currently in PvP combat with.
     std::vector<Unit*> targets;
     Unit* pVictim = bot->GetVictim();
     for (auto const& [guid, combatRef] : bot->GetCombatManager().GetPvPCombatRefs())
     {
         Unit* pTarget = combatRef->GetOther(bot);
-        if (!pTarget || pTarget == pVictim || !pTarget->IsPlayer() || !pTarget->CanSeeOrDetect(bot) ||
+        if (!pTarget || pTarget == pVictim || !pTarget->IsPlayer() || !voit(pTarget) ||
             !bot->IsWithinDist(pTarget, VISIBILITY_DISTANCE_NORMAL))
             continue;
 
@@ -330,6 +359,9 @@ Unit* EnemyPlayerValue::Calculate()
         if (pTarget == pVictim)
             continue;
 
+        if (approcheFurtive && estLePrime(pTarget))
+            continue;
+
         if (bot->GetTeamId() == TEAM_HORDE)
         {
             if (pTarget->HasAura(23333))
@@ -370,7 +402,7 @@ Unit* EnemyPlayerValue::Calculate()
 
                 if (Unit* pAttacker = pMember->getAttackerForHelper())
                     if (pAttacker->IsPlayer() && bot->IsWithinDist(pAttacker, maxAggroDistance * 2.0f) &&
-                        bot->IsWithinLOSInMap(pAttacker) && pAttacker != pVictim && pAttacker->CanSeeOrDetect(bot))
+                        bot->IsWithinLOSInMap(pAttacker) && pAttacker != pVictim && voit(pAttacker))
                         return pAttacker;
             }
         }
