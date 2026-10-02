@@ -3685,8 +3685,11 @@ float AngleVuDuJoueur(Player const* j, float x, float y)
 
 void SuivreEmbuscades()
 {
-    if (!sPlayerbotAIConfig.directeurEmbuscade || !nbPrimes.load(std::memory_order_relaxed) ||
-        !nbChasseurs.load(std::memory_order_relaxed))
+    // Pas de garde sur nbChasseurs (02/10, arcs 7 et 9) : une vague entierement
+    // tombee n'a plus d'affectation, et sortir ici figeait l'assaut a vrai --
+    // la vague suivante partait "a l'assaut" des son saut, a 210 yd, au lieu de
+    // s'approcher a couvert. C'est justement sans chasseur que l'assaut retombe.
+    if (!sPlayerbotAIConfig.directeurEmbuscade || !nbPrimes.load(std::memory_order_relaxed))
         return;
     uint32 const maintenant = Maintenant();
     struct Vue
