@@ -470,6 +470,23 @@ public:
     uint32 directeurPrimeMeute;               // mercenaires engages ensemble sur le prime, au plus
     uint32 directeurPrimeTraqueSecondes;      // traque d'un chasseur vers son prime
     uint32 directeurPrimeDetectionYd;         // portee a laquelle un chasseur lit son prime
+    // Reserve de chasseurs (02/10, coa-project/docs/CONCEPTION-reserve-chasseurs.md) :
+    // identifiants de guilde separes par des virgules ("12,13"). Un mercenaire dont
+    // GetGuildId() y figure est un « chasseur de reserve ». Vide (defaut) : aucun.
+    // Lue par EstGuildeDeReserve / GuildesDeReserve. Le Directeur la lit au fil
+    // monde (pose `chasser`, preparation `P-`) et fige le resultat dans
+    // l'affectation, que les fils de carte lisent. D'AUTRES lecteurs la lisent
+    // depuis le fil du bot (actions et declencheurs de guilde, PlayerbotFactory::
+    // InitGuild via AssignToGuild) : sans course, parce que la chaine n'est
+    // reecrite que par `reload config`, au fil monde, pendant que les cartes ne
+    // tournent pas (World::Update : les commandes avant sMapMgr->Update).
+    std::string directeurReserveGuildes;
+    // La guilde `guildId` est-elle de la reserve ? Lecture STRICTE de
+    // directeurReserveGuildes (un morceau mal forme, vide compris : aucune
+    // reserve), la meme que le service (emetteur.lire_reserve_guildes). guildId
+    // nul : jamais. GuildesDeReserve : la liste lue (vide si mal formee).
+    bool EstGuildeDeReserve(uint32 guildId) const;
+    std::vector<uint32> GuildesDeReserve() const;
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

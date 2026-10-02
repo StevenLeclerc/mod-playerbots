@@ -19,6 +19,7 @@
 #include "RandomPlayerbotMgr.h"
 #include "Talentspec.h"
 #include "TravelMgr.h"
+#include <algorithm>
 #include <cctype>
 #include <iostream>
 #include <sstream>
@@ -793,6 +794,7 @@ bool PlayerbotAIConfig::Initialize()
     directeurPrimeMeute = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeMeute", 2);
     directeurPrimeTraqueSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeTraqueSecondes", 120);
     directeurPrimeDetectionYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeDetectionYd", 360);  // P-167 : 250 -> 360
+    directeurReserveGuildes = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.ReserveGuildes", "");
     // Un plafond nul rendrait toute prime `bornes` sans le dire ; une meute nulle
     // interdirait au chasseur d'engager son propre prime.
     if (directeurMaxChasseursParPrime < 1)
@@ -1203,6 +1205,43 @@ bool PlayerbotAIConfig::IsInPvpProhibitedArea(uint32 id)
 // Un identifiant inconnu du DBC (0 compris) rend nullptr et ne conclut rien :
 // on retombe alors sur les listes, qui repondent faux. C'est le comportement
 // voulu -- ne pas interdire ce qu'on ne sait pas lire.
+std::vector<uint32> PlayerbotAIConfig::GuildesDeReserve() const
+{
+    std::vector<uint32> ids;
+    std::string const& liste = directeurReserveGuildes;
+    if (liste.find_first_not_of(" \t") == std::string::npos)
+        return ids;
+    size_t debut = 0;
+    while (debut <= liste.size())
+    {
+        size_t fin = liste.find(',', debut);
+        if (fin == std::string::npos)
+            fin = liste.size();
+        std::string morceau = liste.substr(debut, fin - debut);
+        morceau.erase(std::remove_if(morceau.begin(), morceau.end(), [](char ch) { return ch == ' ' || ch == '\t'; }),
+                      morceau.end());
+        if (morceau.empty() || morceau.size() > 10 ||
+            !std::all_of(morceau.begin(), morceau.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+            return {};
+        unsigned long long const v = std::strtoull(morceau.c_str(), nullptr, 10);
+        if (v == 0 || v > 0xFFFFFFFFull)
+            return {};
+        if (std::find(ids.begin(), ids.end(), static_cast<uint32>(v)) == ids.end())
+            ids.push_back(static_cast<uint32>(v));
+        debut = fin + 1;
+    }
+    return ids;
+}
+
+bool PlayerbotAIConfig::EstGuildeDeReserve(uint32 guildId) const
+{
+    // Sans reserve (cas courant) : un test de chaine vide, aucune allocation.
+    if (!guildId || directeurReserveGuildes.empty())
+        return false;
+    std::vector<uint32> const ids = GuildesDeReserve();
+    return std::find(ids.begin(), ids.end(), guildId) != ids.end();
+}
+
 bool PlayerbotAIConfig::CoaLieuSansPvp(uint32 zoneId, uint32 areaId)
 {
     if (AreaTableEntry const* aire = sAreaTableStore.LookupEntry(areaId))

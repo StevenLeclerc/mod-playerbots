@@ -89,11 +89,19 @@ uint8 GuidManageAction::GetRankId(Player* member)
 
 bool GuildInviteAction::isUseful()
 {
+    // CoA -- reserve de chasseurs du Directeur (02/10) : un bot de la reserve
+    // n'invite personne dans sa guilde (commande « guild invite » comprise) : la
+    // reserve ne se remplit que par l'outil d'exploitation (.guild invite).
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+        return false;
     return bot->GetGuildId() && sGuildMgr->GetGuildById(bot->GetGuildId())->HasRankRight(bot, GR_RIGHT_INVITE);
 }
 
 bool GuildInviteAction::PlayerIsValid(Player* member)
 {
+    // CoA (02/10) : meme garde a l'execution (DoSpecificAction peut passer outre isUseful).
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+        return false;
     return !member->GetGuildId() && (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GUILD) ||
                                      (bot->GetTeamId() == member->GetTeamId()));
 }
@@ -125,6 +133,10 @@ bool GuildRemoveAction::isUseful()
 
 bool GuildRemoveAction::PlayerIsValid(Player* member)
 {
+    // CoA -- reserve de chasseurs du Directeur (02/10) : personne n'est renvoye
+    // d'une guilde de la reserve par un bot (l'operateur garde .guild uninvite).
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+        return false;
     return member->GetGuildId() == bot->GetGuildId() && GetRankId(bot) < GetRankId(member);
 };
 
@@ -287,6 +299,11 @@ bool GuildManageNearbyAction::isUseful()
     if (!bot->GetGuildId())
         return false;
 
+    // CoA (02/10) : un bot d'une guilde de la reserve n'invite, ne promeut ni ne
+    // retrograde personne (la reserve ne se remplit que par l'outil d'exploitation).
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+        return false;
+
     Guild* guild = sGuildMgr->GetGuildById(bot->GetGuildId());
     Guild::Member* botMember = guild->GetMember(bot->GetGUID());
 
@@ -295,6 +312,15 @@ bool GuildManageNearbyAction::isUseful()
 
 bool GuildLeaveAction::Execute(Event event)
 {
+    // CoA -- reserve de chasseurs du Directeur (02/10) : un bot de la reserve ne
+    // quitte pas sa guilde (commande « guild leave » d'un joueur, ou declencheur
+    // « leave large guild »). La guilde EST le registre de la reserve.
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+    {
+        botAI->TellError("Sorry, I am happy in my guild :)");
+        return false;
+    }
+
     Player* owner = event.getOwner();
     if (owner && !botAI->GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_INVITE, false, owner, true))
     {
@@ -307,4 +333,7 @@ bool GuildLeaveAction::Execute(Event event)
     return true;
 }
 
-bool GuildLeaveAction::isUseful() { return bot->GetGuildId(); }
+bool GuildLeaveAction::isUseful()
+{
+    return bot->GetGuildId() && !sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId());
+}

@@ -25,6 +25,7 @@
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotFactory.h"
 #include "Playerbots.h"
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
@@ -32,6 +33,7 @@
 #include "Timer.h"
 #include "TravelMgr.h"
 #include "Weather.h"
+#include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
@@ -510,6 +512,11 @@ struct Prime
     uint32 finS;        // Maintenant()
     uint32 plafond;     // chasseurs au plus (colonne `valeur`)
     std::string origine;  // proprietaire (regle, ask, arc, manuel) : seul le meme, ou `manuel`, remplace
+    // Reserve de chasseurs (02/10) : le joueur est AFK (PLAYER_FLAGS_AFK). Lu sur
+    // le JOUEUR par le fil monde seul (pose, puis SuivrePrimes chaque seconde),
+    // ecrit sous le verrou exclusif ; les fils de carte ne lisent que cette
+    // copie (ChasseurDe, ProieImposee). Un prime AFK n'est la proie de personne.
+    bool afk = false;
 };
 std::unordered_map<uint32, Prime> primes;   // cle : guid bas du joueur
 std::atomic<uint32> nbPrimes{0};
@@ -1087,7 +1094,10 @@ bool ChasseurEnTrajet(uint32 guidLow)
         return false;
     std::shared_lock<std::shared_mutex> garde(verrouConsignes);
     auto it = affectations.find(guidLow);
-    return it != affectations.end() && it->second.a.chasseur &&
+    // Reserve de chasseurs (02/10) : un chasseur de RESERVE n'est jamais compose
+    // en mode RPG -- il garde sa chasse en trajet, pour traquer des
+    // l'atterrissage de son saut (CONCEPTION-reserve-chasseurs.md § 2.3).
+    return it != affectations.end() && it->second.a.chasseur && !it->second.a.reserve &&
            it->second.a.phase == CoaDirecteur::CoaDirPhase::Trajet && it->second.a.finS > Maintenant();
 }
 
@@ -1510,6 +1520,12 @@ void FinirAffectation(AffectationInterne const& f, char const* statut, char cons
     // d'etre ecrite AVANT cet appel), la fabrique doit lui rendre sa chasse.
     if (f.a.chasseur && f.a.phase == CoaDirecteur::CoaDirPhase::Trajet && !ChasseurEnTrajet(f.guid))
         BasculerComposition(f.guid);
+    // Reserve de chasseurs (02/10, revue M2) : un chasseur qui n'en est plus un
+    // (aucune autre affectation `chasser` active ecrite avant cet appel) perd sa
+    // strategie de combat « coa chasseur prime » a la recomposition. Sans elle,
+    // rien de grave : ses actions par defaut relisent ChasseurDe et se taisent.
+    else if (f.a.chasseur && !CoaDirecteur::ChasseurDe(f.guid))
+        BasculerComposition(f.guid);
     if (statut)
     {
         LOG_INFO("playerbots", "coa directeur cmd: id={} verbe={} cible={} joueur={} statut={} raison={}", f.a.id,
@@ -1547,6 +1563,16 @@ size_t LeverAffectationsSi(Predicat lever, char const* raison)
         FinirAffectation(f, "leve", raison, raison);
     }
     return levees.size();
+}
+
+// La prime du joueur `joueurLow` court-elle ? Tout fil (verrou partage).
+bool PrimeCourt(uint32 joueurLow, uint32 maintenant)
+{
+    if (!joueurLow || !nbPrimes.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto it = primes.find(joueurLow);
+    return it != primes.end() && it->second.finS > maintenant;
 }
 
 // Suivi des phases, chaque seconde, fil monde, cartes a l'arret (§ 6.2). Au plus
@@ -1776,7 +1802,11 @@ void SuivreAffectations()
         }
         // Une etape deja atteinte n'est pas un trajet qui n'arrive pas : sortie
         // du disque (combat, errance), la laisse l'y ramene.
-        if (!f.etapeArrivee && maintenant - f.poseS >= trajetMax)
+        // Reserve de chasseurs (02/10, revue M3) : un chasseur de RESERVE traque au
+        // lieu de rejoindre le disque de sa finale ; il n'est pas leve pour ce
+        // motif tant que sa prime court (sa fin le leve `fin_prime`).
+        if (!f.etapeArrivee && maintenant - f.poseS >= trajetMax &&
+            !(f.a.chasseur && f.a.reserve && PrimeCourt(f.joueur, maintenant)))
             lever(f, "trajet_abandonne", CoaDirecteur::COA_DIR_TRAJETS_ABANDONNES);
     }
     if (decisions.empty())
@@ -3313,7 +3343,10 @@ void ExecuterPrime(CoaDirCommande const& c)
         return;
     }
 
-    Prime const nouvelle{c.id, c.cible, Maintenant() + c.dureeS, static_cast<uint32>(c.valeur), c.origine};
+    Prime nouvelle{c.id, c.cible, Maintenant() + c.dureeS, static_cast<uint32>(c.valeur), c.origine};
+    // Reserve de chasseurs (02/10) : l'AFK est lu ici (fil monde), puis suivi
+    // chaque seconde par SuivrePrimes.
+    nouvelle.afk = p->isAFK();
     bool remplace = false, occupe = false;
     Prime ancienne{};
     {
@@ -3452,6 +3485,10 @@ void SuivrePrimes()
         bool chasseur;
     };
     std::vector<Fin> fins;
+    // Reserve de chasseurs (02/10) : primes dont l'etat AFK du joueur a change
+    // (id de la prime, nouvel etat). Lu ici, sur le joueur, au fil monde
+    // (P-137) ; ecrit plus bas sous le verrou exclusif, SEULEMENT s'il change.
+    std::vector<std::pair<Prime, bool>> afkChanges;
     for (Prime const& p : copies)
     {
         if (p.finS <= maintenant)
@@ -3501,7 +3538,33 @@ void SuivrePrimes()
             continue;
         }
         if (!defisLus || DefiBloquant(j))
+        {
             fins.push_back(Fin{p, "defi", 0, false});
+            continue;
+        }
+        bool const afk = j->isAFK();
+        if (afk != p.afk)
+            afkChanges.emplace_back(p, afk);
+    }
+    if (!afkChanges.empty())
+    {
+        std::vector<std::pair<Prime, bool>> faits;
+        {
+            std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+            for (auto const& [p, afk] : afkChanges)
+            {
+                auto it = primes.find(p.joueur);
+                if (it == primes.end() || it->second.id != p.id)
+                    continue;
+                it->second.afk = afk;
+                faits.emplace_back(it->second, afk);
+            }
+        }
+        // Meme forme que les autres lignes `prime:` (le service ne les lit pas,
+        // MESURE le 02/10 : aucun lecteur dans exploitation/directeur).
+        for (auto const& [p, afk] : faits)
+            LOG_INFO("playerbots", "coa directeur prime: id={} joueur={} plafond={} motif={} tueur=0 chasseur=0", p.id,
+                     p.joueur, p.plafond, afk ? "afk" : "de_retour");
     }
     if (fins.empty())
         return;
@@ -3946,6 +4009,479 @@ char const* RefusDepartSaut(uint32 cible, Player* bot, Player* joueur, Playerbot
     return nullptr;
 }
 
+// ------------------------------------------------------------------ reserve de chasseurs (02/10)
+//
+// coa-project/docs/CONCEPTION-reserve-chasseurs.md § 2.1-2.2. La reserve, c'est
+// une ou deux guildes de mercenaires (Directeur.ReserveGuildes) ; la guilde EST
+// le registre. Deux effets, tous deux au FIL MONDE :
+//  - la reconnaissance (EstDeLaReserve), lue a la pose d'un `chasser` et figee
+//    dans l'affectation (Affectation::reserve) : les fils de carte ne lisent
+//    jamais la chaine de conf, qu'un `reload config` reecrit ;
+//  - la PREPARATION : `chasser` d'action `P-<arc>`, `valeur` = niveau voulu. Le
+//    bot est mis a ce niveau par la fabrique de playerbots
+//    (PlayerbotFactory::Randomize(false), le chemin de RandomBotLevelMgr::
+//    AdjustBotToRange, ResetBot et SkipBotLevel) : talents, sorts, equipement du
+//    niveau. Il reste en ligne, garde sa guilde (InitGuild rend la main des que
+//    GetGuildId() est non nul) et sa composition de mercenaire (Randomize appelle
+//    ResetStrategies, donc la fabrique, qui relit IsMercenary et MercenaireEnRpg).
+//    Aucune affectation n'est posee : le service enchaine avec son saut `T-`/`L-`.
+//
+// UNE PREPARATION PAR TICK AU PLUS. Randomize coute sur le fil monde (sorts,
+// equipement, SaveToDB) : les `P-` vont dans une file, videe a raison d'un
+// Randomize par appel de TraiterBus (un tick monde). Les refus et les « deja au
+// niveau » ne coutent rien et ne consomment pas le tick.
+//
+// EFFETS DE BORD DE Randomize(false), LUS (Bot/Factory/PlayerbotFactory.cpp) et
+// assumes pour un mercenaire : combat arrete, toutes les auras retirees
+// (RemoveAllAuras : furtivite, monture, buffs), quetes remises a zero, instances
+// deliees, competences et sorts reinitialises (ClearSpells ne fait RIEN pour une
+// classe CoA : mod-ascension-compat les reconcilie au changement de niveau),
+// sacs, consommables, monture, familier refaits, argent retire au sort, et
+// sauvegarde (SaveToDB, transaction asynchrone). Equipement vide si le niveau
+// BAISSE (EquipAndSpecPersistence), refait dans tous les cas.
+
+constexpr uint32 PREPARATION_REPOS_S = 60;           // refus `deja_prepare` en deca
+constexpr size_t PREPARATIONS_EN_FILE_MAX = 16;      // au-dela : refus `plafond`
+std::deque<CoaDirCommande> preparations;             // fil monde seul
+// guid -> Maintenant() de la derniere preparation FAITE. Ecrit par le fil monde ;
+// lu aussi par RandomPlayerbotMgr::RandomTeleport (revue m2), qui peut tourner sur
+// un fil de carte (Revive...) : verrou court, et un compteur atomique devant
+// (aucune preparation faite depuis le demarrage : un chargement).
+std::mutex verrouPrepares;
+std::unordered_map<uint32, uint32> preparesLe;
+std::atomic<uint32> nbPrepares{0};
+
+bool PrepareDepuisMoinsDe(uint32 guid, uint32 secondes)
+{
+    if (!nbPrepares.load(std::memory_order_relaxed))
+        return false;
+    std::lock_guard<std::mutex> garde(verrouPrepares);
+    auto const it = preparesLe.find(guid);
+    return it != preparesLe.end() && Maintenant() < it->second + secondes;
+}
+
+// Le bot est-il de la reserve ? Fil monde seul (lit la chaine de conf). Liste
+// d'entiers strictement positifs separes par des virgules, espaces toleres. UN
+// morceau mal forme (vide compris) et AUCUN bot n'est de la reserve : meme regle
+// que le service (emetteur.lire_reserve_guildes, « echoue ferme »), pour que jeu
+// et service ne lisent jamais deux reserves differentes. Sans guilde : jamais.
+bool EstDeLaReserve(Player* bot)
+{
+    return bot && sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId());
+}
+
+bool EstPreparation(CoaDirCommande const& c)
+{
+    return c.verbe == CoaDirVerbe::Chasser && c.action.size() > 2 && c.action[0] == 'P' && c.action[1] == '-';
+}
+
+// Recevoir : `chasser` `P-` -> la file (fil monde). File pleine : refus `plafond`.
+void MettreEnFilePreparation(CoaDirCommande const& c)
+{
+    if (preparations.size() >= PREPARATIONS_EN_FILE_MAX)
+    {
+        Refuser(c, "plafond");
+        return;
+    }
+    preparations.push_back(c);
+}
+
+// Preparation, changement de carte (02/10, demande du coordinateur) : le bot de la
+// reserve n'est pas sur le continent du joueur prime. Point d'arrivee SUR, a
+// PREP_CARTE_MIN_YD-PREP_CARTE_MAX_YD du joueur : sol sec (SolSec : pas d'eau),
+// pas sous une structure (ToitAuDessus), hors lieu sans PvP (la chasse y serait
+// en REPLI), loin de Wintergrasp, et a plus de SAUT_HUMAIN_YD de tout humain et
+// de tout point de vue (HumainProcheSauf, le joueur prime compris).
+//
+// LES CANDIDATS, LUS AVANT D'ECRIRE. Les noeuds de route de playerbots
+// (TravelNodeMap) ne sont PAS charges en service : loadNodeStore n'est appele
+// que par TravelMgr::LoadQuestTravelTable, qui n'a aucun appelant (lu ; la
+// bible le dit aussi). ChercherPointCache tire ses points autour d'un centre
+// fourni par le service, a 150-350 yd : rien a reprendre a 600-1 200 yd. Trois
+// sources, dans cet ordre, PREP_CARTE_ESSAIS sondes de terrain au plus chacune :
+//  1. les HUBS de la faction du bot (TravelMgr::GetTravelHubs : aubergistes et
+//     maitres de vol des zones sans auberge, au niveau VISE) -- un lieu de sa
+//     faction ; la plupart sont sous un toit (refuses par ToitAuDessus) ;
+//  2. une COURONNE geometrique autour du joueur ;
+//  3. les cellules de creatures de RandomTeleport (GetLocsPerLevelCache,
+//     niveau-3..niveau+3, z arrondi a 50 yd), EN DERNIER : on y atterrit au
+//     milieu de creatures, qui l'engageraient -- et un bot en combat fait
+//     refuser le saut `T-`/`L-` suivant (`combat`).
+// Le point n'est qu'une ETAPE : le saut suivant le teleporte encore. Qu'il soit
+// joignable a pied n'importe donc pas ; qu'il soit sur et cache, si.
+// Fil monde, cartes a l'arret (P-137) : les grilles de la carte du joueur sont
+// lues (et creees au besoin, GetGridHeight) depuis ce fil, comme
+// ChercherPointCache le fait deja.
+constexpr float PREP_CARTE_MIN_YD = 600.0f;
+constexpr float PREP_CARTE_MAX_YD = 1200.0f;
+constexpr uint32 PREP_CARTE_ESSAIS = 12;
+constexpr int32 PREP_CARTE_ECART_NIVEAU = 3;
+
+struct PointCarte
+{
+    bool trouve = false;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    uint32 essais = 0;
+    char const* source = "-";   // cache (cellules de creatures) ou couronne
+};
+
+bool PointCarteSur(Map* map, Player* joueur, float x, float y, float zDepart, float& sol)
+{
+    float const dx = x - joueur->GetPositionX(), dy = y - joueur->GetPositionY();
+    float const d2 = dx * dx + dy * dy;
+    if (d2 < PREP_CARTE_MIN_YD * PREP_CARTE_MIN_YD || d2 > PREP_CARTE_MAX_YD * PREP_CARTE_MAX_YD)
+        return false;
+    if (PresDeWintergrasp(map->GetId(), x, y))
+        return false;
+    if (!SolSec(map, x, y, zDepart, sol))
+        return false;
+    if (ToitAuDessus(map, x, y, sol, sol))
+        return false;
+    uint32 zone = 0, aire = 0;
+    map->GetZoneAndAreaId(PHASEMASK_NORMAL, zone, aire, x, y, sol);
+    if (sPlayerbotAIConfig.CoaLieuSansPvp(zone, aire))
+        return false;
+    return !HumainProcheSauf(WorldPosition(map->GetId(), x, y, sol), map->GetId(), SAUT_HUMAIN_YD, 0);
+}
+
+PointCarte ChercherPointCarte(Map* map, Player* joueur, Player* bot, uint32 niveau)
+{
+    PointCarte r;
+    uint32 const carte = map->GetId();
+    float const jx = joueur->GetPositionX(), jy = joueur->GetPositionY();
+    auto const dansAnneau = [&](float x, float y)
+    {
+        float const dx = x - jx, dy = y - jy;
+        float const d2 = dx * dx + dy * dy;
+        return d2 >= PREP_CARTE_MIN_YD * PREP_CARTE_MIN_YD && d2 <= PREP_CARTE_MAX_YD * PREP_CARTE_MAX_YD;
+    };
+    // Essaie au plus PREP_CARTE_ESSAIS candidats (x, y, z de depart), dans un
+    // ordre tire au hasard. -> vrai si un point est retenu (r rempli).
+    auto const essayer = [&](std::vector<std::array<float, 3>>& candidats, char const* source)
+    {
+        for (size_t i = candidats.size(); i > 1; --i)
+            std::swap(candidats[i - 1], candidats[urand(0, uint32(i - 1))]);
+        uint32 n = 0;
+        for (auto const& p : candidats)
+        {
+            if (n++ >= PREP_CARTE_ESSAIS)
+                break;
+            ++r.essais;
+            float sol = 0.0f;
+            if (PointCarteSur(map, joueur, p[0], p[1], p[2], sol))
+            {
+                r.trouve = true;
+                r.x = p[0];
+                r.y = p[1];
+                r.z = sol;
+                r.source = source;
+                return true;
+            }
+        }
+        return false;
+    };
+    std::vector<std::array<float, 3>> candidats;
+    // 1. Hubs de la faction du bot, a son niveau (z du PNJ + 0,5 : depart a +2).
+    // Revue m4 : au niveau VISE (le bot n'y est pas encore : Randomize vient apres).
+    for (WorldLocation const& loc : sTravelMgr.GetTravelHubs(bot->GetTeamId(), uint8(niveau)))
+        if (loc.GetMapId() == carte && dansAnneau(loc.GetPositionX(), loc.GetPositionY()))
+            candidats.push_back({loc.GetPositionX(), loc.GetPositionY(), loc.GetPositionZ() + Z_OFFSET_FIND_HEIGHT});
+    if (essayer(candidats, "hub"))
+        return r;
+    // 2. Couronne : PREP_CARTE_ESSAIS directions regulieres depuis un angle tire
+    // au hasard, rayon 900, 700 puis 1 100 yd en alternance (z de depart : celui
+    // du joueur ; SolSec part du terrain brut s'il est plus haut).
+    candidats.clear();
+    float const a0 = frand(0.0f, 2.0f * float(M_PI));
+    float const rayons[3] = {900.0f, 700.0f, 1100.0f};
+    for (uint32 k = 0; k < PREP_CARTE_ESSAIS; ++k)
+    {
+        float const a = a0 + 2.0f * float(M_PI) * float(k) / float(PREP_CARTE_ESSAIS);
+        float const rayon = rayons[k % 3];
+        candidats.push_back({jx + std::cos(a) * rayon, jy + std::sin(a) * rayon, joueur->GetPositionZ()});
+    }
+    if (essayer(candidats, "couronne"))
+        return r;
+    // 3. Cellules de creatures (z arrondi a 50 yd : depart 25 yd au-dessus).
+    candidats.clear();
+    for (int32 l = int32(niveau) - PREP_CARTE_ECART_NIVEAU; l <= int32(niveau) + PREP_CARTE_ECART_NIVEAU; ++l)
+    {
+        if (l < 1 || l > 80)
+            continue;
+        for (WorldLocation const& loc : sTravelMgr.GetLocsPerLevelCache(uint8(l)))
+            if (loc.GetMapId() == carte && dansAnneau(loc.GetPositionX(), loc.GetPositionY()))
+                candidats.push_back({loc.GetPositionX(), loc.GetPositionY(), loc.GetPositionZ() + 25.0f});
+    }
+    essayer(candidats, "cellule");
+    return r;
+}
+
+// Une `P-` : controles, puis (niveau different) la fabrique, et (autre carte que
+// le joueur prime) le saut sur sa carte, a 600-1 200 yd de lui. -> vrai si
+// Randomize, la recherche de point ou le saut a tourne (le tick est pris). Fil monde, cartes a l'arret
+// (P-137).
+bool ExecuterPreparation(CoaDirCommande const& c)
+{
+    uint32 const niveauMax = std::min<uint32>(sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL), 80u);
+    // 6. bornes : un bot, un joueur prime, un niveau 1-80 (et le plafond du monde).
+    if (c.cible == 0 || c.joueur == 0 || c.valeur < 1 || static_cast<uint32>(c.valeur) > niveauMax)
+    {
+        Refuser(c, "bornes");
+        return false;
+    }
+    uint32 const niveau = static_cast<uint32>(c.valeur);
+    // Controles de `chasser` qui s'appliquent : prime active...
+    {
+        bool primeActive = false;
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = primes.find(c.joueur);
+            primeActive = it != primes.end() && it->second.finS > Maintenant();
+        }
+        if (!primeActive)
+        {
+            Refuser(c, "sans_prime");
+            return false;
+        }
+    }
+    Player* bot = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!bot)
+    {
+        Refuser(c, "hors_ligne");
+        return false;
+    }
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
+    if (!sRandomPlayerbotMgr.IsRandomBot(bot) || !ia)
+    {
+        Refuser(c, "pas_un_bot");
+        return false;
+    }
+    if (ia->HasGameClientMaster())
+    {
+        Refuser(c, "maitre_humain");
+        return false;
+    }
+    // ... `pas_mercenaire`, `suspendu`...
+    if (!MercenaryRewards::EstMercenaire(bot))
+    {
+        Refuser(c, "pas_mercenaire");
+        return false;
+    }
+    if (CoaDirecteur::MercenaireSuspendu(c.cible))
+    {
+        Refuser(c, "suspendu");
+        return false;
+    }
+    // ... puis les controles propres : de la reserve...
+    if (!EstDeLaReserve(bot))
+    {
+        Refuser(c, "hors_reserve");
+        return false;
+    }
+    // (Randomize ressusciterait un mort, PlayerbotFactory::Prepare : jamais ici.)
+    if (!bot->IsAlive())
+    {
+        Refuser(c, "mort");
+        return false;
+    }
+    // Taxi, ou en l'air sur une monture volante (Randomize la retire : il tomberait).
+    if (bot->IsInFlight() || bot->IsFlying())
+    {
+        Refuser(c, "en_vol");
+        return false;
+    }
+    if (bot->InBattleground() || bot->InArena())
+    {
+        Refuser(c, "champ_de_bataille");
+        return false;
+    }
+    if (!bot->IsInWorld() || bot->IsBeingTeleported())
+    {
+        Refuser(c, "en_teleportation");
+        return false;
+    }
+    // ... pas en combat.
+    if (bot->IsInCombat())
+    {
+        Refuser(c, "combat");
+        return false;
+    }
+    // Le joueur prime : sa carte decide d'un changement de continent (02/10).
+    Player* joueur = ObjectAccessor::FindPlayerByLowGUID(c.joueur);
+    if (!joueur || !joueur->IsInWorld() || joueur->IsBeingTeleported())
+    {
+        Refuser(c, joueur ? "joueur_indisponible" : "hors_ligne");
+        return false;
+    }
+    uint32 const avant = bot->GetLevel();
+    uint32 const carteAvant = bot->GetMapId();
+    uint32 const carteJoueur = joueur->GetMapId();
+    bool const changeNiveau = avant != niveau;
+    bool const changeCarte = carteAvant != carteJoueur;
+    // Monde ouvert seulement (continents, Outreterre, Norfendre) : jamais une
+    // instance, un champ de bataille ou une carte de banc.
+    // Le bot aussi : on ne le tire pas d'une instance ou d'une carte de banc.
+    if (changeCarte && (!CarteDeSuspension(carteJoueur) || !CarteDeSuspension(carteAvant)))
+    {
+        Refuser(c, "carte");
+        return false;
+    }
+    if (!changeNiveau && !changeCarte)
+    {
+        LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
+                 " carte_apres={} duree_ms=0 motif=deja_au_niveau", c.id, c.cible, avant, avant, carteAvant, carteAvant);
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+        Accuser(c, "execute", nullptr);
+        return false;
+    }
+    // Un chevalier de la mort ne descend pas sous son niveau de depart (la
+    // fabrique le ferait sans broncher).
+    if (changeNiveau && bot->getClass() == CLASS_DEATH_KNIGHT &&
+        niveau < sWorld->getIntConfig(CONFIG_START_HEROIC_PLAYER_LEVEL))
+    {
+        Refuser(c, "bornes");
+        return false;
+    }
+    // Pas deux preparations FAITES du meme bot en PREPARATION_REPOS_S (niveau ou
+    // carte : un `deja_au_niveau` sur place ne coute rien et ne compte pas).
+    {
+        if (PrepareDepuisMoinsDe(c.cible, PREPARATION_REPOS_S))
+        {
+            Refuser(c, "deja_prepare");
+            return false;
+        }
+    }
+    // Une affectation en cours (tout proprietaire) serait levee `niveau` a la
+    // seconde suivante (SuivreAffectations) : le bot est pris, on n'y touche pas.
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        auto it = affectations.find(c.cible);
+        if (it != affectations.end() && it->second.a.finS > Maintenant())
+        {
+            uint32 const parId = it->second.a.id;
+            std::string const parOrigine = it->second.origine;
+            garde.unlock();
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_OCCUPEES);
+            LOG_INFO("playerbots", "coa directeur occupe: id={} guid={} origine={} joueur={} par_id={} par_origine={}"
+                     " par_verbe=preparation", c.id, c.cible, c.origine, c.joueur, parId, parOrigine);
+            Refuser(c, "occupe");
+            return false;
+        }
+    }
+    // Changement de carte : controles du DEPART (memes que RefusDepartSaut :
+    // personne ne le voit disparaitre, pas pres de Wintergrasp), puis le POINT,
+    // AVANT tout effet -- un refus ne laisse jamais un bot a moitie prepare.
+    PointCarte point;
+    // Revue M5 : la duree compte DEPUIS ICI, recherche de point comprise ; la
+    // recherche est aussi mesuree a part (recherche_ms).
+    uint32 const debutMs = getMSTime();
+    uint32 rechercheMs = 0;
+    if (changeCarte)
+    {
+        if (ia->HasPlayerNearby(SAUT_HUMAIN_YD))
+        {
+            Refuser(c, "depart_a_vue");
+            return false;
+        }
+        if (PresDeWintergrasp(carteAvant, bot->GetPositionX(), bot->GetPositionY()))
+        {
+            Refuser(c, "wintergrasp");
+            return false;
+        }
+        point = ChercherPointCarte(joueur->GetMap(), joueur, bot, niveau);
+        rechercheMs = GetMSTimeDiffToNow(debutMs);
+        if (!point.trouve)
+        {
+            LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} carte_avant={} carte_joueur={} refus=sans_point_carte"
+                     " essais={} recherche_ms={}", c.id, c.cible, carteAvant, carteJoueur, point.essais, rechercheMs);
+            Refuser(c, "sans_point_carte");
+            // Revue M5 : la recherche a coute (sondes de terrain) : le tick est pris.
+            return true;
+        }
+    }
+
+    // L'effet. PIEGE DE VERROU : Randomize appelle ResetStrategies, donc la
+    // fabrique, qui prend le verrou PARTAGE (MercenaireEnRpg) : aucun verrou
+    // n'est tenu ici.
+    uint32 const guilde = bot->GetGuildId();
+    if (changeNiveau)
+    {
+        if (bot->IsMounted())
+            bot->Dismount();   // comme AdjustBotToRange : pas une monture d'un autre niveau
+        PlayerbotFactory fabrique(bot, niveau);
+        fabrique.Randomize(false);
+    }
+    // Le saut entre cartes : TeleportTo LOINTAIN (Player::TeleportTo pose
+    // IsBeingTeleportedFar ; le bot quitte sa carte et n'entre dans la nouvelle
+    // qu'a l'accuse de teleportation, rendu par PlayerbotHolder::UpdateSessions
+    // -> PlayerbotAI::HandleTeleportAck au passage suivant, puis son IA attend 2 a
+    // 5 s, SetNextCheckDelay). Meme fil et meme appel que RandomTeleport, qui
+    // change deja de carte depuis le fil monde. Ce saut N'EST PAS inscrit dans
+    // `sautsFaits` : le saut `T-`/`L-` qui suit ne doit pas etre refuse
+    // `deja_saute` (il est borne, lui, par deja_prepare et par sa propre garde).
+    uint32 carteApres = carteAvant;
+    bool sautRefuse = false;
+    if (changeCarte)
+    {
+        if (CoaDirecteur::Sauter(bot, WorldLocation(carteJoueur, point.x, point.y, point.z + 0.5f, bot->GetOrientation())))
+            carteApres = carteJoueur;   // engage : effectif a l'accuse (tick suivant)
+        else
+            sautRefuse = true;
+    }
+    uint32 const dureeMs = GetMSTimeDiffToNow(debutMs);
+    uint32 const apres = bot->GetLevel();
+    {
+        std::lock_guard<std::mutex> garde(verrouPrepares);
+        if (preparesLe.size() > 256)
+            for (auto it = preparesLe.begin(); it != preparesLe.end();)
+                it = Maintenant() >= it->second + PREPARATION_REPOS_S ? preparesLe.erase(it) : std::next(it);
+        preparesLe[c.cible] = Maintenant();
+        nbPrepares.store(static_cast<uint32>(preparesLe.size()), std::memory_order_relaxed);
+    }
+    float const pjx = point.x - joueur->GetPositionX(), pjy = point.y - joueur->GetPositionY();
+    LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
+             " carte_apres={} duree_ms={} motif={} point={} distance_joueur={:.0f} essais={} recherche_ms={}", c.id,
+             c.cible, avant, apres, carteAvant, carteApres, dureeMs, changeNiveau ? "prepare" : "deja_au_niveau",
+             point.source, changeCarte ? std::sqrt(pjx * pjx + pjy * pjy) : 0.0f, point.essais, rechercheMs);
+    // Ceinture : la fabrique ne doit toucher ni la guilde ni le niveau demande.
+    if (bot->GetGuildId() != guilde || (changeNiveau && apres != niveau))
+        LOG_ERROR("playerbots", "coa directeur reserve_ecart: id={} guid={} guilde_avant={} guilde_apres={}"
+                  " niveau_demande={} niveau_apres={}", c.id, c.cible, guilde, bot->GetGuildId(), niveau, apres);
+    if (sautRefuse)
+    {
+        // TeleportTo a refuse (Player::TeleportTo : carte interdite, en combat de
+        // duel...). Le niveau a pu etre fait : il reste, le bot n'a pas bouge.
+        Refuser(c, "saut_echoue");
+        return true;
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    Accuser(c, "execute", nullptr);
+    return true;
+}
+
+// TraiterBus, bus allume, chaque tick : la file, jusqu'au PREMIER Randomize.
+void TraiterPreparations()
+{
+    while (!preparations.empty())
+    {
+        CoaDirCommande const c = preparations.front();
+        preparations.pop_front();
+        if (ExecuterPreparation(c))
+            return;
+    }
+}
+
+// Bus eteint : ce qui attend est refuse, rien n'est prepare.
+void ViderPreparations(char const* raison)
+{
+    while (!preparations.empty())
+    {
+        CoaDirCommande const c = preparations.front();
+        preparations.pop_front();
+        Refuser(c, raison);
+    }
+}
+
 // Verbes `reaffecter` et `alleger` (SPEC § 6) : meme effet cote jeu. Le bot
 // `cible` recoit le disque (carte, x, y, z, rayon) pour duree_s. Les controles
 // 6 a 9 sont ceux du § 4.4 puis du tableau « Controles propres » du § 6.3, dans
@@ -4380,7 +4916,13 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     // pour tout autre verbe, aussi un mercenaire compose en mode RPG par une
     // affectation `chasser` en trajet (il retrouvera sa chasse a la fin de celle-ci).
     bool const enChasseApres = chasse || (!chasseur && ChasseurEnTrajet(c.cible));
-    if (chasseur ? !(etapeChasse || saut) : (enChasseApres && !mercenaireRpg))
+    // Reserve de chasseurs (02/10) : lu ici, fil monde, et fige dans l'affectation.
+    // Un chasseur de reserve garde sa chasse EN TRAJET (ChasseurEnTrajet) : une
+    // ETAPE `E-` ou un SAUT `T-`/`L-` dont le centre est en lieu sans PvP le
+    // ferait passer en REPLI, qui l'en ressortirait aussitot : refuses comme une
+    // finale (`lieu_sans_pvp`, test sur le centre).
+    bool const reserveChasseur = chasseur && EstDeLaReserve(bot);
+    if (chasseur ? (!(etapeChasse || saut) || reserveChasseur) : (enChasseApres && !mercenaireRpg))
     {
         uint32 zone = 0, aire = 0;
         map->GetZoneAndAreaId(PHASEMASK_NORMAL, zone, aire, c.x, c.y, sol);
@@ -4497,6 +5039,8 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     nouvelle.a.presence = presence;
     nouvelle.a.compagnon = compagnon;
     nouvelle.a.chasseur = chasseur;
+    // Reserve de chasseurs (02/10) : lu ici, fil monde, et fige.
+    nouvelle.a.reserve = reserveChasseur;
     if (compagnon)
         nouvelle.a.rayon = CoaDirecteur::COMPAGNON_MAX_YD;   // arrivee = dans la bande
     // Missions (30/09) : la finale d'une presence seulement (`Q-`).
@@ -4597,8 +5141,8 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     if (chasseur)
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_CHASSEURS);
-        LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=pose etape={} remplace={}", c.cible,
-                 c.joueur, c.id, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0);
+        LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=pose etape={} remplace={} reserve={}",
+                 c.cible, c.joueur, c.id, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0, nouvelle.a.reserve ? 1 : 0);
     }
     if (mission.etat)
     {
@@ -4702,8 +5246,15 @@ void Recevoir(CoaDirCommande const& c)
         case CoaDirVerbe::Reaffecter:
         case CoaDirVerbe::Alleger:
         case CoaDirVerbe::Peupler:
-        case CoaDirVerbe::Chasser:
             ExecuterAffectation(c);
+            break;
+        case CoaDirVerbe::Chasser:
+            // Reserve de chasseurs (02/10) : `P-<arc>` est une PREPARATION (file,
+            // une par tick), pas une affectation.
+            if (EstPreparation(c))
+                MettreEnFilePreparation(c);
+            else
+                ExecuterAffectation(c);
             break;
         case CoaDirVerbe::Prime:
             ExecuterPrime(c);
@@ -4979,7 +5530,8 @@ std::string Lieux(std::string const& texte)
 
 // `joueur,<guid>` (lot D3, SPEC-directeur-D3.md § 3.4), lecture seule, fil
 // monde (P-137). Une ligne :
-//   guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo
+//   guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo,afk
+// (`afk`, 02/10 : PLAYER_FLAGS_AFK, 0 ou 1, ajoute EN FIN de ligne.)
 // regle : pve, high_risk, war_mode ou '-', par HasAura dans l'ordre 9931032,
 // 1004019, 1004119 (P-138 : 1004119 est AUSSI porte en PvE) ; equipe A ou H ;
 // groupe : taille du groupe, 0 sans groupe ; ciel, meteo : minute et etat poses
@@ -5025,6 +5577,9 @@ std::string Joueur(std::string const& texte)
         out << meteo->second.etat;
     else
         out << '-';
+    // Reserve de chasseurs (02/10) : 15e champ, EN FIN de ligne (un lecteur qui
+    // s'arrete au 14e ne voit rien changer) : 1 si le joueur est AFK.
+    out << ',' << (p->isAFK() ? 1 : 0);
     return out.str();
 }
 }  // namespace
@@ -5154,6 +5709,7 @@ void CoaDirecteur::TraiterBus(uint32 diff)
         LeverPrimesSi([](Prime const&) { return true; }, "bus_eteint");
         PurgerMortsEnTrajet();
         PurgerPactes();
+        ViderPreparations("bus_eteint");
         source->Vidanger([](CoaDirCommande const& c)
         {
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_RECUES);
@@ -5167,6 +5723,8 @@ void CoaDirecteur::TraiterBus(uint32 diff)
 
     // 2-4. Drainage : controles, effets, accuses.
     source->Sonder(diff, Recevoir);
+    // Reserve de chasseurs (02/10) : au plus UNE preparation (Randomize) par tick.
+    TraiterPreparations();
 
     // 5. Chaque seconde : echeances, file de reconstruction ; filet a 30 s.
     Entretien(diff);
@@ -5215,7 +5773,7 @@ bool CoaDirecteur::MercenaireEnRpg(uint32 guidLow)
     return ChasseurEnTrajet(guidLow);
 }
 
-bool CoaDirecteur::ProieImposee(uint32 botLow, uint32* joueur, uint32* id)
+bool CoaDirecteur::ChasseurDe(uint32 botLow, uint32* joueur, uint32* id, bool* afk, bool* reserve)
 {
     // LA QUESTION D'ABORD : sans chasseur, un chargement atomique.
     if (!nbChasseurs.load(std::memory_order_relaxed))
@@ -5234,6 +5792,30 @@ bool CoaDirecteur::ProieImposee(uint32 botLow, uint32* joueur, uint32* id)
         *joueur = it->second.joueur;
     if (id)
         *id = it->second.a.id;
+    if (afk)
+        *afk = p->second.afk;
+    if (reserve)
+        *reserve = it->second.a.reserve;
+    return true;
+}
+
+bool CoaDirecteur::PrepareRecemment(uint32 guidLow)
+{
+    return PrepareDepuisMoinsDe(guidLow, PREPARATION_REPOS_S);
+}
+
+bool CoaDirecteur::ProieImposee(uint32 botLow, uint32* joueur, uint32* id)
+{
+    // Reserve de chasseurs (02/10) : un prime AFK n'est pas une proie.
+    // Les sorties ne sont ecrites que si la reponse est vraie (contrat d'avant).
+    bool afk = false;
+    uint32 j = 0, i = 0;
+    if (!ChasseurDe(botLow, &j, &i, &afk, nullptr) || afk)
+        return false;
+    if (joueur)
+        *joueur = j;
+    if (id)
+        *id = i;
     return true;
 }
 
@@ -5264,6 +5846,11 @@ bool CoaDirecteur::EnTrajetPacifique(Player const* bot)
         auto it = affectations.find(bot->GetGUID().GetCounter());
         if (it == affectations.end() || it->second.a.finS <= Maintenant() ||
             it->second.a.phase != CoaDirecteur::CoaDirPhase::Trajet)
+            return false;
+        // Reserve de chasseurs (02/10) : un chasseur de reserve n'est jamais
+        // pacifique. Il ne choisit que son prime (NearestEnemyPlayersValue) et
+        // aucune creature (GrindTargetValue, ChasseurDe) : rien a lui retirer.
+        if (it->second.a.chasseur && it->second.a.reserve)
             return false;
         carte = it->second.a.carte;
     }
@@ -5684,7 +6271,10 @@ public:
 // `COABH\t<i>/<n>|<morceau>`, morceaux de 180 octets au plus. Le corps est fait
 // de lignes separees par `^`, champs separes par `|` :
 //   V|1                                         version du protocole
-//   P|arc|statut|etape|depuis_s|reste_s|plafond|simulee   prime en cours (ou `P|-`)
+//   P|arc|statut|etape|depuis_s|reste_s|plafond|simulee|chasseurs_actifs|vague   prime en cours (ou `P|-`)
+//     (chasseurs_actifs, vague : 02/10, EN FIN ; l'addon d'avant lit par index et les ignore.
+//     chasseurs_actifs : affectations `chasser` actives de ce joueur, magasin du jeu ;
+//     vague : <n> de `etape` = `vague_<n>` (coa_dir_arc, ecrit par primes.py), vide sinon.)
 //   H|arc|issue|etape|tenu_s|vague|tueur|fin_unix|simulee  primes closes, 4 au plus
 //   R|bot|nom|score|morts_du_joueur|morts_du_bot           rivaux, 4 au plus
 // (4 : la fenetre PvP n'en tient pas plus ; `simulee` vaut 1 sauf `false` explicite, comme primes.py)
@@ -5734,9 +6324,26 @@ std::string CorpsOnglet(uint32 guid)
     if (p)
     {
         Field* f = p->Fetch();
-        corps += Acore::StringFormat("^P|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]),
-                                     ChampOnglet(f[2]), ChampOnglet(f[3]), ChampOnglet(f[4]), ChampOnglet(f[5]),
-                                     ChampOnglet(f[6]) == "false" ? 0 : 1);
+        // 02/10 : chasseurs actifs (le magasin des affectations, LU sous le verrou
+        // partage : il est ecrit par le fil monde, qui traite aussi ce paquet) et
+        // la vague, lue dans `etape` (`vague_<n>`, primes.py).
+        uint32 chasseursActifs = 0;
+        if (nbChasseurs.load(std::memory_order_relaxed))
+        {
+            uint32 const maintenant = Maintenant();
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            for (auto const& [bot, a] : affectations)
+                if (a.a.chasseur && a.joueur == guid && a.a.finS > maintenant)
+                    ++chasseursActifs;
+        }
+        std::string const etape = ChampOnglet(f[2]);
+        std::string vague;
+        if (etape.rfind("vague_", 0) == 0 && etape.size() > 6 && etape.size() <= 9 &&
+            std::all_of(etape.begin() + 6, etape.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+            vague = etape.substr(6);
+        corps += Acore::StringFormat("^P|{}|{}|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]), etape,
+                                     ChampOnglet(f[3]), ChampOnglet(f[4]), ChampOnglet(f[5]),
+                                     ChampOnglet(f[6]) == "false" ? 0 : 1, chasseursActifs, vague);
     }
     else
         corps += "^P|-";

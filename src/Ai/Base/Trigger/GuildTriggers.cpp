@@ -24,6 +24,10 @@ bool LeaveLargeGuildTrigger::IsActive()
     if (!bot->GetGuildId())
         return false;
 
+    // CoA (02/10) : jamais un bot d'une guilde de la reserve du Directeur.
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+        return false;
+
     if (IsSelfBot(bot))
         return false;
 

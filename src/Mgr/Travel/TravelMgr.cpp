@@ -4495,6 +4495,11 @@ const std::vector<WorldLocation> TravelMgr::GetTravelHubs(Player* bot)
     return locs;
 }
 
+const std::vector<WorldLocation> TravelMgr::GetTravelHubs(TeamId team, uint8 level)
+{
+    return team == TEAM_ALLIANCE ? allianceHubsPerLevelCache[level] : hordeHubsPerLevelCache[level];
+}
+
 std::vector<WorldLocation> TravelMgr::GetCityLocations(Player* bot)
 {
     uint32 level = bot->GetLevel();

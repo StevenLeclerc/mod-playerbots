@@ -129,7 +129,36 @@ bool MercenaireEnRpg(uint32 guidLow);
 // autre proie ; meute bornee a Directeur.PrimeMeute) et
 // PossibleTargetsValue::AcceptUnit (filtre de niveau saute pour ce couple).
 // `id` (non nul) recoit l'id de la commande `chasser` en cours (journal).
+// Reserve de chasseurs (02/10, CONCEPTION-reserve-chasseurs.md § 2.5) : FAUX
+// aussi quand le joueur prime est AFK (PLAYER_FLAGS_AFK) -- pour TOUTE prime,
+// reserve ou non (revue M1). L'AFK n'est pas lu ici
+// (fil de carte : le joueur peut etre sur une autre carte, P-137) : le fil monde
+// le recopie chaque seconde dans la prime (SuivrePrimes), et ce lecteur ne lit
+// que cette copie, sous le verrou partage.
 bool ProieImposee(uint32 botLow, uint32* joueur, uint32* id = nullptr);
+
+// Reserve de chasseurs (02/10). Tout fil, chemin chaud : le BOT `botLow` est-il
+// un chasseur designe dont la prime court, AFK ou non ? TOUT chasseur de prime,
+// de la reserve ou non (revue M1, voulu par le commanditaire) : protection AFK,
+// aucune creature choisie, decrochage en combat valent pour tous ; seuls la
+// traque sans attente ni borne et la composition de chasse en trajet sont
+// propres a la reserve (`reserve`). `afk` (non nul) recoit
+// l'etat AFK du prime (copie du fil monde, au plus 1 s de retard) ; `reserve`
+// (non nul) dit si le chasseur est de la RESERVE (guilde de
+// Directeur.ReserveGuildes, figee a la pose de l'affectation, au fil monde).
+// ProieImposee == ChasseurDe && !afk. Sans chasseur : un chargement atomique.
+// Lecteurs : CoaChasseAction (tenue a distance d'un prime AFK, traque sans
+// borne et sans attente d'un chasseur de reserve), NearestEnemyPlayersValue
+// (un chasseur dont le prime est AFK ne convoite personne, riposte permise),
+// GrindTargetValue (aucune creature choisie par un chasseur).
+// Reserve de chasseurs (02/10, revue m2). Tout fil : le bot a-t-il ete PREPARE
+// (`chasser` `P-` fait : niveau ou carte) il y a moins de 60 s ? Lu par
+// RandomPlayerbotMgr::RandomTeleport : jamais de teleportation aleatoire entre la
+// preparation et le saut du service. Aucune preparation faite : un chargement.
+bool PrepareRecemment(uint32 guidLow);
+
+bool ChasseurDe(uint32 botLow, uint32* joueur = nullptr, uint32* id = nullptr, bool* afk = nullptr,
+                bool* reserve = nullptr);
 
 // ------------------------------------------------------------------ lot D2b
 //
@@ -218,6 +247,14 @@ struct Affectation
     // D4-0), et ProieImposee (chasse, « nearest enemy players », filtre de
     // niveau).
     bool chasseur = false;
+    // Reserve de chasseurs (02/10) : chasseur dont la guilde est dans
+    // Directeur.ReserveGuildes, lu au fil monde A LA POSE et fige (les fils de
+    // carte ne lisent jamais la chaine de conf). Faux hors `chasser`. Lecteurs :
+    // ChasseurEnTrajet (un chasseur de reserve n'est JAMAIS compose en mode RPG :
+    // il garde sa chasse en trajet), EnTrajetPacifique (jamais pacifique : il ne
+    // choisit de toute facon que son prime), ChasseurDe (traque sans attente au
+    // poste, sans borne de duree).
+    bool reserve = false;
     // Missions (30/09, option Directeur.Missions) : posee avec la FINALE d'une
     // presence (`peupler` `Q-`), lue en SEJOUR par NewRpgStatusUpdateAction
     // (statuts tires, laisse), NewRpgWanderRandomAction (errance dans le
@@ -434,7 +471,8 @@ void Compter(CoaDirCompteur c);
 // (`peupler`) vit dans le magasin des affectations, meme verrou, meme patron.
 //
 // Requete neuve du 8888 (lecture seule, fil monde) :
-//   joueur,<guid> -> guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo
+//   joueur,<guid> -> guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo,afk
+// (`afk`, 15e champ, 02/10 : 1 si PLAYER_FLAGS_AFK, EN FIN de ligne)
 // `absent` si le personnage n'est pas en jeu, `invalid` si mal formee OU bus eteint.
 }  // namespace CoaDirecteur
 

@@ -1770,8 +1770,10 @@ public:
         // P-167 : un sort lance rompt la furtivite (Elude 801345 porte
         // AURA_INTERRUPT_FLAG_CAST). Le chasseur d'une prime en approche furtive
         // ne se rebuffe pas. Les autres bots ne passent pas ce test (aura d'abord).
+        // Reserve de chasseurs (02/10) : ChasseurDe et non ProieImposee -- un
+        // chasseur qui tient a distance un prime AFK reste furtif aussi.
         if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH) &&
-            CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), nullptr))
+            CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter()))
             return RecordUsage(USAGE_BUFF, nullptr);
 
         std::vector<Usable> const spells = KnownAbilities(botAI, bot, [](uint16 kind)
@@ -1983,8 +1985,10 @@ public:
         // traque). Un second ecrivain la poserait hors traque, ou personne ne le
         // menerait au contact (EnemyPlayerValue.cpp, approcheFurtive). Memes
         // interrupteurs que cette valeur. Sans chasseur : un chargement atomique.
+        // Reserve de chasseurs (02/10) : ChasseurDe (prime AFK compris) : un
+        // chasseur dont le prime est AFK n'embusque personne d'autre.
         if (sPlayerbotAIConfig.wildPvpChasse && sPlayerbotAIConfig.wildPvpTraque &&
-            CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), nullptr))
+            CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter()))
             return false;
 
         // « enemy player target » porte deja toutes les regles de cible : camp, zones
@@ -2253,10 +2257,15 @@ public:
     CoaChasseStrategyFactoryInternal()
     {
         creators["coa chasse"] = &CoaChasseStrategyFactoryInternal::coa_chasse;
+        // Reserve de chasseurs (02/10, revue M2) : strategie de COMBAT du chasseur
+        // d'une prime (CoaChasse.h). Meme fabrique sans freres : sa pose ne retire
+        // rien du moteur de combat.
+        creators["coa chasseur prime"] = &CoaChasseStrategyFactoryInternal::coa_chasseur_prime;
     }
 
 private:
     static Strategy* coa_chasse(PlayerbotAI* botAI) { return new CoaChasseStrategy(botAI); }
+    static Strategy* coa_chasseur_prime(PlayerbotAI* botAI) { return new CoaChasseurPrimeStrategy(botAI); }
 };
 
 class CoaActionFactoryInternal : public NamedObjectContext<Action>

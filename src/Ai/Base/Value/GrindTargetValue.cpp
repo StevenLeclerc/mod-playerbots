@@ -60,6 +60,19 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
         return nullptr;
     }
 
+    // Reserve de chasseurs (02/10, CONCEPTION-reserve-chasseurs.md § 2.4) : le
+    // CHASSEUR DESIGNE d'une prime (tout chasseur, reserve ou non) n'initie aucun
+    // combat contre une creature par cette voie. Meme place que le trajet
+    // pacifique : APRES les assaillants, donc il riposte. Sans chasseur : un
+    // chargement atomique, puis le code d'origine.
+    // PORTEE REELLE, dite par la revue M2 : un mercenaire n'a pas « grind » (sa
+    // composition de chasse), et les combats mesures etaient `initie=0` (la
+    // creature engage). Cette garde ne vaut donc que pour un chasseur compose en
+    // mode RPG (en trajet, hors reserve) quand TrajetPacifique est eteint ; ce qui
+    // traite le cas mesure est le decrochage (CoaChasseurPrimeStrategy).
+    if (CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter()))
+        return nullptr;
+
     GuidVector targets = *context->GetValue<GuidVector>("possible targets");
     if (targets.empty())
         return nullptr;

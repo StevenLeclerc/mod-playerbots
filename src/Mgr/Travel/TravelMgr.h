@@ -878,6 +878,10 @@ public:
     std::vector<std::vector<uint32>> GetOptimalFlightDestinations(Player* bot);
     const std::vector<WorldLocation> GetTeleportLocations(Player* bot);
     const std::vector<WorldLocation> GetTravelHubs(Player* bot);
+    // CoA (02/10) : les memes relais, pour une faction et un niveau donnes (la
+    // preparation de la reserve du Directeur les lit au niveau VISE, avant de
+    // changer celui du bot).
+    const std::vector<WorldLocation> GetTravelHubs(TeamId team, uint8 level);
     std::vector<WorldLocation> GetCityLocations(Player* bot);
     std::vector<uint32> GetFlightNodesInZone(uint32 zoneId, TeamId team, uint32 excludeNode = 0) const;
     bool SelectAuctioneerByMap(Player* bot, NpcLocation& outAuctioneer);

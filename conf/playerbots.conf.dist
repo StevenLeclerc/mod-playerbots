@@ -3552,3 +3552,25 @@ AiPlayerbot.Directeur.PrimeTraqueSecondes = 120
 #        250 a 360 le 02/10 (P-167), la valeur en service depuis le 01/10.
 #        Default: 360
 AiPlayerbot.Directeur.PrimeDetectionYd = 360
+
+#    AiPlayerbot.Directeur.ReserveGuildes
+#        Reserve de chasseurs (coa-project/docs/CONCEPTION-reserve-chasseurs.md) : identifiants de
+#        guilde separes par des virgules, par exemple "12,13" (une guilde par faction). Lecture stricte :
+#        un morceau mal forme et AUCUNE guilde n'est de la reserve (meme regle que le service).
+#        Ce qui vaut SEULEMENT pour la reserve (option non vide) :
+#          - `chasser` d'action `P-<arc>` prepare le bot : niveau `valeur` (fabrique de playerbots) et,
+#            s'il est sur un autre continent que le joueur prime, saut sur sa carte a 600-1 200 yd de
+#            lui ; une preparation par tick au plus ; vide, `P-` est refuse `hors_reserve` ;
+#          - designe chasseur, il garde sa composition de chasse meme en trajet, traque son prime des
+#            qu'il le lit (sans attendre a un poste) et tant que la prime court (PrimeTraqueSecondes ne
+#            le borne pas, ni TrajetMaxSecondes) ;
+#          - ses guildes sont hors de PlayerbotGuildMgr (ni remplies par d'autres bots, ni comptees,
+#            ni dissoutes) et ses membres ne les quittent pas (guild leave / remove / invite refuses) ;
+#          - a la connexion des bots aleatoires, ses membres passent EN PREMIER (dans bot_count).
+#        Ce qui vaut pour TOUT chasseur de prime (`prime,chasser` dans Directeur.Verbes), avec ou sans
+#        reserve : un joueur prime AFK n'est la proie de personne (le chasseur se tient a 100 yd,
+#        furtif s'il l'etait) ; un chasseur n'initie aucun combat contre une creature (GrindTargetValue)
+#        et, attaque par une, riposte 5 s puis decroche vers son prime si elle tient au-dessus de 35 %
+#        de ses PV (strategie de combat « coa chasseur prime », meme Decrochage = 0).
+#        Default: ""
+AiPlayerbot.Directeur.ReserveGuildes = ""

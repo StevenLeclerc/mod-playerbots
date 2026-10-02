@@ -38,6 +38,10 @@ bool PlayerbotGuildMgr::CreateGuild(Player* player, std::string guildName)
     LOG_DEBUG("playerbots", "Guild created: id={} name='{}'", guild->GetId(), guildName);
     SetGuildEmblem(guild->GetId());
 
+    // CoA (02/10) : un id deja liste dans Directeur.ReserveGuildes n'entre pas au cache.
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(guild->GetId()))
+        return true;
+
     GuildCache entry;
     entry.name = guildName;
     entry.memberCount = 1;
@@ -99,6 +103,11 @@ std::string PlayerbotGuildMgr::AssignToGuild(Player* player)
     for (auto& keyValue : _guildCache)
     {
         GuildCache& cached = keyValue.second;
+        // CoA -- reserve de chasseurs du Directeur (02/10) : une guilde de la
+        // reserve (Directeur.ReserveGuildes) n'est jamais proposee. Le cache n'en
+        // porte plus (ValidateGuildCache), mais la conf a pu changer depuis.
+        if (sPlayerbotAIConfig.EstGuildeDeReserve(keyValue.first))
+            continue;
         if (!cached.hasRealPlayer && cached.status == 1 && cached.faction == playerFaction)
             partiallyfilledguilds.push_back(&cached);
     }
@@ -113,7 +122,9 @@ std::string PlayerbotGuildMgr::AssignToGuild(Player* player)
         _guildCache.begin(), _guildCache.end(),
         [](std::pair<const uint32, GuildCache> const& pair)
         {
-            return !pair.second.hasRealPlayer;
+            // CoA (02/10) : les guildes de la reserve ne comptent pas dans
+            // RandomBotGuildCount (elles ne sont pas des guildes de bots ordinaires).
+            return !pair.second.hasRealPlayer && !sPlayerbotAIConfig.EstGuildeDeReserve(pair.first);
         }
         );
 
@@ -134,6 +145,9 @@ std::string PlayerbotGuildMgr::AssignToGuild(Player* player)
 
 void PlayerbotGuildMgr::OnGuildUpdate(Guild* guild)
 {
+    // CoA (02/10) : une guilde de la reserve n'est pas suivie (absente du cache).
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(guild->GetId()))
+        return;
     auto it = _guildCache.find(guild->GetId());
     if (it == _guildCache.end())
         return;
@@ -221,6 +235,23 @@ void PlayerbotGuildMgr::ValidateGuildCache()
         if (!guild)
             continue;
 
+        // CoA -- reserve de chasseurs du Directeur (02/10) : une guilde de la
+        // reserve n'entre pas dans le cache des guildes de bots (sinon, menee par
+        // un bot et sous RandomBotGuildSizeMax, elle serait « partiellement
+        // remplie » et AssignToGuild y verserait des bots sans guilde). Une entree
+        // anterieure (conf changee depuis) est retiree. Son nom reste marque pris.
+        if (sPlayerbotAIConfig.EstGuildeDeReserve(guildId))
+        {
+            _guildCache.erase(guildId);
+            for (auto& nom : _guildNames)
+                if (nom.first == it->second)
+                {
+                    nom.second = false;
+                    break;
+                }
+            continue;
+        }
+
         cache.memberCount = guild->GetMemberCount();
         ObjectGuid leaderGuid = guild->GetLeaderGUID();
         CharacterCacheEntry const* leaderEntry = sCharacterCache->GetCharacterCacheByGuid(leaderGuid);
@@ -261,7 +292,9 @@ void PlayerbotGuildMgr::DeleteRandomBotGuilds()
 
             // The leader's account is checked instead of the 'add' event or anything else that depends on the
             // bot being online.
-            if (sPlayerbotAIConfig.IsInRandomAccountList(sCharacterCache->GetCharacterAccountIdByGuid(leader)))
+            // CoA (02/10) : jamais une guilde de la reserve du Directeur.
+            if (sPlayerbotAIConfig.IsInRandomAccountList(sCharacterCache->GetCharacterAccountIdByGuid(leader)) &&
+                !sPlayerbotAIConfig.EstGuildeDeReserve(guildId))
                 guildsToDisband.push_back(guildId);
         } while (result->NextRow());
     }

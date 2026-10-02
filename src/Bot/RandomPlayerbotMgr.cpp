@@ -728,6 +728,22 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
         // Shuffle for class balance
         std::shuffle(allCharacters.begin(), allCharacters.end(), rng);
 
+        // CoA -- reserve de chasseurs du Directeur (02/10, revue M4) : les membres
+        // des guildes de Directeur.ReserveGuildes passent EN PREMIER (l'ordre tire
+        // est garde entre eux et entre les autres), dans la limite des places
+        // ci-dessous. Guilde lue dans le cache de personnages (rempli par
+        // GuildMgr::LoadGuilds au demarrage, tenu a jour par Guild). Sans reserve :
+        // rien ne bouge.
+        std::vector<uint32> const reserve = sPlayerbotAIConfig.GuildesDeReserve();   // lue une fois
+        if (!reserve.empty())
+            std::stable_partition(allCharacters.begin(), allCharacters.end(),
+                                  [&reserve](CharacterInfo const& c)
+                                  {
+                                      uint32 const guilde = sCharacterCache->GetCharacterGuildIdByGuid(
+                                          ObjectGuid::Create<HighGuid::Player>(c.guid));
+                                      return guilde && std::find(reserve.begin(), reserve.end(), guilde) != reserve.end();
+                                  });
+
         // Separate characters by faction for phased login
         std::vector<CharacterInfo> allianceChars;
         std::vector<CharacterInfo> hordeChars;
@@ -1589,7 +1605,10 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
     // niveau, ChangeStrategy, RandomizeFirst, RandomTeleportForRpg,
     // ConcentrateInPlayerZone) ; la seule exception, AdjustBotToRange, porte
     // la meme garde. Sans affectation : un chargement atomique.
-    if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), nullptr))
+    // Reserve de chasseurs (02/10, revue m2) : ni un bot PREPARE il y a moins de
+    // 60 s (le service enchaine avec son saut).
+    if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), nullptr) ||
+        CoaDirecteur::PrepareRecemment(bot->GetGUID().GetCounter()))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_SUSPENDUS);
         return;
@@ -2286,6 +2305,54 @@ void RandomPlayerbotMgr::GetBots()
     stmt->SetData(0, 0);
     stmt->SetData(1, "add");
     uint32 maxAllowedBotCount = GetEventValue(0, "bot_count");
+
+    // CoA -- reserve de chasseurs du Directeur (02/10, revue M4). Au demarrage
+    // (currentBots vide), les membres des guildes de la reserve sont retenus
+    // AVANT l'ensemble « add » d'avant -- sans quoi ce dernier, deja plein (500),
+    // les laisse hors ligne d'un redemarrage a l'autre. Dans la limite de
+    // bot_count ; bots aleatoires seulement (compte de la liste des bots) ; meme
+    // garde chevalier de la mort que tryLoginBot. Lus dans `guild_member`
+    // (GuildMgr::LoadGuilds et la conf sont charges avant le premier tick de ce
+    // gestionnaire). Sans reserve : rien ne change.
+    std::vector<uint32> const reserve = sPlayerbotAIConfig.GuildesDeReserve();
+    if (!reserve.empty() && maxAllowedBotCount)
+    {
+        std::string ids;
+        for (uint32 id : reserve)
+            ids += (ids.empty() ? "" : ",") + std::to_string(id);
+        if (QueryResult membres = CharacterDatabase.Query(
+                "SELECT gm.guid, c.account, c.class FROM guild_member gm JOIN characters c ON c.guid = gm.guid"
+                " WHERE gm.guildid IN ({}) ORDER BY gm.guid", ids))
+        {
+            uint32 retenus = 0;
+            do
+            {
+                Field* f = membres->Fetch();
+                uint32 const guid = f[0].Get<uint32>();
+                // Revue (m2) : comptes de bots ALEATOIRES seulement (type 1), comme AddRandomBots.
+                if (!sPlayerbotAIConfig.IsInRandomAccountList(f[1].Get<uint32>()) ||
+                    !IsAccountType(f[1].Get<uint32>(), 1) ||
+                    (sPlayerbotAIConfig.disableDeathKnightLogin && f[2].Get<uint8>() == CLASS_DEATH_KNIGHT))
+                    continue;
+                if (currentBots.size() >= maxAllowedBotCount)
+                    break;
+                if (!GetEventValue(guid, "add"))
+                {
+                    uint32 const addTime = sPlayerbotAIConfig.enablePeriodicOnlineOffline
+                                               ? urand(sPlayerbotAIConfig.minRandomBotInWorldTime,
+                                                       sPlayerbotAIConfig.maxRandomBotInWorldTime)
+                                               : sPlayerbotAIConfig.permanentlyInWorldTime;
+                    SetEventValue(guid, "add", 1, addTime);
+                    SetEventValue(guid, "logout", 0, 0);
+                }
+                if (currentBots.insert(guid).second)
+                    ++retenus;
+            } while (membres->NextRow());
+            LOG_INFO("playerbots", "coa directeur reserve_connexion: retenus={} (membres de la reserve, en premier)",
+                     retenus);
+        }
+    }
+
     if (PreparedQueryResult result = PlayerbotsDatabase.Query(stmt))
     {
         do

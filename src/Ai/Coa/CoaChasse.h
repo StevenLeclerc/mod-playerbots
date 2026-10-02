@@ -663,11 +663,26 @@ public:
         if (bot->IsInCombat())
             return false;
 
+        // Reserve de chasseurs (02/10). Le chasseur designe, son prime, et deux
+        // etats lus par le fil monde : prime AFK, chasseur de reserve. Sans
+        // chasseur : un chargement atomique, et tout ce qui suit est le code
+        // d'avant.
+        uint32 primeDuChasseur = 0, chasseDuChasseur = 0;
+        bool primeAfk = false, deLaReserve = false;
+        bool const chasseurDesigne = CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter(), &primeDuChasseur,
+                                                              &chasseDuChasseur, &primeAfk, &deLaReserve);
+
         // P-167 : la furtivite d'une prime ne survit pas a sa traque. Hors d'une
         // traque imposee, un chasseur furtif cacherait son prime a « enemy player
         // target » (EnemyPlayerValue.cpp, approcheFurtive) sans que personne ne
         // le mene : on la rompt. Sans furtivite : un test d'aura.
-        if (etat != CoaEtatChasse::Traque || !traqueImposee)
+        // Reserve (02/10) : SAUF pendant qu'il tient a distance un prime AFK --
+        // « furtif s'il l'etait » (CONCEPTION-reserve-chasseurs.md § 2.5) -- et
+        // pour un chasseur de RESERVE, qui relit son prime a chaque passage plus
+        // bas et repart aussitot (rompre puis reprendre la furtivite au retour du
+        // joueur couterait un sort, parfois une recharge). Toute fin de traque
+        // (PasserEnRetour, Oublier) la rompt quand meme.
+        if ((etat != CoaEtatChasse::Traque || !traqueImposee) && !(chasseurDesigne && (primeAfk || deLaReserve)))
             QuitterLaFurtiviteDeLaPrime();
 
         // On relit le lieu depuis le DBC a chaque tick, et non pvpInfo.IsInNoPvPArea,
@@ -745,6 +760,38 @@ public:
                 etat = CoaEtatChasse::Choix;
             else
                 PasserEnRoute();
+        }
+
+        // Reserve de chasseurs (02/10), deux cas propres au chasseur designe,
+        // APRES le repli (en lieu sans PvP il ne peut ni frapper ni etre frappe).
+        if (chasseurDesigne)
+        {
+            // 0. Une traque ORDINAIRE lancee avant la designation (proie tiree au
+            // hasard) n'a plus d'objet : le chasseur ne convoite que son prime
+            // (NearestEnemyPlayersValue). Abandon muet (traqueImposee faux).
+            if (etat == CoaEtatChasse::Traque && !traqueImposee)
+                AbandonnerLaTraque();
+            // 1. Prime AFK (tout chasseur) : il n'est la proie de personne. Une
+            // traque en cours s'arrete sans rompre la furtivite ; le chasseur se
+            // tient a DistanceAfkYd, immobile, jusqu'au retour du joueur (ou la
+            // fin de la prime, levee par le service apres 2 min d'AFK).
+            if (primeAfk)
+            {
+                if (etat == CoaEtatChasse::Traque)
+                    SuspendreLaTraquePourAfk();
+                return TenirADistanceDuPrime(primeDuChasseur);
+            }
+            // 2. Chasseur de RESERVE : pas d'attente au poste. Dans tout etat hors
+            // traque, il lit son prime (memes regles que le GUET : LireProieImposee,
+            // jusqu'a PrimeDetectionYd) et part des qu'il le lit.
+            if (deLaReserve && etat != CoaEtatChasse::Traque && sPlayerbotAIConfig.wildPvpTraque &&
+                !PvSousLeSeuil() && GetMSTimeDiffToNow(dernierScanProie) >= DelaiScanProieMs)
+            {
+                dernierScanProie = getMSTime();
+                ObjectGuid const tiree = LireProieImposee(primeDuChasseur);
+                if (!tiree.IsEmpty())
+                    return LancerLaTraque(tiree, true, primeDuChasseur, chasseDuChasseur);
+            }
         }
 
         switch (etat)
@@ -840,30 +887,13 @@ public:
                 {
                     dernierScanProie = getMSTime();
 
-                    ObjectGuid const tiree = imposee ? LireProieImposee(primeGuid) : ChoisirProie();
+                    // Reserve (02/10) : un chasseur designe ne tire JAMAIS une proie au
+                    // hasard, meme quand son prime ne l'est plus (AFK : traite plus
+                    // haut ; course entre les deux lectures : rien ce tick).
+                    ObjectGuid const tiree = imposee ? LireProieImposee(primeGuid)
+                                             : chasseurDesigne ? ObjectGuid::Empty : ChoisirProie();
                     if (!tiree.IsEmpty())
-                    {
-                        proie = tiree;
-                        etat = CoaEtatChasse::Traque;
-                        debutTraque = getMSTime();
-                        traqueImposee = imposee;
-                        // P-167 : etat de l'approche, neuf a chaque traque.
-                        primeDeLaTraque = imposee ? primeGuid : 0;
-                        chasseDeLaTraque = imposee ? chasseId : 0;
-                        engagementCompte = false;
-                        debutContact = 0;
-                        attentePlace = false;
-                        dernierEssaiPlace = 0;
-                        prochaineFurtivite = 0;
-                        CoaChasseCompteTraque();
-                        if (imposee)
-                        {
-                            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PROIES_IMPOSEES);
-                            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=proie_imposee",
-                                     bot->GetGUID().GetCounter(), primeGuid, chasseId);
-                        }
-                        return Traquer();
-                    }
+                        return LancerLaTraque(tiree, imposee, primeGuid, chasseId);
                 }
 
                 // LE GARDE QUI MANQUAIT, et sans lequel cet etat viole
@@ -1203,6 +1233,90 @@ private:
     // bords (0 et 100) que la premiere ecriture manquait.
     bool PvSousLeSeuil() const { return CoaPvSousLeSeuil(bot); }
 
+    // GUET -> TRAQUE (et, reserve de chasseurs, tout etat -> TRAQUE). Corps
+    // d'origine de l'etat GUET, sorti tel quel pour servir aux deux entrees.
+    bool LancerLaTraque(ObjectGuid tiree, bool imposee, uint32 primeGuid, uint32 chasseId)
+    {
+        proie = tiree;
+        etat = CoaEtatChasse::Traque;
+        debutTraque = getMSTime();
+        traqueImposee = imposee;
+        // P-167 : etat de l'approche, neuf a chaque traque.
+        primeDeLaTraque = imposee ? primeGuid : 0;
+        chasseDeLaTraque = imposee ? chasseId : 0;
+        engagementCompte = false;
+        debutContact = 0;
+        attentePlace = false;
+        dernierEssaiPlace = 0;
+        prochaineFurtivite = 0;
+        CoaChasseCompteTraque();
+        if (imposee)
+        {
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PROIES_IMPOSEES);
+            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=proie_imposee",
+                     bot->GetGUID().GetCounter(), primeGuid, chasseId);
+        }
+        return Traquer();
+    }
+
+    // Reserve de chasseurs (02/10) : distance tenue face a un prime AFK (« les
+    // chasseurs se tiennent a 100 yd », CONCEPTION-reserve-chasseurs.md § 2.5).
+    static constexpr float DistanceAfkYd = 100.0f;
+    // En deca de DistanceAfkYd - MargeAfkYd, il recule ; au-dela, il ne bouge pas.
+    static constexpr float MargeAfkYd = 8.0f;
+
+    // Le prime devient AFK pendant la traque : elle s'arrete SANS rompre la
+    // furtivite (PasserEnRetour la romprait). Le prochain etat est RETOUR si le
+    // poste vaut encore, CHOIX sinon ; il ne joue qu'au retour du joueur.
+    void SuspendreLaTraquePourAfk()
+    {
+        if (traqueImposee)
+            LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=traque_fin raison=afk engage={}",
+                     bot->GetGUID().GetCounter(), primeDeLaTraque, chasseDeLaTraque, engagementCompte ? 1 : 0);
+        proie = ObjectGuid::Empty;
+        traqueImposee = false;
+        engagementCompte = false;
+        debutContact = 0;
+        attentePlace = false;
+        if (PosteEncoreValable())
+        {
+            etat = CoaEtatChasse::Retour;
+            debutRoute = getMSTime();
+            RearmerEnlisement();
+        }
+        else
+        {
+            etat = CoaEtatChasse::Choix;
+            poste = WorldPosition();
+        }
+    }
+
+    // Prime AFK : reculer a DistanceAfkYd s'il est plus pres, sinon rester sur
+    // place (patron de TenirLaPosition : « move random » ne le fait pas deriver).
+    // Le prime est lu par botAI->GetUnit, donc seulement sur la MEME carte que le
+    // bot (fil de carte du bot, patron de LireProieImposee) ; illisible : sur place.
+    bool TenirADistanceDuPrime(uint32 primeGuid)
+    {
+        Unit* prime = primeGuid ? botAI->GetUnit(ObjectGuid::Create<HighGuid::Player>(primeGuid)) : nullptr;
+        if (prime && prime->IsInWorld() && prime->GetMapId() == bot->GetMapId())
+        {
+            float const distance = bot->GetExactDist(prime);
+            if (distance < DistanceAfkYd - MargeAfkYd)
+            {
+                // Sur la droite prime -> bot ; a distance nulle, l'orientation du bot.
+                float const angle = distance > 0.5f ? prime->GetAngle(bot) : bot->GetOrientation();
+                float x = prime->GetPositionX() + std::cos(angle) * DistanceAfkYd;
+                float y = prime->GetPositionY() + std::sin(angle) * DistanceAfkYd;
+                float z = bot->GetPositionZ();
+                bot->UpdateAllowedPositionZ(x, y, z);
+                // MOVEMENT_COMBAT : au-dessus du verrou NORMAL de TenirLaPosition.
+                return MoveTo(bot->GetMapId(), x, y, z, false, false, false, false,
+                              MovementPriority::MOVEMENT_COMBAT);
+            }
+        }
+        return TenirLaPosition();
+    }
+
     /*
      * LA TRAQUE. Un seul pas vers la proie, et rien d'autre.
      *
@@ -1229,18 +1343,34 @@ private:
         // Lot D4c : la traque d'un chasseur vers son prime dure plus longtemps
         // et porte plus loin ; elle s'arrete des que la prime ne court plus.
         uint32 primeGuid = 0;
-        if (traqueImposee && (!CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid) ||
-                              proie.GetCounter() != primeGuid))
+        bool primeAfk = false, deLaReserve = false;
+        if (traqueImposee)
         {
-            AbandonnerLaTraque("prime_finie");
-            return false;
+            if (!CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter(), &primeGuid, nullptr, &primeAfk, &deLaReserve) ||
+                proie.GetCounter() != primeGuid)
+            {
+                AbandonnerLaTraque("prime_finie");
+                return false;
+            }
+            // Reserve (02/10) : prime AFK -- la traque s'arrete sans rompre la
+            // furtivite (Execute tient ensuite la distance).
+            if (primeAfk)
+            {
+                SuspendreLaTraquePourAfk();
+                return TenirADistanceDuPrime(primeGuid);
+            }
         }
-        uint32 const dureeMaxMs =
-            traqueImposee ? sPlayerbotAIConfig.directeurPrimeTraqueSecondes * IN_MILLISECONDS : DureeTraqueMaxMs;
-        if (GetMSTimeDiffToNow(debutTraque) >= dureeMaxMs)
+        // Reserve (02/10) : la traque d'un chasseur de RESERVE n'a pas de borne de
+        // duree -- la prime la borne (fin de prime : `prime_finie` ci-dessus).
+        if (!(traqueImposee && deLaReserve))
         {
-            AbandonnerLaTraque("duree");
-            return false;
+            uint32 const dureeMaxMs =
+                traqueImposee ? sPlayerbotAIConfig.directeurPrimeTraqueSecondes * IN_MILLISECONDS : DureeTraqueMaxMs;
+            if (GetMSTimeDiffToNow(debutTraque) >= dureeMaxMs)
+            {
+                AbandonnerLaTraque("duree");
+                return false;
+            }
         }
 
         Unit* cible = proie.IsEmpty() ? nullptr : botAI->GetUnit(proie);
@@ -2844,7 +2974,10 @@ public:
     {
         // Les deux interrupteurs, dans cet ordre : le decrochage est une piece
         // de la chasse, il ne s'allume pas sans elle.
-        if (!sPlayerbotAIConfig.wildPvpChasse || !sPlayerbotAIConfig.wildPvpDecrochage)
+        // Reserve de chasseurs (02/10) : le CHASSEUR DESIGNE d'une prime decroche
+        // MEME Decrochage eteint (son cas propre, DecrocherPourLaPrime). Sans
+        // chasseur : un chargement atomique de plus, apres le premier booleen.
+        if (!sPlayerbotAIConfig.wildPvpChasse)
             return false;
 
         if (!bot->IsAlive() || bot->IsInFlight() || bot->InBattleground())
@@ -2858,8 +2991,15 @@ public:
         if (!bot->IsInCombat())
         {
             debutDecrochage = 0;
+            debutRiposte = 0;
             return false;
         }
+
+        // Reserve (02/10) : la question du chasseur n'est posee qu'EN COMBAT --
+        // hors combat, cette action ne coute toujours que trois tests.
+        chasseurDeLaPrime = CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter(), &primeDuChasseur, &chasseDuChasseur);
+        if (!sPlayerbotAIConfig.wildPvpDecrochage && !chasseurDeLaPrime)
+            return false;
 
         if (botAI->HasGameClientMaster())
             return false;
@@ -2918,7 +3058,10 @@ public:
                     return false;
         }
 
-        return CombatPerduOuInterdit();
+        // Option Decrochage eteinte : seul le cas du chasseur reste.
+        if (sPlayerbotAIConfig.wildPvpDecrochage && CombatPerduOuInterdit())
+            return true;
+        return chasseurDeLaPrime && DecrocherPourLaPrime();
     }
 
     bool Execute(Event /*event*/) override
@@ -2972,6 +3115,11 @@ public:
         {
             debutDecrochage = getMSTime();
             CoaChasseCompteDecrochage();
+            if (chasseurDeLaPrime)
+                LOG_INFO("playerbots",
+                         "coa directeur chasse: bot={} joueur={} id={} motif=decrochage creature={} pv_creature={}",
+                         bot->GetGUID().GetCounter(), primeDuChasseur, chasseDuChasseur, agresseur->GetEntry(),
+                         uint32(agresseur->GetHealthPct()));
         }
 
         /*
@@ -2983,11 +3131,21 @@ public:
          * n'aurait rien a changer, et PlayerbotAI::ChangeEngine ecrit une ligne
          * de journal a chaque passage.
          */
-        if (Value<Unit*>* cible = context->GetValue<Unit*>("current target"))
-            cible->Set(nullptr);
+        // Reserve de chasseurs (02/10, revue M2) : le CHASSEUR garde sa « current
+        // target ». La vider ferait passer « invalid target » -> « drop target »
+        // (99) et le bot au moteur NON-COMBAT -- ou un chasseur compose en mode
+        // RPG (en trajet) n'a pas « coa chasse », donc pas cette action : « dps
+        // assist » y reprendrait la creature, et le decrochage tournerait en
+        // rond. Il reste au moteur de combat, ou CoaChasseurPrimeStrategy le
+        // pousse a 60 : la rotation (<= 35) n'a plus la parole tant qu'il court.
+        if (!chasseurDeLaPrime)
+        {
+            if (Value<Unit*>* cible = context->GetValue<Unit*>("current target"))
+                cible->Set(nullptr);
 
-        bot->SetTarget(ObjectGuid::Empty);
-        bot->SetSelection(ObjectGuid());
+            bot->SetTarget(ObjectGuid::Empty);
+            bot->SetSelection(ObjectGuid());
+        }
         bot->AttackStop();
 
         /*
@@ -3006,7 +3164,25 @@ public:
          * Le pas lui-meme vaut fleeDistance (5,0 yd) : voir l'en-tete de cette
          * classe, qui dit ce que cela vaut vraiment.
          */
-        if (!IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+        // Reserve de chasseurs (02/10) : le chasseur d'une prime ne recule pas de
+        // 5 yd, il REPREND LA TRAQUE -- il court vers son prime (lu sur sa carte,
+        // fil du bot, patron de LireProieImposee), et la creature finit par
+        // lacher (laisse de la creature). Prime illisible ou AFK : le pas d'origine.
+        Unit* prime = nullptr;
+        bool primeAfk = false;
+        if (chasseurDeLaPrime && CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter(), nullptr, nullptr, &primeAfk) &&
+            !primeAfk)
+        {
+            prime = botAI->GetUnit(ObjectGuid::Create<HighGuid::Player>(primeDuChasseur));
+            if (prime && (!prime->IsInWorld() || prime->GetMapId() != bot->GetMapId() || !prime->IsAlive()))
+                prime = nullptr;
+        }
+        if (prime)
+        {
+            if (!IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+                MoveTo(prime, CoaChasseAction::PorteeEngagementFaible, MovementPriority::MOVEMENT_COMBAT);
+        }
+        else if (!IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
             MoveAway(agresseur, sPlayerbotAIConfig.fleeDistance, false);
 
         /*
@@ -3039,6 +3215,51 @@ public:
 
 private:
     uint32 debutDecrochage = 0;
+
+    // Reserve de chasseurs (02/10). Releve par isUseful a chaque passage : le bot
+    // est-il le chasseur designe d'une prime, et laquelle (journal).
+    bool chasseurDeLaPrime = false;
+    uint32 primeDuChasseur = 0;
+    uint32 chasseDuChasseur = 0;
+    // Premier passage en combat PvE du chasseur (0 hors combat) : la riposte
+    // dure au moins RiposteMinMs avant tout decrochage.
+    uint32 debutRiposte = 0;
+
+    // LA RIPOSTE, PUIS LE DECROCHAGE. Un chasseur attaque par une creature
+    // (isUseful a deja ecarte tout agresseur joueur et toute proie convoitee)
+    // riposte RiposteMinMs ; ensuite, si une creature qui le frappe tient encore
+    // au-dessus de SeuilAchevementPct de ses PV, il decroche et reprend sa
+    // traque. En dessous, il l'acheve (le combat finit de lui-meme). La creature
+    // morte, le combat se referme et la chasse reprend la main.
+    static constexpr uint32 RiposteMinMs = 5 * 1000;
+    static constexpr float SeuilAchevementPct = 35.0f;
+
+    static constexpr float SeuilVieDecrochagePrimePct = 35.0f;
+
+    bool DecrocherPourLaPrime()
+    {
+        // Revue (m1) : un chasseur blesse ne court pas vers son prime, soins
+        // coupes ; il finit son combat (rotation et soins rendus).
+        if (bot->GetHealthPct() < SeuilVieDecrochagePrimePct)
+            return false;
+        bool creature = false;
+        bool tenace = false;
+        for (Unit* agresseur : bot->getAttackers())
+        {
+            if (!agresseur || !agresseur->IsAlive() || agresseur->IsPlayer())
+                continue;
+            creature = true;
+            if (agresseur->GetHealthPct() > SeuilAchevementPct)
+                tenace = true;
+        }
+        if (!creature)
+            return false;
+        if (!debutRiposte)
+            debutRiposte = getMSTime();
+        if (GetMSTimeDiffToNow(debutRiposte) < RiposteMinMs)
+            return false;
+        return tenace;
+    }
 
     /*
      * LE GARDE-FOU, recopie de GrindTargetValue.cpp:95-101 et retourne.
@@ -3334,6 +3555,45 @@ public:
             NextAction("food", 4.1f),
             NextAction("coa chasse", CoaChasseAction::Pertinence),
         };
+    }
+};
+
+/*
+ * Reserve de chasseurs (02/10, revue M2) -- LE DECROCHAGE EN COMBAT du chasseur
+ * d'une prime.
+ *
+ * « coa decrochage » n'etait poussee que par « coa chasse », strategie
+ * NON-COMBAT : une fois la riposte engagee (AttackAction -> moteur de COMBAT),
+ * elle n'avait plus jamais la parole (voir l'en-tete de CoaDecrochageAction,
+ * « CE QU'ELLE NE COUVRE PAS »). Cette strategie de COMBAT la pousse aussi dans
+ * le moteur de combat, A PertinenceCombat (60, ACTION_RAID) : au-dessus des
+ * rotations CoA (<= ACTION_CRITICAL_HEAL + 5 = 35) et des interruptions (40),
+ * sous l'urgence (90). La meme instance d'action sert aux deux moteurs (contexte
+ * du bot) : la fenetre de decrochage est donc une seule.
+ *
+ * POSEE SEULEMENT POUR UN CHASSEUR : AiFactory::AddDefaultCombatStrategies ne
+ * l'ajoute que si CoaDirecteur::ChasseurDe(bot) est vrai A LA COMPOSITION ; le
+ * Directeur recompose le bot a la pose (BasculerComposition) et a la fin de son
+ * affectation `chasser`. Et ses actions par defaut se relisent a chaque tick :
+ * plus chasseur (fin de prime avant la recomposition), elle ne pousse rien --
+ * un chargement atomique.
+ */
+class CoaChasseurPrimeStrategy : public Strategy
+{
+public:
+    CoaChasseurPrimeStrategy(PlayerbotAI* botAI) : Strategy(botAI) {}
+
+    static constexpr float PertinenceCombat = ACTION_RAID;
+
+    std::string const getName() override { return "coa chasseur prime"; }
+    uint32 GetType() const override { return STRATEGY_TYPE_COMBAT; }
+
+    std::vector<NextAction> getDefaultActions() override
+    {
+        Player* const joueur = botAI->GetBot();
+        if (!joueur || !CoaDirecteur::ChasseurDe(joueur->GetGUID().GetCounter()))
+            return {};
+        return {NextAction("coa decrochage", PertinenceCombat)};
     }
 };
 

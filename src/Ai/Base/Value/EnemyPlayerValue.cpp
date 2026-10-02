@@ -223,10 +223,20 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
     // prime, le plafond d'assaillants devient Directeur.PrimeMeute, tous
     // mercenaires comptes, designes ou non ; la treve de 60 s apres une mort
     // (IsUnderTruce) n'est JAMAIS levee. Sans chasseur : un chargement atomique.
+    // Reserve de chasseurs (02/10) : ChasseurDe et non plus ProieImposee. Un
+    // chasseur dont le prime est AFK ne convoite PERSONNE (ni son prime, ni une
+    // autre proie : il se tient a distance, CoaChasse.h), riposte permise --
+    // mais pas contre le prime AFK lui-meme, sauf s'il frappe le bot.
     uint32 primeGuid = 0;
-    bool const imposee = enemy && botEstMercenaire && CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid);
-    bool const primeEnFace = imposee && enemy->GetGUID().GetCounter() == primeGuid;
-    if (imposee && !primeEnFace && !(bot->GetVictim() == unit || bot->getAttackerForHelper() == unit))
+    bool primeAfk = false;
+    bool const chasseur = enemy && botEstMercenaire &&
+                          CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter(), &primeGuid, nullptr, &primeAfk);
+    bool const imposee = chasseur && !primeAfk;
+    bool const estLePrime = chasseur && enemy->GetGUID().GetCounter() == primeGuid;
+    bool const primeEnFace = imposee && estLePrime;
+    bool const riposte = bot->getAttackerForHelper() == unit ||
+                         (bot->GetVictim() == unit && !(primeAfk && estLePrime && enemy->GetVictim() != bot));
+    if (chasseur && !primeEnFace && !riposte)
         return false;
     uint32 const plafondNormal = sPlayerbotAIConfig.wildPvpMaxAttackersPerTarget;
     if (botEstMercenaire && MercenaryRewards::instance().IsUnderTruce(enemy->GetGUID().GetRawValue()))
@@ -289,9 +299,17 @@ Unit* EnemyPlayerValue::Calculate()
     // creature pouvant valoir le meme nombre). Sans chasseur : un chargement
     // atomique, et `voit` est le test amont.
     uint32 primeGuid = 0;
-    bool const imposee = CoaDirecteur::ProieImposee(bot->GetGUID().GetCounter(), &primeGuid);
+    bool primeAfk = false;
+    bool const chasseur = CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter(), &primeGuid, nullptr, &primeAfk);
+    bool const imposee = chasseur && !primeAfk;
     auto const estLePrime = [&](Unit const* u) {
         return imposee && u->IsPlayer() && u->GetGUID().GetCounter() == primeGuid;
+    };
+    // Reserve de chasseurs (02/10) : le prime AFK d'un chasseur (le bot ne le
+    // reprend pas par ses references de combat, sauf s'il le frappe).
+    auto const estLePrimeAfk = [&](Unit const* u) {
+        return chasseur && primeAfk && u->IsPlayer() && u->GetGUID().GetCounter() == primeGuid &&
+               u->GetVictim() != bot;
     };
     // (A) Pour ce seul couple : le bot voit-il sa proie ? Ailleurs : la proie
     // voit-elle le bot (test amont, inchange).
@@ -314,7 +332,7 @@ Unit* EnemyPlayerValue::Calculate()
     {
         Unit* pTarget = combatRef->GetOther(bot);
         if (!pTarget || pTarget == pVictim || !pTarget->IsPlayer() || !voit(pTarget) ||
-            !bot->IsWithinDist(pTarget, VISIBILITY_DISTANCE_NORMAL))
+            !bot->IsWithinDist(pTarget, VISIBILITY_DISTANCE_NORMAL) || estLePrimeAfk(pTarget))
             continue;
 
         if ((bot->GetTeamId() == TEAM_HORDE && pTarget->HasAura(23333)) ||

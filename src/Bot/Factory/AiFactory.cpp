@@ -456,6 +456,14 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
             if (std::string_view(coa->position) == "close")
                 engine->addStrategy("coa basic attack", false);
         }
+
+        // CoA -- reserve de chasseurs du Directeur (02/10, revue M2) : le CHASSEUR
+        // DESIGNE d'une prime (tout chasseur, reserve ou non) recoit en combat
+        // « coa chasseur prime », qui pousse « coa decrochage » dans CE moteur.
+        // Les autres bots ne la recoivent pas : un chargement atomique. Le
+        // Directeur recompose le chasseur a la pose et a la fin (BasculerComposition).
+        if (CoaDirecteur::ChasseurDe(player->GetGUID().GetCounter()))
+            engine->addStrategy("coa chasseur prime", false);
     }
 
     if (PlayerbotAI::IsTank(player, true))
