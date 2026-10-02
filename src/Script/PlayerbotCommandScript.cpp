@@ -9,6 +9,7 @@
 #include "CoaSpecialization.h"
 #include "Group.h"
 #include "GuildTaskMgr.h"
+#include "LFGMgr.h"
 #include "ObjectAccessor.h"
 #include "PerfMonitor.h"
 #include "Player.h"
@@ -16,9 +17,15 @@
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
 #include "StringConvert.h"
+#include "Timer.h"
+#include "WorldPacket.h"
+#include "WorldSession.h"
 
 #include <cstddef>
 #include <limits>
+#include <mutex>
+#include <string_view>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -470,9 +477,24 @@ public:
         if (PlayerbotsMgr::instance().GetPlayerbotAI(master))
             handler->PSendSysMessage("coa: warning, {} is itself a bot.", master->GetName());
 
-        // Kept by value: the summary line below is written after the last recruitment, and the
-        // name outlives the pointer.
-        std::string const masterName = master->GetName();
+        RunCoaRecruitment(handler, master->GetName(), role, count, options);
+        return true;
+    }
+
+    // LA BOUCLE DE RECRUTEMENT DU TABLEAU DE BORD, ET ELLE SEULE.
+    //
+    // Sortie de la branche console le 02/10/2026 sans en changer une ligne de sortie : le
+    // panneau (phase8-panel/panel.py, _groupe_lire_sortie) l'analyse au caractere pres. Le
+    // relais de l'addon CoAGroupe (coa_groupe_addon_playerscript, plus bas) l'appelle aussi,
+    // avec un ChatHandler qui capture ces memes lignes pour les renvoyer a l'addon : il n'y a
+    // donc qu'une facon de recruter un groupe, que la demande vienne du panneau ou du jeu.
+    // Rend le nombre de bots places.
+    static uint32 RunCoaRecruitment(ChatHandler* handler, std::string const masterName, CoaRole role, uint32 count,
+                                    CoaRecruitOptions const& options)
+    {
+        // The name is kept by value: the summary line below is written after the last
+        // recruitment, and the name outlives any pointer.
+        Player* master = nullptr;
 
         uint32 placed = 0;
         uint32 rebuilt = 0;
@@ -530,7 +552,7 @@ public:
             if (stopped)
                 handler->SendSysMessage(reason);
             SendCoaShortLine(handler, options, report, placed, count, rebuilt, role, masterName);
-            return true;
+            return placed;
         }
 
         // Avant le bilan : le bilan est la derniere ligne du lot depuis toujours, et la
@@ -543,7 +565,7 @@ public:
             handler->PSendSysMessage("coa: {}/{} {} recruited for {}, stopped: {}", placed, count, CoaRoleLabel(role),
                                      masterName, reason);
 
-        return true;
+        return placed;
     }
 
     static bool HandleRandomPlayerbotCommand(ChatHandler* handler, char const* args)
@@ -693,4 +715,203 @@ public:
     }
 };
 
-void AddPlayerbotsCommandscripts() { new playerbots_commandscript(); }
+// LE RELAIS DE L'ADDON CoAGroupe (02/10/2026) : composer son groupe de donjon EN JEU, sans
+// compte MJ, par la meme boucle que le tableau de bord.
+//
+// Pourquoi un relais et pas la commande : `.playerbots coa` est SEC_GAMEMASTER, et a raison -
+// sa forme console vise n'importe quel joueur, jusqu'a 40 bots. Le panneau, lui, passe par la
+// console RA avec les droits d'administration. Ici, c'est le serveur qui borne : on ne recrute
+// QUE dans le groupe du demandeur, a ses pieds, dans ses places libres, 9 bots au plus, une
+// demande toutes les 5 s ; seul le chef (ou un assistant) garnit son groupe, jamais en combat,
+// en vol, mort ou en file du Dungeon Finder ; la refabrication des bots reste reservee aux MJ.
+//
+// Protocole (chuchotement d'addon a soi-meme, comme COABH et CoABugReport.cpp) :
+//   demande  `COAGR\t<tank> <heal> <dps> [delta=-1/+3] [palier=bas|moyen|max] [refab=oui|non]`
+//   reponses `COAGR\tL|<ligne>`  une ligne de la boucle de recrutement, telle que le panneau la lit
+//            `COAGR\tW|<texte>`  un avertissement (mode MJ)
+//            `COAGR\tE|<texte>`  la demande entiere est refusee, rien n'a ete fait
+//            `COAGR\tF|<places>|<demandes>`  fin, toujours envoyee en dernier
+namespace
+{
+constexpr char GROUPE_PREFIXE[] = "COAGR\t";
+constexpr uint32 GROUPE_INTERVALLE_MS = 5000;
+constexpr uint32 GROUPE_MAX_PAR_DEMANDE = 9;
+constexpr size_t GROUPE_MESSAGE_MAX = 240;     // un message d'addon tient en 255 octets
+
+std::mutex verrouGroupe;   // CMSG_MESSAGECHAT est traite par le fil monde : ceinture, comme COABH
+std::unordered_map<uint32, uint32> derniereDemandeGroupe;   // guid -> getMSTime()
+
+// Garde les lignes que la boucle ecrit, au lieu de les envoyer au chat du joueur.
+class CoaCaptureHandler : public ChatHandler
+{
+public:
+    explicit CoaCaptureHandler(WorldSession* session) : ChatHandler(session) {}
+
+    void SendSysMessage(std::string_view str, bool /*escapeCharacters*/) override { lines.emplace_back(str); }
+    using ChatHandler::SendSysMessage;
+
+    std::vector<std::string> lines;
+};
+
+void EnvoyerGroupe(Player* player, std::string corps)
+{
+    for (char& ch : corps)
+        if (ch == '\n' || ch == '\r' || ch == '\t')
+            ch = ' ';
+    std::string texte = std::string(GROUPE_PREFIXE) + corps;
+    // Coupe sans jamais trancher un caractere UTF-8 (un nom de personnage peut en porter), et
+    // le dit : « ... » en fin de ligne coupee.
+    if (texte.size() > GROUPE_MESSAGE_MAX)
+    {
+        size_t fin = GROUPE_MESSAGE_MAX - 3;
+        while (fin > sizeof(GROUPE_PREFIXE) && (static_cast<unsigned char>(texte[fin]) & 0xC0) == 0x80)
+            --fin;
+        texte.resize(fin);
+        texte += "...";
+    }
+    WorldPacket paquet;
+    ChatHandler::BuildChatPacket(paquet, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(), texte, 0,
+                                 player->GetName(), player->GetName(), 0, false);
+    player->SendDirectMessage(&paquet);
+}
+}  // namespace
+
+class coa_groupe_addon_playerscript : public PlayerScript
+{
+public:
+    coa_groupe_addon_playerscript()
+        : PlayerScript("coa_groupe_addon_playerscript", {PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT})
+    {
+    }
+
+    using PlayerScript::OnPlayerCanUseChat;
+
+    bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& message,
+                            Player* receiver) override
+    {
+        if (type != CHAT_MSG_WHISPER || language != LANG_ADDON || !player ||
+            message.compare(0, sizeof(GROUPE_PREFIXE) - 1, GROUPE_PREFIXE) != 0)
+            return true;
+        // Le protocole est consomme dans tous les cas : jamais transmis a un autre joueur.
+        WorldSession* session = player->GetSession();
+        if (receiver != player || message.size() > 255 || !session || session->IsBot())
+            return false;
+
+        auto refuser = [player](std::string const& pourquoi)
+        {
+            EnvoyerGroupe(player, "E|" + pourquoi);
+            EnvoyerGroupe(player, "F|0|0");
+            return false;
+        };
+
+        uint32 const guid = player->GetGUID().GetCounter();
+        uint32 const maintenantMs = getMSTime();
+        {
+            std::lock_guard<std::mutex> garde(verrouGroupe);
+            auto it = derniereDemandeGroupe.find(guid);
+            if (it != derniereDemandeGroupe.end() && getMSTimeDiff(it->second, maintenantMs) < GROUPE_INTERVALLE_MS)
+                return refuser("une demande vient d'etre traitee : reessayez dans quelques secondes.");
+        }
+
+        std::vector<std::string> const tokens = SplitCoaArguments(message.c_str() + sizeof(GROUPE_PREFIXE) - 1);
+        if (tokens.size() < 3)
+            return refuser("demande illisible : nombre de tanks, de soigneurs et de DPS attendus.");
+
+        uint32 compte[3] = {0, 0, 0};
+        uint32 total = 0;
+        for (size_t i = 0; i < 3; ++i)
+        {
+            Optional<uint32> const n = Acore::StringTo<uint32>(tokens[i]);
+            if (!n || *n > GROUPE_MAX_PAR_DEMANDE)
+                return refuser("demande illisible : '" + tokens[i] + "' n'est pas un nombre de bots.");
+            compte[i] = *n;
+            total += *n;
+        }
+        if (!total)
+            return refuser("aucun bot demande.");
+        if (total > GROUPE_MAX_PAR_DEMANDE)
+            return refuser(Acore::StringFormat("{} bots demandes, {} au plus par demande.", total, GROUPE_MAX_PAR_DEMANDE));
+
+        // LES DEFAUTS DU TABLEAU DE BORD, PAS CEUX DE LA COMMANDE (revue du 02/10, bloquant). Sans
+        // option, CoaRecruitOptions refabrique et ne borne pas le niveau (rebuild = true,
+        // CoaSpecialization.h) : une demande nue aurait refabrique - sacs vides, metiers et
+        // quetes effaces - n'importe quel bot du royaume, en boucle, pour un joueur ordinaire.
+        // On part donc de delta -1/+3 sans refabrication (phase11-panel, reglagesParDefaut), et
+        // les options de la demande s'y ajoutent.
+        CoaRecruitOptions options;
+        options.rebuild = false;
+        std::string optionError;
+        if (!ParseCoaOptions(tokens, 3, options, optionError))
+            return refuser(optionError);
+        if (!options.HasLevelDelta())
+        {
+            options.levelDeltaLow = -1;
+            options.levelDeltaHigh = 3;
+        }
+        if (options.rebuild && session->GetSecurity() < SEC_GAMEMASTER)
+            return refuser("la refabrication des bots est reservee aux comptes MJ.");
+
+        if (player->InBattleground() || player->InArena())
+            return refuser("impossible en champ de bataille ou en arene.");
+        if (!player->IsAlive() || player->IsInCombat() || player->IsInFlight() || player->IsBeingTeleported())
+            return refuser("impossible en combat, en vol, en teleportation ou mort.");
+        // Une invitation en attente : RecruitCoaBot creerait un second groupe a cote de celui que
+        // l'acceptation va former (GroupHandler.cpp, HandleGroupAcceptOpcode).
+        if (player->GetGroupInvite())
+            return refuser("une invitation de groupe est en attente : acceptez-la ou refusez-la d'abord.");
+        lfg::LfgState const etatLfg = sLFGMgr->GetState(player->GetGUID());
+        if (etatLfg == lfg::LFG_STATE_QUEUED || etatLfg == lfg::LFG_STATE_ROLECHECK ||
+            etatLfg == lfg::LFG_STATE_PROPOSAL)
+            return refuser("vous etes dans la file du Dungeon Finder : quittez-la d'abord.");
+
+        // Tout ou rien, comme le panneau : rien n'est recrute si la demande depasse les places.
+        // Le groupe vivant est lu ici, la ou le panneau doit se contenter de la base.
+        Group* group = player->GetGroup();
+        if (group && (group->isLFGGroup() || group->isBGGroup()))
+            return refuser("votre groupe vient du Dungeon Finder ou d'un champ de bataille : quittez-le d'abord.");
+        // On ne garnit que SON groupe : un simple membre ne remplit pas le groupe d'un autre.
+        if (group && !group->IsLeader(player->GetGUID()) && !group->IsAssistant(player->GetGUID()))
+            return refuser("seul le chef du groupe (ou un assistant de raid) peut y ajouter des bots.");
+        uint32 const capacite = group && group->isRaidGroup() ? uint32(MAXRAIDSIZE) : uint32(MAXGROUPSIZE);
+        uint32 const membres = group ? group->GetMembersCount() : 1;
+        uint32 const libres = capacite > membres ? capacite - membres : 0;
+        if (total > libres)
+            return refuser(Acore::StringFormat("{} bot(s) demande(s) pour {} place(s) libre(s).", total, libres));
+
+        // La cadence ne compte que les demandes servies : un refus (en combat, groupe plein...)
+        // ne coute que deux paquets, et ne doit pas faire attendre la tentative suivante.
+        {
+            std::lock_guard<std::mutex> garde(verrouGroupe);
+            if (derniereDemandeGroupe.size() > 512)
+                derniereDemandeGroupe.clear();
+            derniereDemandeGroupe[guid] = maintenantMs;
+        }
+
+        if (player->IsGameMaster())
+            EnvoyerGroupe(player, "W|vous etes en mode MJ : vos bots ne vous soigneront pas (.gm off).");
+
+        std::string const nom = player->GetName();
+        CoaRole const roles[3] = {CoaRole::Tank, CoaRole::Heal, CoaRole::Dps};
+        uint32 places = 0;
+        for (size_t i = 0; i < 3; ++i)
+        {
+            if (!compte[i])
+                continue;
+            CoaCaptureHandler capture(session);
+            places += playerbots_commandscript::RunCoaRecruitment(&capture, nom, roles[i], compte[i], options);
+            for (std::string const& ligne : capture.lines)
+                EnvoyerGroupe(player, "L|" + ligne);
+        }
+
+        LOG_INFO("playerbots", "coa groupe: {} asked {} tank, {} heal, {} dps by the CoAGroupe addon, {} placed", nom,
+                 compte[0], compte[1], compte[2], places);
+        EnvoyerGroupe(player, Acore::StringFormat("F|{}|{}", places, total));
+        return false;
+    }
+};
+
+void AddPlayerbotsCommandscripts()
+{
+    new playerbots_commandscript();
+    new coa_groupe_addon_playerscript();
+}
