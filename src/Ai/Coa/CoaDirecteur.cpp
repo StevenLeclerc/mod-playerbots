@@ -7805,7 +7805,11 @@ std::string CorpsOnglet(uint32 guid)
     QueryResult p = CharacterDatabase.Query(
         "SELECT id, CAST(statut AS CHAR), IFNULL(etape, ''),"
         " CAST(TIMESTAMPDIFF(SECOND, IFNULL(debut, cree_le), UTC_TIMESTAMP()) AS CHAR),"
-        " CAST(IFNULL(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue), -1) AS CHAR),"
+        // 03/10 (arc 25, en jeu : « reste 12 min » pour une prime de 10 min) : `fin_prevue` porte
+        // la marge de balayage du service (primes.MARGE_FIN_S = 600 s, en plus de la duree) ;
+        // l'echeance vue du joueur est fin_prevue - 600 s. Une prime prolongee (donjon) l'est
+        // aussi par fin_prevue, donc la soustraction reste juste.
+        " CAST(IFNULL(GREATEST(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue) - 600, 0), -1) AS CHAR),"
         " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.plafond')), ''),"
         " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.simulee')), ''),"
         " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.pot')), 'null'), '')"
