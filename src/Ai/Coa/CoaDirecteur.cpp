@@ -4038,6 +4038,10 @@ constexpr float EMB_CONE_DEMI_RAD = float(M_PI) / 3.0f;   // 60 degres de part e
 constexpr float EMB_REPERE_YD = 60.0f;
 constexpr float EMB_ENGAGE_YD = 45.0f;
 constexpr uint32 EMB_ATTENTE_S = 20;
+// Banc du 03/10 (arc 15) : l'assaut `a` partait 20 s apres le premier en position alors que
+// le second chasseur etait encore a 136 yd (premiers coups non synchronises). Le delai ne
+// donne l'assaut que si TOUS les actifs sont a EMB_PROCHE_YD, ou au plus tard EMB_ATTENTE_MAX_S.
+constexpr uint32 EMB_ATTENTE_MAX_S = 45;
 constexpr uint32 EMB_RETOMBE_S = 15;
 // Revue B1 : b, c et e ne valent que si un chasseur est en position OU a
 // EMB_PROCHE_YD du joueur ; apres l'assaut, un chasseur plus loin garde l'approche
@@ -4174,7 +4178,9 @@ void SuivreEmbuscades()
             else if (!p.premierEnPositionS)
                 p.premierEnPositionS = maintenant;
             if (!raison && actifs &&
-                (enPosition == actifs || (p.premierEnPositionS && maintenant >= p.premierEnPositionS + EMB_ATTENTE_S)))
+                (enPosition == actifs ||
+                 (p.premierEnPositionS && maintenant >= p.premierEnPositionS + EMB_ATTENTE_S &&
+                  (proches >= actifs || maintenant >= p.premierEnPositionS + EMB_ATTENTE_MAX_S))))
                 raison = 'a';
             // Revue M5 : e.
             if (p.assaut || !proches)
