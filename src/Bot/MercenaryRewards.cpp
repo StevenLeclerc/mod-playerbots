@@ -357,6 +357,23 @@ uint32 MercenaryRewards::ComputeReward(Player* killer, Player* killed)
         return 0;
     }
 
+    // Reserve de chasseurs (lot X0, 03/10/2026, coa-project/docs/ENQUETE-niveau-reserve.md) :
+    // son niveau appartient au Directeur (preparation P-0), pas au mercenaire --
+    // un seul proprietaire par etat (P-134). Sans ce test, un membre prepare au
+    // niveau du joueur remontait au plafond (mediane + LevelCapMedianOffset),
+    // +10 a +23 niveaux en 13 h. Comptee comme TUEUR HORS CAMP, et non comme
+    // refus : la reserve sort du camp paye, le format du releve ne change pas,
+    // `non explique` reste a 0 et la somme des huit causes reste egale a
+    // `refuses` (invariants de l'en-tete et du panneau). Eteint sans reserve :
+    // AiPlayerbot.Directeur.ReserveGuildes vide (defaut) => EstGuildeDeReserve rend faux
+    // sans allouer. Lecture sur fil de carte sans course : la chaine n'est
+    // reecrite que par `reload config`, cartes a l'arret (PlayerbotAIConfig.h).
+    if (sPlayerbotAIConfig.EstGuildeDeReserve(killer->GetGuildId()))
+    {
+        _killerNotMercenary.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+
     uint8 const killerLevel = killer->GetLevel();
     uint8 const victimLevel = killed->GetLevel();
 

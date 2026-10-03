@@ -230,7 +230,9 @@ private:
     // _pvpKillsSeen et rien d'autre. Le releve emet desormais l'ecart sous le
     // nom `non explique` : un futur chemin muet se denoncera tout seul.
     std::atomic<uint32> _pvpKillsSeen{ 0 };       // toute mort joueur par joueur
-    std::atomic<uint32> _killerNotMercenary{ 0 }; // tueur hors du camp mercenaire
+    // tueur hors du camp mercenaire, y compris un membre de la reserve de
+    // chasseurs du Directeur (lot X0 : son niveau n'appartient qu'au Directeur)
+    std::atomic<uint32> _killerNotMercenary{ 0 };
     std::atomic<uint32> _killsRewarded{ 0 };
     std::atomic<uint32> _killsRefused{ 0 };
     std::atomic<uint32> _refusedGrey{ 0 };
