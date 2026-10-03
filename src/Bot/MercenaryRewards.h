@@ -233,6 +233,9 @@ private:
     // tueur hors du camp mercenaire, y compris un membre de la reserve de
     // chasseurs du Directeur (lot X0 : son niveau n'appartient qu'au Directeur)
     std::atomic<uint32> _killerNotMercenary{ 0 };
+    // Lot X0 : SOUS-COMPTE de _killerNotMercenary (deja inclus dedans, n'entre
+    // dans aucune somme de l'invariant). Publie `reserve N` en fin de releve.
+    std::atomic<uint32> _killerReserve{ 0 };
     std::atomic<uint32> _killsRewarded{ 0 };
     std::atomic<uint32> _killsRefused{ 0 };
     std::atomic<uint32> _refusedGrey{ 0 };

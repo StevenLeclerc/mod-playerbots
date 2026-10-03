@@ -3595,6 +3595,15 @@ AiPlayerbot.Directeur.Embuscade = 1
 #        Default: ""
 AiPlayerbot.Directeur.ReserveGuildes = ""
 
+#    AiPlayerbot.Directeur.ReserveSansXpMercenaire
+#        Lot X0 (03/10, coa-project/docs/ENQUETE-niveau-reserve.md) : 1, un membre de la reserve
+#        (ReserveGuildes) ne gagne plus l'XP de victime JcJ du mercenaire : son niveau n'appartient
+#        qu'au Directeur (preparation P-). Le meurtre est compte dans `tueur hors camp`, et a part
+#        dans le champ `reserve N` en fin de ligne [Mercenaire] de CoaBots.log. 0 : comportement
+#        d'avant. Sans effet si ReserveGuildes est vide. Couper X0 ne touche pas a la reserve.
+#        Default: 0
+AiPlayerbot.Directeur.ReserveSansXpMercenaire = 0
+
 #    AiPlayerbot.Directeur.RecompenseObjets
 #        Recompenses des primes (lot R3, coa-project/docs/CONCEPTION-recompenses-primes.md) :
 #        `recompenser` (dans Directeur.Verbes) envoie UN courrier au joueur prime, en ligne ou non :

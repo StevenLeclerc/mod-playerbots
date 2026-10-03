@@ -123,12 +123,15 @@ void MercenaryRewards::Update(uint32 diff)
         // danger ; en inserer un AVANT `treves`, ou renommer l'un des champs
         // du prefixe, casse les trois consommateurs et exige de les mettre a
         // jour dans la meme vague.
+        // `reserve N` (lot X0, 03/10/2026) ferme la ligne, apres `uptime` : c'est
+        // un SOUS-COMPTE de `tueur hors camp` (membres de la reserve dont l'XP JcJ
+        // est retenue), pas une cause de plus ; il n'entre dans aucune somme.
         LOG_INFO("playerbots.coa",
             "[Mercenaire] mediane {} - morts PvP vues {} - tueur hors camp {} - "
             "payes {} - refus {} "
             "(gris {}, plafond {}, recidive {}, cadence {}) - treves {} - "
             "autres refus (desarme {}, niveau max {}, tiers {}, non verse {}) - "
-            "non explique {} - seq {} - uptime {}s",
+            "non explique {} - seq {} - uptime {}s - reserve {}",
             static_cast<uint32>(MedianBotLevel()),
             vues,
             horsCamp,
@@ -145,7 +148,8 @@ void MercenaryRewards::Update(uint32 diff)
             _refusedNotPaid.load(std::memory_order_relaxed),
             nonExplique,
             _rapportSeq,
-            static_cast<int64>(GameTime::GetUptime().count()));
+            static_cast<int64>(GameTime::GetUptime().count()),
+            _killerReserve.load(std::memory_order_relaxed));
 
         // LOT 5, SUR SA PROPRE LIGNE ET PAS SUR CELLE DU DESSUS. Le prefixe
         // `[Mercenaire] ... treves N` est un CONTRAT avec trois consommateurs du
@@ -362,15 +366,23 @@ uint32 MercenaryRewards::ComputeReward(Player* killer, Player* killed)
     // un seul proprietaire par etat (P-134). Sans ce test, un membre prepare au
     // niveau du joueur remontait au plafond (mediane + LevelCapMedianOffset),
     // +10 a +23 niveaux en 13 h. Comptee comme TUEUR HORS CAMP, et non comme
-    // refus : la reserve sort du camp paye, le format du releve ne change pas,
+    // refus : la reserve sort du camp paye, le prefixe du releve ne change pas,
     // `non explique` reste a 0 et la somme des huit causes reste egale a
-    // `refuses` (invariants de l'en-tete et du panneau). Eteint sans reserve :
-    // AiPlayerbot.Directeur.ReserveGuildes vide (defaut) => EstGuildeDeReserve rend faux
-    // sans allouer. Lecture sur fil de carte sans course : la chaine n'est
-    // reecrite que par `reload config`, cartes a l'arret (PlayerbotAIConfig.h).
-    if (sPlayerbotAIConfig.EstGuildeDeReserve(killer->GetGuildId()))
+    // `refuses` (invariants de l'en-tete et du panneau). Sous-compte a part,
+    // _killerReserve, publie en fin de releve (`reserve N`) : c'est la seule
+    // preuve lisible dans les journaux que ce chemin sert.
+    // ETEINT PAR DEFAUT : AiPlayerbot.Directeur.ReserveSansXpMercenaire vaut 0,
+    // et le test de guilde n'est alors meme pas evalue. Interrupteur propre : la
+    // conf en service pose deja AiPlayerbot.Directeur.ReserveGuildes, donc sans
+    // lui X0 aurait pris effet au premier redemarrage. Inerte aussi si la reserve
+    // est vide (EstGuildeDeReserve rend faux sans allouer). Lecture sur fil de
+    // carte sans course : ces options ne sont reecrites que par `reload config`,
+    // cartes a l'arret (PlayerbotAIConfig.h).
+    if (sPlayerbotAIConfig.directeurReserveSansXpMercenaire &&
+        sPlayerbotAIConfig.EstGuildeDeReserve(killer->GetGuildId()))
     {
         _killerNotMercenary.fetch_add(1, std::memory_order_relaxed);
+        _killerReserve.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
 

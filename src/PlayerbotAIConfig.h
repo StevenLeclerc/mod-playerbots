@@ -495,6 +495,12 @@ public:
     // nul : jamais. GuildesDeReserve : la liste lue (vide si mal formee).
     bool EstGuildeDeReserve(uint32 guildId) const;
     std::vector<uint32> GuildesDeReserve() const;
+    // Lot X0 (03/10/2026, coa-project/docs/ENQUETE-niveau-reserve.md § 6.1) : vrai, un
+    // membre de la reserve (EstGuildeDeReserve) ne recoit plus l'XP de victime JcJ du
+    // mercenaire (MercenaryRewards::ComputeReward). Faux (defaut) : comportement d'avant.
+    // Interrupteur PROPRE : couper X0 ne touche pas a la reserve (prime, embuscade,
+    // guildes), que directeurReserveGuildes porte seule. Inerte si la reserve est vide.
+    bool directeurReserveSansXpMercenaire;
     // Recompenses des primes, lot R3 (03/10/2026, coa-project/docs/CONCEPTION-recompenses-primes.md) :
     // inertes tant que `recompenser` n'est pas dans directeurVerbes. Liste blanche des objets
     // qu'un courrier de recompense peut porter (« 1397885,… », lecture stricte : un morceau mal

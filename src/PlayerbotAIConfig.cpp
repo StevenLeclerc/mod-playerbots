@@ -795,6 +795,8 @@ bool PlayerbotAIConfig::Initialize()
     directeurPrimeTraqueSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeTraqueSecondes", 120);
     directeurPrimeDetectionYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeDetectionYd", 360);  // P-167 : 250 -> 360
     directeurReserveGuildes = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.ReserveGuildes", "");
+    directeurReserveSansXpMercenaire =
+        sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ReserveSansXpMercenaire", false);  // lot X0
     directeurEmbuscade = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Embuscade", true);
     // Lot R3 (03/10/2026) : Adventurer's Cache (1397885) seulement ; 20 po par commande au plus.
     directeurRecompenseObjets = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.RecompenseObjets", "1397885");
