@@ -248,6 +248,10 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
         if (CoaDirecteur::ChasseurDe(enemy->GetGUID().GetCounter(), &primeAutre) && primeAutre == primeGuid)
             return false;
     }
+    // 03/10 soir (arc 20) : confreres d'une meme guilde de reserve, prime finie comprise.
+    if (enemy && bot->GetGuildId() && enemy->GetGuildId() == bot->GetGuildId() &&
+        sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+        return false;
     // Embuscade (02/10, option Directeur.Embuscade) : AVANT l'assaut de la prime
     // (etat du fil monde, CoaDirecteur::Embuscade), le chasseur ne convoite PAS son
     // prime -- ni « attack enemy player » (55), ni la traque ordinaire ne le
@@ -352,10 +356,17 @@ Unit* EnemyPlayerValue::Calculate()
     auto const voit = [&](Unit* u) { return estLePrime(u) ? bot->CanSeeOrDetect(u) : u->CanSeeOrDetect(bot); };
     // Banc du 03/10 (arc 13) : un autre chasseur du MEME prime n'est jamais une cible,
     // ni par les references de combat (riposte a un coup de zone FFA) ni a portee.
+    // 03/10 soir (arc 20, commanditaire) : ni un confrere de la MEME guilde de reserve,
+    // prime finie comprise (207 a tue 2226 sept secondes apres la fin).
     auto const coequipier = [&](Unit const* u) {
+        if (!u->IsPlayer())
+            return false;
+        if (bot->GetGuildId() && u->ToPlayer()->GetGuildId() == bot->GetGuildId() &&
+            sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+            return true;
         uint32 primeAutre = 0;
-        return chasseur && u->IsPlayer() &&
-               CoaDirecteur::ChasseurDe(u->GetGUID().GetCounter(), &primeAutre) && primeAutre == primeGuid;
+        return chasseur && CoaDirecteur::ChasseurDe(u->GetGUID().GetCounter(), &primeAutre) &&
+               primeAutre == primeGuid;
     };
     // (C) Approche furtive : un chasseur FURTIF ne designe pas son prime ici
     // (etape 2). C'est la traque (CoaChasse.h, TraquerLaPrime) qui le mene au

@@ -62,6 +62,14 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
         }
     }
 
+    // CoA -- Directeur, reserve de chasseurs (03/10, commanditaire : « c'est moche de les voir
+    // se battre entre eux apres ») : deux membres d'une MEME guilde de la reserve ne se
+    // prennent JAMAIS pour cible, riposte comprise (un coup de zone FFA pendant l'assaut ne
+    // rouvre pas un combat entre eux apres la prime, ni en retraite). Hors reserve : rien.
+    if (unit->IsPlayer() && bot->GetGuildId() && unit->ToPlayer()->GetGuildId() == bot->GetGuildId() &&
+        sPlayerbotAIConfig.EstGuildeDeReserve(bot->GetGuildId()))
+        return false;
+
     // Level-based PvP restrictions
     if (unit->IsPlayer())
     {
