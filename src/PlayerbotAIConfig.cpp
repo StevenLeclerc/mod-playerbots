@@ -799,6 +799,8 @@ bool PlayerbotAIConfig::Initialize()
     // Lot R3 (03/10/2026) : Adventurer's Cache (1397885) seulement ; 20 po par commande au plus.
     directeurRecompenseObjets = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.RecompenseObjets", "1397885");
     directeurRecompenseMaxCuivre = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.RecompenseMaxCuivre", 200000);
+    // Banc d'essai de prime (03/10/2026) : vide par defaut, rien ne change.
+    directeurPrimeBanc = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.PrimeBanc", "");
     // Un plafond nul rendrait toute prime `bornes` sans le dire ; une meute nulle
     // interdirait au chasseur d'engager son propre prime.
     if (directeurMaxChasseursParPrime < 1)
@@ -1244,6 +1246,39 @@ bool PlayerbotAIConfig::EstGuildeDeReserve(uint32 guildId) const
         return false;
     std::vector<uint32> const ids = GuildesDeReserve();
     return std::find(ids.begin(), ids.end(), guildId) != ids.end();
+}
+
+// Banc d'essai de prime (03/10/2026) : meme lecture STRICTE que GuildesDeReserve,
+// meme regle que le service (emetteur.lire_prime_banc) : un morceau mal forme, vide
+// compris, et AUCUN bot n'est de banc. Fil monde seul (CoaDirecteur::SuivreBancs).
+std::vector<uint32> PlayerbotAIConfig::PrimeBancGuids() const
+{
+    std::vector<uint32> ids;
+    std::string const& liste = directeurPrimeBanc;
+    if (liste.find_first_not_of(" \t") == std::string::npos)
+        return ids;
+    size_t debut = 0;
+    while (debut <= liste.size())
+    {
+        size_t fin = liste.find(',', debut);
+        if (fin == std::string::npos)
+            fin = liste.size();
+        // Espaces et tabulations retires AUX BOUTS seulement (« 12 13 » est mal forme,
+        // comme pour le service ; GuildesDeReserve, elle, les retire partout).
+        std::string morceau = liste.substr(debut, fin - debut);
+        size_t const d0 = morceau.find_first_not_of(" \t");
+        morceau = d0 == std::string::npos ? std::string() : morceau.substr(d0, morceau.find_last_not_of(" \t") - d0 + 1);
+        if (morceau.empty() || morceau.size() > 10 ||
+            !std::all_of(morceau.begin(), morceau.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+            return {};
+        unsigned long long const v = std::strtoull(morceau.c_str(), nullptr, 10);
+        if (v == 0 || v > 0xFFFFFFFFull)
+            return {};
+        if (std::find(ids.begin(), ids.end(), static_cast<uint32>(v)) == ids.end())
+            ids.push_back(static_cast<uint32>(v));
+        debut = fin + 1;
+    }
+    return ids;
 }
 
 bool PlayerbotAIConfig::CoaLieuSansPvp(uint32 zoneId, uint32 areaId)

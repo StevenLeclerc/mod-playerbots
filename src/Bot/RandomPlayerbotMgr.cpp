@@ -1525,6 +1525,13 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
         idleBot = true;
     }
 
+    // CoA -- banc d'essai de prime (03/10/2026, Directeur.PrimeBanc) : la cible d'un
+    // banc n'est ni re-randomisee (niveau, equipement) ni teleportee pendant le banc
+    // (mesure-experimentale.md § 10). La revive plus haut reste (sur place : la garde
+    // de RandomTeleport la retient). Sans banc : un chargement atomique.
+    if (idleBot && CoaDirecteur::CibleDeBanc(botId))
+        idleBot = false;
+
     if (idleBot)
     {
         // randomize
@@ -1607,8 +1614,10 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
     // la meme garde. Sans affectation : un chargement atomique.
     // Reserve de chasseurs (02/10, revue m2) : ni un bot PREPARE il y a moins de
     // 60 s (le service enchaine avec son saut).
+    // Banc d'essai de prime (03/10/2026) : ni la cible d'un banc (Directeur.PrimeBanc).
     if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), nullptr) ||
-        CoaDirecteur::PrepareRecemment(bot->GetGUID().GetCounter()))
+        CoaDirecteur::PrepareRecemment(bot->GetGUID().GetCounter()) ||
+        CoaDirecteur::CibleDeBanc(bot->GetGUID().GetCounter()))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_SUSPENDUS);
         return;

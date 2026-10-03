@@ -139,6 +139,14 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
             !(bot->duel && bot->duel->Opponent == unit))
             return false;
 
+        // CoA -- banc d'essai de prime (03/10/2026, Directeur.PrimeBanc) : la CIBLE du
+        // banc ne convoite aucun joueur (elle attend ses chasseurs) ; riposte permise
+        // (l'autodefense a rendu vrai plus haut). Memes place et exceptions que le
+        // repos. Sans banc : un chargement atomique.
+        if (CoaDirecteur::CibleDeBanc(bot->GetGUID().GetCounter()) && !bot->InBattleground() && !bot->InArena() &&
+            !(bot->duel && bot->duel->Opponent == unit))
+            return false;
+
         // Skip restrictions in BG/Arena
         if (bot->InBattleground() || bot->InArena())
             return true;

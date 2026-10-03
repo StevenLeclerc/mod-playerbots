@@ -3613,3 +3613,19 @@ AiPlayerbot.Directeur.RecompenseObjets = "1397885"
 #        service lit cette ligne dans le fichier et plafonne ses versements en deca.
 #        Default: 200000 (20 po)
 AiPlayerbot.Directeur.RecompenseMaxCuivre = 200000
+
+#    AiPlayerbot.Directeur.PrimeBanc
+#        Banc d'essai de prime (coa-project/outils/banc-prime.py) : guids bas de BOTS separes par
+#        des virgules, par exemple "4242". Lecture stricte : un morceau mal forme et AUCUN bot.
+#        Un bot liste est traite COMME UN HUMAIN PRIME, pour la prime SEULEMENT :
+#          - `prime` l'accepte (pas de refus `pas_humain`) ; sa regle n'est pas l'aura High Risk mais
+#            le FFA que playerbots pose sur tout bot sans maitre, hors lieu sans PvP ;
+#          - sa mort a sa ligne `coa directeur mort:` (champ `banc=1` en fin), `recompenser` lui
+#            envoie le courrier ; `repondre`, `faire_parler` et les autres verbes le refusent toujours ;
+#          - il ne bouge pas (composition « dps assist, stay, chat, default »), ne convoite personne
+#            (riposte permise), n'est ni teleporte ni re-randomise par le gestionnaire ;
+#          - une ligne `coa directeur banc:` par seconde pour lui et pour chaque chasseur de sa prime.
+#        Un humain liste n'est jamais traite en banc. A chaud : `.reload config` PUIS
+#        `playerbots rndbot reload` (P-125) ; le Directeur relit la valeur chaque seconde.
+#        Default: "" (aucun : rien ne change)
+AiPlayerbot.Directeur.PrimeBanc = ""

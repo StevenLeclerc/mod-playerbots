@@ -501,6 +501,17 @@ public:
     // forme, aucun objet) et plafond d'argent d'UNE commande, en cuivres.
     std::string directeurRecompenseObjets;
     uint32 directeurRecompenseMaxCuivre;
+    // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas
+    // de BOTS separes par des virgules ("4242,4243"). Un bot liste est traite COMME UN
+    // HUMAIN PRIME, pour la prime seulement (verbes `prime`, `chasser`, `recompenser`,
+    // ligne `coa directeur mort:`) : sa regle est le FFA de playerbots hors lieu sans
+    // PvP au lieu de l'aura High Risk ; il ne convoite personne (riposte permise), ne
+    // bouge pas (composition `stay`), n'est ni teleporte ni re-randomise. Vide (defaut) :
+    // rien ne change. Lecture STRICTE, comme ReserveGuildes (un morceau mal forme, vide
+    // compris : AUCUN bot). Lue au FIL MONDE seul (CoaDirecteur, chaque seconde), qui
+    // en tient une copie pour les fils de carte (CoaDirecteur::CibleDeBanc).
+    std::string directeurPrimeBanc;
+    std::vector<uint32> PrimeBancGuids() const;
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

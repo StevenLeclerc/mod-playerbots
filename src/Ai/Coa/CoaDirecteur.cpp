@@ -532,13 +532,51 @@ struct Prime
     // (relevement du plafond) -- borne des replis, qui ne repart pas a zero.
     uint32 idOrigine = 0;
     std::array<uint32, CoaDirecteur::EMBUSCADE_PLACES> places{};   // guid bas du chasseur par place, 0 libre
+    // Retraite (03/10/2026) : les chasseurs de la RESERVE qui ont recu une affectation
+    // `chasser` pour cette prime (guid bas, sans doublon, PRIME_SERVIS_MAX au plus).
+    // Fil monde seul (ExecuterAffectation, sous le verrou exclusif) ; garde a un
+    // remplacement ; relu a la fin de la prime (CommencerRetraites).
+    std::vector<uint32> servis;
 };
+constexpr size_t PRIME_SERVIS_MAX = 48;
 std::unordered_map<uint32, Prime> primes;   // cle : guid bas du joueur
 std::atomic<uint32> nbPrimes{0};
 // Chasseurs actifs dans le magasin des affectations, tenu SOUS le verrou
 // exclusif avec nbAffectations (MajCompteursAffectations) : ProieImposee
 // commence par lui, un seul chargement atomique hors de toute prime.
 std::atomic<uint32> nbChasseurs{0};
+
+// Banc d'essai de prime (03/10/2026, option Directeur.PrimeBanc). La COPIE de la
+// liste de conf, ecrite par le fil monde seul (SuivreBancs, chaque seconde) sous
+// son PROPRE verrou, jamais tenu en meme temps qu'un autre : les crochets de mort
+// (fils de carte, PousserMort) la lisent sans toucher le magasin des consignes
+// (P-137), comme chasseursSuivis. `bancTexte` : la chaine deja lue (fil monde seul).
+std::shared_mutex verrouBancs;
+std::unordered_set<uint32> bancs;
+std::atomic<uint32> nbBancs{0};
+std::string bancTexte;
+
+// Retraite des chasseurs de reserve a la fin d'une prime (03/10/2026). Magasin des
+// consignes (verrouConsignes) : ecrit par le fil monde seul (CommencerRetraites,
+// SuivreRetraites, LeverRetraite), lu par les fils de carte (EnRetraite) apres son
+// compteur atomique.
+struct Retraite
+{
+    uint32 bot = 0;
+    uint32 prime = 0;        // id de la prime servie
+    uint32 joueur = 0;       // guid du prime
+    uint32 debutS = 0;       // Maintenant() au debut
+    uint32 fuirDe = 0;       // humain le plus proche a eviter (0 : aucun), recale chaque seconde
+    uint32 essaiS = 0;       // Maintenant() de la derniere recherche de point
+    uint8 essais = 0;        // recherches de point sans resultat
+};
+std::unordered_map<uint32, Retraite> retraites;   // cle : guid bas du bot
+std::atomic<uint32> nbRetraites{0};
+// Definies plus bas (section « retraite »), apres le repos de la reserve et la
+// recherche de point sur.
+void CommencerRetraite(uint32 bot, uint32 prime, uint32 joueur, char const* cause);
+bool LeverRetraite(uint32 bot, char const* motif);
+void SuivreRetraites();
 
 // Lot D4c : auras des DEFIS BLOQUANTS (PVE_ONLY, a vies, sans resurrection),
 // lues UNE fois au demarrage (DemarrerBus, requete synchrone sur acore_world),
@@ -568,6 +606,9 @@ struct EvenementMort
     // Lot R3 (03/10/2026) : la victime est un CHASSEUR DE PRIME (affectation `chasser`
     // active), tue par n'importe qui -- un compagnon bot du prime, une creature, un garde.
     bool victimeChasseur = false;
+    // Banc d'essai de prime (03/10/2026) : la victime est un BOT de Directeur.PrimeBanc,
+    // traite comme un humain prime pour sa ligne `mort:` (champ `banc=1`, EN FIN).
+    bool victimeBanc = false;
 };
 constexpr size_t MORTS_FILE_MAX = 256;
 std::mutex verrouMorts;
@@ -1580,6 +1621,22 @@ void FinirAffectation(AffectationInterne const& f, char const* statut, char cons
     // rien de grave : ses actions par defaut relisent ChasseurDe et se taisent.
     else if (f.a.chasseur && !CoaDirecteur::ChasseurDe(f.guid))
         BasculerComposition(f.guid);
+    // Retraite (03/10/2026) : un chasseur de RESERVE dont l'affectation tombe a la fin
+    // de sa prime (`fin_prime`) ou a sa mort (`mort` : il se relevera pres du prime)
+    // quitte la scene. Les autres fins (remplace, lever du service, echeance...) : rien
+    // de neuf ; la fin de la prime le reprendra (Prime::servis).
+    if (f.a.chasseur && f.a.reserve && motif &&
+        (std::strcmp(motif, "fin_prime") == 0 || std::strcmp(motif, "mort") == 0))
+    {
+        uint32 prime = 0;
+        {
+            std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = primes.find(f.joueur);
+            if (it != primes.end())
+                prime = it->second.id;
+        }
+        CommencerRetraite(f.guid, prime, f.joueur, motif);
+    }
     if (statut)
     {
         LOG_INFO("playerbots", "coa directeur cmd: id={} verbe={} cible={} joueur={} statut={} raison={}", f.a.id,
@@ -2209,6 +2266,67 @@ bool Humain(Player* p)
     return p && !GET_PLAYERBOT_AI(p) && p->GetSession();
 }
 
+// ------------------------------------------------------------------ banc d'essai de prime (03/10/2026)
+//
+// Option Directeur.PrimeBanc. EstBanc : fil monde, le personnage est-il un BOT de la
+// liste ? Jamais un humain (la liste ne peut pas soustraire un humain a la regle).
+bool EstBanc(Player* p)
+{
+    return p && !Humain(p) && CoaDirecteur::CibleDeBanc(p->GetGUID().GetCounter());
+}
+
+// Chaque seconde, fil monde (Entretien, bus allume ou eteint) : la liste de conf est
+// relue (une comparaison de chaine quand rien n'a change), la copie des fils de carte
+// remplacee, et chaque bot ajoute ou retire est RECOMPOSE (AiFactory lit
+// CibleDeBanc : composition immobile, ou celle d'avant). Liste mal formee : AUCUN
+// bot (meme regle que ReserveGuildes et que le service).
+void SuivreBancs()
+{
+    std::string const& texte = sPlayerbotAIConfig.directeurPrimeBanc;
+    if (texte == bancTexte)
+        return;
+    bancTexte = texte;
+    std::vector<uint32> const lus = sPlayerbotAIConfig.PrimeBancGuids();
+    std::unordered_set<uint32> nouveaux(lus.begin(), lus.end());
+    std::vector<uint32> changes;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouBancs);
+        for (uint32 g : bancs)
+            if (!nouveaux.count(g))
+                changes.push_back(g);
+        for (uint32 g : nouveaux)
+            if (!bancs.count(g))
+                changes.push_back(g);
+        bancs.swap(nouveaux);
+        nbBancs.store(static_cast<uint32>(bancs.size()), std::memory_order_relaxed);
+    }
+    uint32 recomposes = 0;
+    for (uint32 g : changes)
+        if (JoueurConnecte(g))
+        {
+            BasculerComposition(g);
+            ++recomposes;
+        }
+    bool const malFormee = lus.empty() && texte.find_first_not_of(" \t") != std::string::npos;
+    LOG_INFO("playerbots", "coa directeur banc: cibles={} changes={} recomposes={} mal_formee={}", lus.size(),
+             changes.size(), recomposes, malFormee ? 1 : 0);
+}
+
+// La regle d'une prime : High Risk pour un humain ; pour une cible de banc, le FFA
+// que playerbots pose sur tout bot sans maitre (PlayerbotAI::UpdateAI) hors lieu sans
+// PvP. Aucune aura n'est posee ni lue sur le bot, aucun drapeau ecrit (P-134).
+// `pose` : a la pose, le FFA est exige ; ensuite (SuivrePrimes) seul le lieu compte
+// (le coeur retire le drapeau un tick a chaque changement d'aire, P-126).
+bool HighRisk(Player* p);
+bool RegleDePrime(Player* p, bool pose)
+{
+    if (Humain(p))
+        return HighRisk(p);
+    if (!EstBanc(p) || sPlayerbotAIConfig.CoaLieuSansPvp(p->GetZoneId(), p->GetAreaId()))
+        return false;
+    return !pose || p->IsFFAPvP();
+}
+
 // Proprietaire d'une affectation (SPEC-directeur-D3.md § 3.6, decision n° 15) :
 // son `origine` ; pour `ask` et `arc`, `origine` ET `joueur` (le joueur qui a
 // demande). Pour `regle`, `joueur` n'est que l'humain le plus proche, pose pour
@@ -2658,7 +2776,10 @@ void ExecuterRecompense(CoaDirCommande const& c)
         return;
     }
     Player* p = JoueurConnecte(c.cible);
-    if ((p && !Humain(p)) || (!p && sPlayerbotAIConfig.IsInRandomAccountList(fiche->AccountId)))
+    // Banc d'essai de prime (03/10/2026) : le courrier d'une cible de banc (un bot de
+    // Directeur.PrimeBanc, en ligne ou non) est accepte ; un humain l'est toujours.
+    bool const banc = !(p && Humain(p)) && CoaDirecteur::CibleDeBanc(c.cible);
+    if (!banc && ((p && !Humain(p)) || (!p && sPlayerbotAIConfig.IsInRandomAccountList(fiche->AccountId))))
     {
         RefuserRecompense(c, "pas_humain");
         return;
@@ -2699,9 +2820,9 @@ void ExecuterRecompense(CoaDirCommande const& c)
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Journaliser(c, "execute", nullptr);
     LOG_INFO("playerbots",
-             "coa directeur recompense: id={} joueur={} cuivre={} objets={} action={} statut=execute en_ligne={}",
+             "coa directeur recompense: id={} joueur={} cuivre={} objets={} action={} statut=execute en_ligne={}{}",
              c.id, c.cible, cuivre, c.texte.empty() ? std::string("-") : c.texte,
-             c.action.empty() ? std::string("-") : c.action, p ? 1 : 0);
+             c.action.empty() ? std::string("-") : c.action, p ? 1 : 0, banc ? " banc=1" : "");
 }
 
 // ---- paroles (§ 5.2)
@@ -3475,6 +3596,10 @@ void FinirPrime(Prime const& p, char const* statut, char const* raison, char con
     }
     if (leverChasseurs)
     {
+        // Retraite (03/10/2026) : AVANT la levee, pour que chacun garde l'id de CETTE
+        // prime (la levee y passe aussi, sans effet sur une retraite deja commencee).
+        for (uint32 g : p.servis)
+            CommencerRetraite(g, p.id, p.joueur, "fin_prime");
         uint32 const j = p.joueur;
         LeverAffectationsSi([j](AffectationInterne const& f) { return f.a.chasseur && f.joueur == j; }, "fin_prime");
     }
@@ -3537,7 +3662,9 @@ void ExecuterPrime(CoaDirCommande const& c)
         Refuser(c, "hors_ligne");
         return;
     }
-    if (!Humain(p))
+    // Banc d'essai (03/10/2026) : un bot de Directeur.PrimeBanc tient lieu d'humain.
+    bool const banc = EstBanc(p);
+    if (!Humain(p) && !banc)
     {
         Refuser(c, "pas_humain");
         return;
@@ -3564,7 +3691,7 @@ void ExecuterPrime(CoaDirCommande const& c)
         Refuser(c, "carte");
         return;
     }
-    if (!HighRisk(p))
+    if (!RegleDePrime(p, true))
     {
         Refuser(c, "regle");
         return;
@@ -3578,7 +3705,9 @@ void ExecuterPrime(CoaDirCommande const& c)
     Prime nouvelle{c.id, c.cible, Maintenant() + c.dureeS, static_cast<uint32>(c.valeur), c.origine};
     // Reserve de chasseurs (02/10) : l'AFK est lu ici (fil monde), puis suivi
     // chaque seconde par SuivrePrimes.
-    nouvelle.afk = p->isAFK();
+    // Banc (03/10/2026) : l'AFK d'un bot est un artefact de playerbots (activite
+    // minimale), jamais celui d'un joueur absent.
+    nouvelle.afk = p->isAFK() && !banc;
     bool remplace = false, occupe = false;
     Prime ancienne{};
     {
@@ -3598,6 +3727,9 @@ void ExecuterPrime(CoaDirCommande const& c)
             {
                 remplace = true;
                 ancienne = it->second;
+                // Retraite (03/10/2026) : les chasseurs suivent la nouvelle prime, et
+                // leur liste avec eux (toute origine).
+                nouvelle.servis = ancienne.servis;
                 // Revue M3 (embuscade) : une REPOSE de meme origine (le service
                 // releve le plafond en reposant la prime) garde l'etat de
                 // l'embuscade et l'id d'origine des replis. Un autre proprietaire
@@ -3645,8 +3777,8 @@ void ExecuterPrime(CoaDirCommande const& c)
     }
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PRIMES);
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
-    LOG_INFO("playerbots", "coa directeur prime: id={} joueur={} plafond={} motif=pose fin_s={} origine={}", c.id,
-             c.cible, nouvelle.plafond, nouvelle.finS, c.origine);
+    LOG_INFO("playerbots", "coa directeur prime: id={} joueur={} plafond={} motif=pose fin_s={} origine={}{}", c.id,
+             c.cible, nouvelle.plafond, nouvelle.finS, c.origine, banc ? " banc=1" : "");
     Accuser(c, "execute", nullptr);
 }
 
@@ -3678,9 +3810,12 @@ void DrainerMorts()
     {
         char const victimeType = e.victimeHumaine ? 'H' : TypeBot(e.victime);
         char const tueurType = e.tueurType == 'J' ? TypeBot(e.tueur) : e.tueurType;
+        // Banc d'essai de prime (03/10/2026) : un bot de banc tient la place de l'humain
+        // de cette mort (son type reste R ou B : la memoire des humains l'ignore).
+        bool const victimeCible = e.victimeHumaine || e.victimeBanc;
         // L'humain de cette mort, et le bot en face (s'il y en a un).
-        uint32 humain = e.victimeHumaine ? e.victime : (tueurType == 'H' ? e.tueur : 0);
-        uint32 const bot = e.victimeHumaine ? ((tueurType == 'R' || tueurType == 'B') ? e.tueur : 0) : e.victime;
+        uint32 humain = victimeCible ? e.victime : (tueurType == 'H' ? e.tueur : 0);
+        uint32 const bot = victimeCible ? ((tueurType == 'R' || tueurType == 'B') ? e.tueur : 0) : e.victime;
         uint32 prime = 0;
         bool chasseur = false;
         if ((humain || e.victimeChasseur) &&
@@ -3709,11 +3844,11 @@ void DrainerMorts()
         LOG_INFO("playerbots",
                  "coa directeur mort: epoque={} n={} t={} victime={} victime_type={} tueur={} tueur_type={} entree={}"
                  " niveau_v={} niveau_t={} carte={} zone={} aire={} x={:.1f} y={:.1f} prime={} chasseur={}"
-                 " groupe_du_prime={} prime_joueur={}",
+                 " groupe_du_prime={} prime_joueur={}{}",
                  EpoqueMonde(), nMorts, e.t, e.victime, victimeType, e.tueur, tueurType, e.entree,
                  static_cast<uint32>(e.niveauV), static_cast<uint32>(e.niveauT), e.carte, e.zone, e.aire, e.x, e.y,
-                 prime, chasseur ? 1 : 0, groupe ? 1 : 0, humain);
-        if (e.victimeHumaine)
+                 prime, chasseur ? 1 : 0, groupe ? 1 : 0, humain, e.victimeBanc ? " banc=1" : "");
+        if (victimeCible)
             mortsRecentes.push_back(MortRecente{e, chasseur});
     }
 }
@@ -3779,7 +3914,8 @@ void SuivrePrimes()
             fins.push_back(Fin{p, "tombe", tueur, chasseur});
             continue;
         }
-        if (!HighRisk(j))
+        // Banc d'essai (03/10/2026) : pour un humain, HighRisk a l'identique.
+        if (!RegleDePrime(j, false))
         {
             fins.push_back(Fin{p, "regle", 0, false});
             continue;
@@ -3801,7 +3937,7 @@ void SuivrePrimes()
             fins.push_back(Fin{p, "defi", 0, false});
             continue;
         }
-        bool const afk = j->isAFK();
+        bool const afk = j->isAFK() && !EstBanc(j);   // banc : voir ExecuterPrime
         if (afk != p.afk)
             afkChanges.emplace_back(p, afk);
     }
@@ -4092,6 +4228,100 @@ void SuivreEmbuscades()
     }
 }
 
+// ------------------------------------------------------------------ banc d'essai : la trace (03/10/2026)
+//
+// Chaque seconde, fil monde, cartes a l'arret (P-137), APRES SuivreEmbuscades : pour
+// toute prime dont la cible est un bot de BANC (Directeur.PrimeBanc), une ligne pour
+// la cible et une par chasseur affecte. Seule source des mesures fines du banc
+// (outils/banc-prime.py) : distance et angle vus de la cible, monture, furtivite,
+// combat et victime, ligne de vue. Sans banc : un chargement atomique.
+//   vu=1 : la cible VOIT le chasseur -- a BANC_VISIBILITE_YD au plus, detectable
+//   (CanSeeOrDetect : furtivite comprise), en ligne de vue, et dans le cone de 120
+//   degres devant elle ; `ligne` : les memes tests SANS le cone.
+constexpr float BANC_VISIBILITE_YD = 100.0f;   // Visibility.Distance.Continents (worldserver.conf, lu le 27/09)
+
+void TracerBanc()
+{
+    if (!nbBancs.load(std::memory_order_relaxed) || !nbPrimes.load(std::memory_order_relaxed))
+        return;
+    uint32 const maintenant = Maintenant();
+    struct Vue
+    {
+        Prime p;
+        std::vector<std::pair<uint32, CoaDirecteur::CoaDirPhase>> chasseurs;
+    };
+    std::vector<Vue> vues;
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        for (auto const& [j, p] : primes)
+            if (p.finS > maintenant)
+                vues.push_back(Vue{p, {}});
+        for (Vue& v : vues)
+            for (auto const& [guid, f] : affectations)
+                if (f.a.chasseur && f.joueur == v.p.joueur && f.a.finS > maintenant)
+                    v.chasseurs.emplace_back(guid, f.a.phase);
+    }
+    for (Vue const& v : vues)
+    {
+        // Hors du verrou des consignes : verrouBancs n'est jamais pris sous un autre verrou.
+        if (!CoaDirecteur::CibleDeBanc(v.p.joueur))
+            continue;
+        Player* j = JoueurConnecte(v.p.joueur);
+        if (!j || !j->IsInWorld() || j->IsBeingTeleported())
+            continue;
+        Unit const* vj = j->GetVictim();
+        LOG_INFO("playerbots",
+                 "coa directeur banc: prime={} joueur={} t={} role=cible guid={} carte={} x={:.1f} y={:.1f} o={:.2f} pv={}"
+                 " vivant={} combat={} victime={} assaut={} raison={} chasseurs={}",
+                 v.p.id, v.p.joueur, maintenant, v.p.joueur, j->GetMapId(), j->GetPositionX(), j->GetPositionY(),
+                 j->GetOrientation(), static_cast<uint32>(j->GetHealthPct()), j->IsAlive() ? 1 : 0,
+                 j->IsInCombat() ? 1 : 0, vj ? vj->GetGUID().GetCounter() : 0, v.p.assaut ? 1 : 0, v.p.raisonAssaut,
+                 v.chasseurs.size());
+        for (auto const& [g, phase] : v.chasseurs)
+        {
+            Player* b = JoueurConnecte(g);
+            if (!b || !b->IsInWorld() || b->IsBeingTeleported() || b->GetMapId() != j->GetMapId())
+            {
+                LOG_INFO("playerbots", "coa directeur banc: prime={} joueur={} t={} role=chasseur guid={} etat={}",
+                         v.p.id, v.p.joueur, maintenant, g,
+                         !b ? "hors_ligne" : (b->GetMapId() != j->GetMapId() ? "autre_carte" : "en_saut"));
+                continue;
+            }
+            float const d = b->GetExactDist2d(j);
+            float const angle = AngleVuDuJoueur(j, b->GetPositionX(), b->GetPositionY()) * 180.0f / float(M_PI);
+            bool const furtif = b->HasAuraType(SPELL_AURA_MOD_STEALTH);
+            bool ligne = false;
+            if (d <= BANC_VISIBILITE_YD && b->IsAlive())
+                ligne = j->CanSeeOrDetect(b) && j->IsWithinLOSInMap(b);
+            bool const vu = ligne && std::fabs(angle) < 60.0f;
+            // Victime : la cible (J), un autre joueur (P), une creature (C, avec son entree).
+            Unit const* vb = b->GetVictim();
+            char type = '-';
+            uint32 entree = 0;
+            if (vb)
+            {
+                if (vb == j)
+                    type = 'J';
+                else if (vb->IsPlayer())
+                    type = 'P';
+                else
+                {
+                    type = 'C';
+                    if (Creature const* cr = vb->ToCreature())
+                        entree = cr->GetEntry();
+                }
+            }
+            LOG_INFO("playerbots",
+                     "coa directeur banc: prime={} joueur={} t={} role=chasseur guid={} etat={} phase={} d={:.1f} angle={:.0f}"
+                     " x={:.1f} y={:.1f} monte={} furtif={} combat={} frappe={} victime={} entree={} vu={} ligne={} pv={}",
+                     v.p.id, v.p.joueur, maintenant, g, b->IsAlive() ? "vivant" : "mort", NomPhase(phase), d, angle,
+                     b->GetPositionX(), b->GetPositionY(), b->IsMounted() ? 1 : 0, furtif ? 1 : 0,
+                     b->IsInCombat() ? 1 : 0, b->IsInCombatWith(j) ? 1 : 0, type, entree, vu ? 1 : 0, ligne ? 1 : 0,
+                     static_cast<uint32>(b->GetHealthPct()));
+        }
+    }
+}
+
 // Crochets de mort (FIL DE CARTE, Unit::Kill) : un evenement par valeur, et
 // rien d'autre. Seulement si un HUMAIN est victime ou tueur (session sans IA de
 // playerbots) ; les morts de bot a bot -- l'immense majorite -- ne coutent que
@@ -4107,7 +4337,9 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
     bool const victimeHumaine = Humain(victime);
     bool const tueurHumain = tueurJoueur && Humain(tueurJoueur);
     bool victimeChasseur = false;
-    if (!victimeHumaine && !tueurHumain)
+    // Banc d'essai de prime (03/10/2026) : sans banc, un chargement atomique (CibleDeBanc).
+    bool const victimeBanc = !victimeHumaine && CoaDirecteur::CibleDeBanc(victime->GetGUID().GetCounter());
+    if (!victimeHumaine && !tueurHumain && !victimeBanc)
     {
         if (!nbChasseurs.load(std::memory_order_relaxed))
             return;
@@ -4118,6 +4350,7 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
     }
     EvenementMort e;
     e.victimeChasseur = victimeChasseur;
+    e.victimeBanc = victimeBanc;
     e.victime = victime->GetGUID().GetCounter();
     e.victimeHumaine = victimeHumaine;
     e.niveauV = victime->GetLevel();
@@ -4163,6 +4396,12 @@ void Entretien(uint32 diff)
     SuivrePrimes();
     // Embuscade (02/10) : apres les primes (une prime finie n'a plus d'assaut).
     SuivreEmbuscades();
+    // Banc d'essai de prime (03/10/2026) : la liste relue, puis la trace (apres
+    // l'embuscade : elle dit l'assaut de CETTE seconde). Sans banc : rien.
+    SuivreBancs();
+    TracerBanc();
+    // Retraite des chasseurs de reserve (03/10/2026). Sans retraite : un chargement.
+    SuivreRetraites();
     LeverEchues();
     LeverSuspensionsEchues();
     LeverSuspensionsMaitreHumain();
@@ -4900,6 +5139,304 @@ PointCarte ChercherPointCarte(Map* map, Player* joueur, Player* bot, uint32 nive
     return r;
 }
 
+// ------------------------------------------------------------------ retraite des chasseurs de reserve (03/10/2026)
+//
+// Mesure du 02/10 : Knuhwio (prime 426) puis Krillock (2521, primes 426 et 450),
+// chasseurs de reserve, sont restes sur place apres `fin_prime` (`coa directeur
+// sejour: ... motif=fin_prime`) ; le joueur les a recroises en boucle, et Knuhwio
+// l'a retue a sa resurrection. Desormais, a TOUTE fin de prime (et a la mort d'un
+// chasseur de reserve pendant la prime, puisqu'il se relevera pres du prime), le
+// chasseur de RESERVE se retire :
+//  1. tout de suite : REPOS de la reserve (PoserRepos : il ne convoite plus personne,
+//     riposte permise ; aucune teleportation aleatoire) ; mort, l'etat mort_en_trajet
+//     (option ReleveCimetiere) l'envoie se relever a l'esprit-guerisseur ;
+//  2. vivant, hors combat : tant qu'un humain est a SAUT_HUMAIN_YD de lui, il s'eloigne
+//     A PIED de l'humain le plus proche (CoaChasseAction lit EnRetraite) ;
+//  3. aucun humain (point de vue compris) a SAUT_HUMAIN_YD : SAUT CACHE sur un point
+//     sur a 600-1 200 yd du PRIME (de lui-meme si le prime n'est pas sur sa carte ;
+//     deja a 600 yd du prime sans humain a 300 yd : `deja_loin`, pas de saut)
+//     (ChercherPointCarte, la recherche de la preparation :
+//     sol sec, ciel ouvert, hors lieu sans PvP et Wintergrasp, aucun humain a 150 yd du
+//     point, loin des creatures hostiles fortes), puis un repos neuf de 30 min.
+// Jamais teleporte sous les yeux d'un humain : le saut n'a lieu qu'au point 3. Borne :
+// RETRAITE_MAX_S, puis la retraite tombe (`echue`) et le repos court jusqu'a son terme.
+// Ni le saut ni le repos ne comptent comme saut de prime (sautsFaits) : une prime
+// suivante peut le reprendre aussitot (ExecuterAffectation et la preparation levent la
+// retraite). Etat au fil monde seul ; lecteurs de carte : EnRetraite.
+constexpr uint32 RETRAITE_MAX_S = 600;
+constexpr uint32 RETRAITE_ESSAI_S = 5;           // une recherche de point par bot et par 5 s au plus
+constexpr uint8 RETRAITE_ESSAIS_MAX = 6;         // puis `sans_point`
+constexpr size_t RETRAITE_RECHERCHES_PAR_SECONDE = 2;
+constexpr float RETRAITE_HUMAIN_LU_YD = 300.0f;  // humain le plus proche cherche jusque-la (fuirDe)
+
+// L'humain (point de vue compris, MJ invisibles exceptes) le plus proche de `bot`, sur
+// sa carte, a `rayon` au plus. -> son guid bas (0 : aucun), `distance` remplie. Meme
+// boucle que HumainProcheSauf. Fil monde.
+uint32 HumainLePlusProche(Player* bot, float rayon, float& distance)
+{
+    uint32 guid = 0;
+    float meilleure = rayon * rayon;
+    WorldPosition ici(bot);
+    for (Player* humain : sRandomPlayerbotMgr.GetPlayers())
+    {
+        if (!humain || (humain->IsGameMaster() && !humain->isGMVisible()) || humain->GetMapId() != bot->GetMapId())
+            continue;
+        float d2 = ici.sqDistance(WorldPosition(humain));
+        WorldObject* vue = humain->GetViewpoint();
+        if (vue && vue != humain)
+            d2 = std::min(d2, ici.sqDistance(WorldPosition(vue)));
+        if (d2 <= meilleure)
+        {
+            meilleure = d2;
+            guid = humain->GetGUID().GetCounter();
+        }
+    }
+    distance = std::sqrt(meilleure);
+    return guid;
+}
+
+// Fil monde, HORS de tout verrou. Idempotent : une retraite deja en cours n'est pas
+// refaite. Ignore un bot hors ligne, ou deja chasseur d'une AUTRE prime qui court.
+void CommencerRetraite(uint32 bot, uint32 prime, uint32 joueur, char const* cause)
+{
+    Player* p = JoueurConnecte(bot);
+    if (!p || CoaDirecteur::ChasseurDe(bot))
+        return;
+    uint32 const maintenant = Maintenant();
+    bool const mort = !p->IsAlive();
+    bool releve = false;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+        if (retraites.count(bot))
+            return;
+        retraites[bot] = Retraite{bot, prime, joueur, maintenant, joueur, 0, 0};
+        nbRetraites.store(static_cast<uint32>(retraites.size()), std::memory_order_relaxed);
+        // Mort : relever a l'esprit-guerisseur plutot qu'au cadavre, pres du prime
+        // (meme etat que la releve d'un trajet ; SuivreMortsEnTrajet le retire).
+        if (mort && sPlayerbotAIConfig.directeurReleveCimetiere && !p->InBattleground() && !p->InArena() &&
+            CarteDeSuspension(p->GetMapId()))
+        {
+            // `id` : ici l'id de la PRIME servie (pas d'affectation : elle est deja levee) ; la
+            // ligne `releve: id=` d'une retraite porte donc un id de prime (revue m6).
+            MortTrajet m{prime, bot, p->GetMapId(), p->GetPositionX(), p->GetPositionY(), maintenant,
+                         maintenant + sPlayerbotAIConfig.directeurReleveSecondes};
+            if (Corpse* corps = p->GetCorpse())
+            {
+                m.carte = corps->GetMapId();
+                m.x = corps->GetPositionX();
+                m.y = corps->GetPositionY();
+            }
+            mortsEnTrajet[bot] = m;
+            nbMortsEnTrajet.store(static_cast<uint32>(mortsEnTrajet.size()), std::memory_order_relaxed);
+            releve = true;
+        }
+    }
+    PoserRepos(bot, maintenant + REPOS_RESERVE_S);
+    float distance = -1.0f;
+    if (Player* j = JoueurConnecte(joueur))
+        if (j->GetMapId() == p->GetMapId())
+            distance = p->GetExactDist2d(j);
+    LOG_INFO("playerbots",
+             "coa directeur retraite: prime={} bot={} joueur={} etape=debut cause={} vivant={} releve_cimetiere={}"
+             " distance_joueur={}",
+             prime, bot, joueur, cause, mort ? 0 : 1, releve ? 1 : 0,
+             distance < 0.0f ? std::string("NA") : Acore::StringFormat("{:.0f}", distance));
+}
+
+// Fil monde. -> vrai si une retraite a ete levee (journalise).
+bool LeverRetraite(uint32 bot, char const* motif)
+{
+    if (!nbRetraites.load(std::memory_order_relaxed))
+        return false;
+    Retraite r;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+        auto it = retraites.find(bot);
+        if (it == retraites.end())
+            return false;
+        r = it->second;
+        retraites.erase(it);
+        nbRetraites.store(static_cast<uint32>(retraites.size()), std::memory_order_relaxed);
+    }
+    LOG_INFO("playerbots", "coa directeur retraite: prime={} bot={} joueur={} etape=fin motif={} duree_s={}", r.prime,
+             r.bot, r.joueur, motif, Maintenant() - r.debutS);
+    return true;
+}
+
+// Bus eteint (TraiterBus, a chaque tick) : comme le repos (ViderRepos), toute retraite
+// tombe -- le Directeur eteint ne deplace plus personne. Fil monde.
+void ViderRetraites(char const* motif)
+{
+    if (!nbRetraites.load(std::memory_order_relaxed))
+        return;
+    std::vector<uint32> bots;
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        for (auto const& [g, r] : retraites)
+            bots.push_back(g);
+    }
+    for (uint32 g : bots)
+        LeverRetraite(g, motif);
+}
+
+// Chaque seconde, fil monde, cartes a l'arret (P-137). Meme
+// patron que les autres suivis : copie sous verrou partage, examen hors verrou,
+// ecriture sous verrou exclusif (meme debut), journal hors verrou.
+void SuivreRetraites()
+{
+    if (!nbRetraites.load(std::memory_order_relaxed))
+        return;
+    uint32 const maintenant = Maintenant();
+    std::vector<Retraite> copies;
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        copies.reserve(retraites.size());
+        for (auto const& [g, r] : retraites)
+            copies.push_back(r);
+    }
+    struct Fin
+    {
+        Retraite r;
+        char const* motif;
+        float x = 0.0f, y = 0.0f, z = 0.0f, depuis = 0.0f, humain = -1.0f;
+        uint32 essais = 0;
+        char const* source = "-";
+    };
+    std::vector<Fin> fins;
+    std::vector<Retraite> majs;
+    size_t recherches = 0;
+    for (Retraite r : copies)
+    {
+        if (maintenant >= r.debutS + RETRAITE_MAX_S)
+        {
+            fins.push_back(Fin{r, "echue"});
+            continue;
+        }
+        Player* bot = JoueurConnecte(r.bot);
+        if (!bot)
+        {
+            fins.push_back(Fin{r, "hors_ligne"});
+            continue;
+        }
+        if (!bot->IsInWorld() || bot->IsBeingTeleported())
+            continue;
+        if (CoaDirecteur::ChasseurDe(r.bot))
+        {
+            fins.push_back(Fin{r, "rappele"});
+            continue;
+        }
+        // Revue m3 : un humain l'a pris (groupe) : c'est son maitre qui le mene, aucun saut.
+        if (PlayerbotAI* iaB = GET_PLAYERBOT_AI(bot); !iaB || iaB->HasGameClientMaster())
+        {
+            fins.push_back(Fin{r, "maitre_humain"});
+            continue;
+        }
+        if (!bot->IsAlive() || bot->IsInCombat() || bot->IsInFlight())
+            continue;
+        if (bot->InBattleground() || bot->InArena() || !CarteDeSuspension(bot->GetMapId()))
+        {
+            fins.push_back(Fin{r, "carte"});
+            continue;
+        }
+        float dHumain = 0.0f;
+        uint32 const proche = HumainLePlusProche(bot, RETRAITE_HUMAIN_LU_YD, dHumain);
+        uint32 const fuirDe = proche && dHumain < SAUT_HUMAIN_YD ? proche : 0;
+        if (fuirDe != r.fuirDe)
+        {
+            r.fuirDe = fuirDe;
+            majs.push_back(r);
+        }
+        // Un humain a portee de vue (marge comprise) : il s'eloigne a pied (CoaChasse.h).
+        if (fuirDe || PresDeWintergrasp(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY()))
+            continue;
+        // L'ancre : le PRIME s'il est sur la carte du bot (le point sera a 600-1 200 yd de
+        // lui), sinon le bot lui-meme. Deja a PREP_CARTE_MIN_YD du prime et aucun humain a
+        // RETRAITE_HUMAIN_LU_YD : il a quitte la scene sans saut (`deja_loin`).
+        Player* ancre = JoueurConnecte(r.joueur);
+        if (!ancre || !ancre->IsInWorld() || ancre->IsBeingTeleported() || ancre->GetMapId() != bot->GetMapId())
+            ancre = bot;
+        if (ancre != bot && !proche && bot->GetExactDist2d(ancre) >= PREP_CARTE_MIN_YD)
+        {
+            fins.push_back(Fin{r, "deja_loin"});
+            continue;
+        }
+        if (recherches >= RETRAITE_RECHERCHES_PAR_SECONDE || (r.essaiS && maintenant < r.essaiS + RETRAITE_ESSAI_S))
+            continue;
+        ++recherches;
+        // La recherche de la preparation : sol sec, ciel ouvert, hors lieu sans PvP, aucun
+        // humain a SAUT_HUMAIN_YD du point, loin des creatures hostiles fortes ; a
+        // 600-1 200 yd de l'ancre.
+        PointCarte const point = ChercherPointCarte(bot->GetMap(), ancre, bot, bot->GetLevel());
+        if (!point.trouve)
+        {
+            r.essaiS = maintenant;
+            if (++r.essais >= RETRAITE_ESSAIS_MAX)
+            {
+                Fin f{r, "sans_point"};
+                f.essais = point.essais;
+                fins.push_back(f);
+            }
+            else
+                majs.push_back(r);
+            continue;
+        }
+        float const bx = bot->GetPositionX(), by = bot->GetPositionY();
+        if (!CoaDirecteur::Sauter(bot, WorldLocation(bot->GetMapId(), point.x, point.y, point.z + 0.5f,
+                                                     bot->GetOrientation())))
+        {
+            r.essaiS = maintenant;
+            if (++r.essais >= RETRAITE_ESSAIS_MAX)
+                fins.push_back(Fin{r, "saut_echoue"});
+            else
+                majs.push_back(r);
+            continue;
+        }
+        Fin f{r, "partie"};
+        f.x = point.x;
+        f.y = point.y;
+        f.z = point.z;
+        f.depuis = std::sqrt((point.x - bx) * (point.x - bx) + (point.y - by) * (point.y - by));
+        f.humain = proche ? dHumain : -1.0f;
+        f.essais = point.essais;
+        f.source = point.source;
+        fins.push_back(f);
+    }
+    if (fins.empty() && majs.empty())
+        return;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+        for (Retraite const& r : majs)
+        {
+            auto it = retraites.find(r.bot);
+            if (it != retraites.end() && it->second.debutS == r.debutS && it->second.prime == r.prime)
+                it->second = r;
+        }
+        for (Fin const& f : fins)
+        {
+            auto it = retraites.find(f.r.bot);
+            if (it != retraites.end() && it->second.debutS == f.r.debutS && it->second.prime == f.r.prime)
+                retraites.erase(it);
+        }
+        nbRetraites.store(static_cast<uint32>(retraites.size()), std::memory_order_relaxed);
+    }
+    for (Fin const& f : fins)
+    {
+        bool const partie = std::strcmp(f.motif, "partie") == 0;
+        // Parti : un repos NEUF (30 min) a son arrivee ; sinon le repos du debut court.
+        if (partie)
+            PoserRepos(f.r.bot, Maintenant() + REPOS_RESERVE_S);
+        if (partie)
+            LOG_INFO("playerbots",
+                     "coa directeur retraite: prime={} bot={} joueur={} etape=fin motif=retraite saut=1 duree_s={}"
+                     " a_x={:.1f} a_y={:.1f} a_z={:.1f} distance_saut={:.0f} humain_proche={} essais={} source={}",
+                     f.r.prime, f.r.bot, f.r.joueur, maintenant - f.r.debutS, f.x, f.y, f.z, f.depuis,
+                     f.humain < 0.0f ? std::string("NA") : Acore::StringFormat("{:.0f}", f.humain), f.essais, f.source);
+        else
+            LOG_INFO("playerbots", "coa directeur retraite: prime={} bot={} joueur={} etape=fin motif={} saut=0 duree_s={}"
+                     " essais={}", f.r.prime, f.r.bot, f.r.joueur, f.motif, maintenant - f.r.debutS, f.essais);
+    }
+}
+
 // Une `P-` : controles, puis (niveau different) la fabrique, et (autre carte que
 // le joueur prime) le saut sur sa carte, a 600-1 200 yd de lui. -> vrai si
 // Randomize, la recherche de point ou le saut a tourne (le tick est pris). Fil monde, cartes a l'arret
@@ -5063,6 +5600,8 @@ bool ExecuterPreparation(CoaDirCommande const& c)
             LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos repos={}", c.id, c.cible,
                      c.joueur, REPOS_RESERVE_S);
         }
+        // Retraite (03/10/2026, revue M2) : rien n'a bouge ; la retraite continue jusqu'a la
+        // pose de `chasser`, qui la leve (le service peut ne jamais le designer).
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
         Accuser(c, "execute", nullptr);
         return false;
@@ -5229,6 +5768,10 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         Refuser(c, "saut_echoue");
         return true;
     }
+    // Retraite (03/10/2026, revue M2) : DEPLACE par la preparation (point sur, hors de vue,
+    // ChercherPointCarte), il a quitte la scene ; sinon la retraite continue jusqu'a `chasser`.
+    if (deplacer && !sautRefuse)
+        LeverRetraite(c.cible, "preparation");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Accuser(c, "execute", nullptr);
     return true;
@@ -5919,6 +6462,20 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         if (LeverRepos(c.cible))
             LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos_fini raison=chasser", c.id,
                      c.cible, c.joueur);
+        // Retraite (03/10/2026) : un chasseur de nouveau designe ne se retire plus ; un
+        // chasseur de RESERVE est inscrit sur sa prime (il se retirera a sa fin).
+        LeverRetraite(c.cible, "rappele");
+        if (nouvelle.a.reserve)
+        {
+            std::unique_lock<std::shared_mutex> garde(verrouConsignes);
+            auto it = primes.find(c.joueur);
+            if (it != primes.end())
+            {
+                std::vector<uint32>& servis = it->second.servis;
+                if (std::find(servis.begin(), servis.end(), c.cible) == servis.end() && servis.size() < PRIME_SERVIS_MAX)
+                    servis.push_back(c.cible);
+            }
+        }
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_CHASSEURS);
         LOG_INFO("playerbots", "coa directeur chasse: bot={} joueur={} id={} motif=pose etape={} remplace={} reserve={}",
                  c.cible, c.joueur, c.id, nouvelle.a.etape ? 1 : 0, remplace ? 1 : 0, nouvelle.a.reserve ? 1 : 0);
@@ -6501,6 +7058,7 @@ void CoaDirecteur::TraiterBus(uint32 diff)
         PurgerPactes();
         ViderPreparations("bus_eteint");
         ViderRepos();
+        ViderRetraites("bus_eteint");   // apres les primes : celles qu'elles viennent d'ouvrir aussi
         source->Vidanger([](CoaDirCommande const& c)
         {
             CoaDirecteur::Compter(CoaDirecteur::COA_DIR_RECUES);
@@ -6587,6 +7145,27 @@ bool CoaDirecteur::ChasseurDe(uint32 botLow, uint32* joueur, uint32* id, bool* a
         *afk = p->second.afk;
     if (reserve)
         *reserve = it->second.a.reserve;
+    return true;
+}
+
+bool CoaDirecteur::CibleDeBanc(uint32 guidLow)
+{
+    if (!guidLow || !nbBancs.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(verrouBancs);
+    return bancs.count(guidLow) != 0;
+}
+
+bool CoaDirecteur::EnRetraite(uint32 botLow, uint32* fuirDe)
+{
+    if (!nbRetraites.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto it = retraites.find(botLow);
+    if (it == retraites.end())
+        return false;
+    if (fuirDe)
+        *fuirDe = it->second.fuirDe;
     return true;
 }
 

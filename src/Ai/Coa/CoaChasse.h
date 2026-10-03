@@ -677,6 +677,19 @@ public:
         if (bot->IsInCombat())
             return false;
 
+        // Retraite (03/10/2026, CoaDirecteur.cpp, section « retraite ») : un chasseur de
+        // reserve dont la prime est finie quitte la scene. Le fil monde le fait sauter
+        // loin des qu'aucun humain n'est a 150 yd ; d'ici-la il s'ELOIGNE a pied de
+        // l'humain le plus proche (fuirDe), a RETRAITE_YD. Une traque en cours est
+        // abandonnee. Sans retraite : un chargement atomique.
+        uint32 fuirDe = 0;
+        if (CoaDirecteur::EnRetraite(bot->GetGUID().GetCounter(), &fuirDe))
+        {
+            if (etat == CoaEtatChasse::Traque)
+                AbandonnerLaTraque("retraite");
+            return SEloignerPourLaRetraite(fuirDe);
+        }
+
         // Reserve de chasseurs (02/10). Le chasseur designe, son prime, et deux
         // etats lus par le fil monde : prime AFK, chasseur de reserve. Sans
         // chasseur : un chargement atomique, et tout ce qui suit est le code
@@ -1360,6 +1373,30 @@ private:
     static constexpr float DistanceAfkYd = 100.0f;
     // En deca de DistanceAfkYd - MargeAfkYd, il recule ; au-dela, il ne bouge pas.
     static constexpr float MargeAfkYd = 8.0f;
+
+    // Retraite (03/10/2026) : reculer a CoaDirecteur::RETRAITE_YD de l'humain `guid`
+    // (meme patron que TenirADistanceDuPrime : sur la droite humain -> bot, lu par
+    // botAI->GetUnit, donc sur la MEME carte, fil du bot) ; aucun humain a fuir, ou
+    // deja assez loin : sur place, le temps que le fil monde le fasse sauter.
+    bool SEloignerPourLaRetraite(uint32 guid)
+    {
+        Unit* humain = guid ? botAI->GetUnit(ObjectGuid::Create<HighGuid::Player>(guid)) : nullptr;
+        if (humain && humain->IsInWorld() && humain->GetMapId() == bot->GetMapId())
+        {
+            float const distance = bot->GetExactDist(humain);
+            if (distance < CoaDirecteur::RETRAITE_YD - MargeAfkYd)
+            {
+                float const angle = distance > 0.5f ? humain->GetAngle(bot) : bot->GetOrientation();
+                float x = humain->GetPositionX() + std::cos(angle) * CoaDirecteur::RETRAITE_YD;
+                float y = humain->GetPositionY() + std::sin(angle) * CoaDirecteur::RETRAITE_YD;
+                float z = bot->GetPositionZ();
+                bot->UpdateAllowedPositionZ(x, y, z);
+                return MoveTo(bot->GetMapId(), x, y, z, false, false, false, false,
+                              MovementPriority::MOVEMENT_COMBAT);
+            }
+        }
+        return TenirLaPosition();
+    }
 
     // Le prime devient AFK pendant la traque : elle s'arrete SANS rompre la
     // furtivite (PasserEnRetour la romprait). Le prochain etat est RETOUR si le

@@ -166,6 +166,34 @@ bool EnRepos(uint32 guidLow);
 bool ChasseurDe(uint32 botLow, uint32* joueur = nullptr, uint32* id = nullptr, bool* afk = nullptr,
                 bool* reserve = nullptr);
 
+// ------------------------------------------------------------------ banc d'essai de prime (03/10/2026)
+//
+// Option Directeur.PrimeBanc (guids bas de BOTS, vide par defaut). Le fil monde la
+// relit chaque seconde (SuivreBancs) et en tient une COPIE sous le verrou des
+// consignes ; tout fil la lit ici, apres un compteur atomique (sans banc : un
+// chargement). Un bot de banc est la cible d'un banc de prime : il est traite comme
+// un humain prime pour la prime SEULEMENT (ExecuterPrime, SuivrePrimes, ligne
+// `mort:`, `recompenser`) ; lecteurs hors Directeur : AiFactory (composition
+// immobile), PossibleTargetsValue (il ne convoite personne, riposte permise),
+// RandomPlayerbotMgr (ni teleportation aleatoire, ni Randomize). Un humain liste
+// n'est JAMAIS traite en banc (Humain() est teste par le Directeur avant).
+bool CibleDeBanc(uint32 guidLow);
+
+// ------------------------------------------------------------------ retraite (03/10/2026)
+//
+// A TOUTE fin de prime, les chasseurs de la RESERVE qui l'ont servie (vivants ou
+// morts, encore en ligne, sans autre affectation `chasser`) se retirent : repos
+// (aucune convoitise, aucune teleportation aleatoire), releve au cimetiere s'ils
+// sont morts, puis, hors de la vue de tout humain (SAUT_HUMAIN_YD), un saut cache
+// loin (ChercherPointCarte, 600-1 200 yd). Etat ecrit par le fil monde seul. Tout
+// fil, chemin chaud : le bot `botLow` est-il en retraite ? `fuirDe` (non nul) recoit
+// le guid de l'humain le plus proche a eviter (0 : aucun). Lu par CoaChasseAction,
+// qui l'eloigne a pied (RETRAITE_YD). Sans retraite : un chargement atomique.
+bool EnRetraite(uint32 botLow, uint32* fuirDe = nullptr);
+// Distance a laquelle un chasseur en retraite s'eloigne de l'humain le plus proche
+// (CoaChasse.h) : au-dela de SAUT_HUMAIN_YD (150, CoaDirecteur.cpp), garde du saut.
+constexpr float RETRAITE_YD = 175.0f;
+
 // ------------------------------------------------------------------ embuscade (02/10)
 //
 // Option Directeur.Embuscade (defaut 1). UN ETAT PAR PRIME, « assaut donne »,

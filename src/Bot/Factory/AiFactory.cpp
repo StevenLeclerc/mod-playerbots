@@ -875,6 +875,23 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
             nonCombatEngine->removeStrategy("mount", false);
         }
     }
+
+    // CoA -- banc d'essai de prime du Directeur (03/10/2026, option
+    // Directeur.PrimeBanc, vide par defaut : un chargement atomique). La CIBLE d'un
+    // banc « attend dans les arrieres » : elle ne bouge pas (« stay »), ne monte pas,
+    // ne chasse ni ne grind, et riposte (« dps assist », comme tout bot : c'est par
+    // lui que le moteur non-combat engage l'assaillant, AttackAction -> moteur de
+    // combat, compose a l'identique). « chat » et « default » : ceux du moteur des
+    // morts. La composition entiere est REMPLACEE, jamais retouchee par nom (P-130).
+    // Le Directeur la fait relire (ResetStrategies) a l'ajout et au retrait du bot
+    // dans la liste (SuivreBancs). Jamais un bot mene par un humain, jamais en champ
+    // de bataille.
+    if (!player->InBattleground() && !(facade && facade->HasGameClientMaster()) &&
+        CoaDirecteur::CibleDeBanc(player->GetGUID().GetCounter()))
+    {
+        nonCombatEngine->removeAllStrategies();
+        nonCombatEngine->addStrategiesNoInit("dps assist", "stay", "chat", "default", nullptr);
+    }
 }
 
 Engine* AiFactory::createNonCombatEngine(Player* player, PlayerbotAI* const facade, AiObjectContext* aiObjectContext)
