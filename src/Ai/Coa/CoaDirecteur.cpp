@@ -4752,10 +4752,18 @@ MissionLue LireMission(CoaDirCommande const& c, Player* bot, bool finale)
 // Teleportation cachee et saut lointain : controles du DEPART, communs a une
 // presence `peupler` et a un chasseur `chasser` (01/10, D4h). Fil monde,
 // cartes a l'arret (P-137). -> le code de refus, ou nul.
+bool EstDeLaReserve(Player* bot);   // plus bas (section reserve)
+
 char const* RefusDepartSaut(uint32 cible, Player* bot, Player* joueur, PlayerbotAI* ia, bool dejaSaute)
 {
     auto const fait = sautsFaits.find(cible);
-    if (dejaSaute || (fait != sautsFaits.end() && Maintenant() < fait->second + SAUT_REPOS_S))
+    // Banc du 03/10 (arc 17) : Karnzald, chasseur de la prime precedente, refuse `deja_saute`
+    // et renvoye a pied sur 1 067 yd. Le repos de 15 min entre deux sauts vise les bots
+    // d'animation qui surgiraient en boucle ; un membre de la RESERVE ne saute que pour une
+    // prime (et sa retraite, hors de vue) : il n'y est pas soumis. Le double saut d'une
+    // meme affectation (`dejaSaute`) reste refuse.
+    bool const reposApplicable = !EstDeLaReserve(bot);
+    if (dejaSaute || (reposApplicable && fait != sautsFaits.end() && Maintenant() < fait->second + SAUT_REPOS_S))
         return "deja_saute";
     if (bot->IsInCombat())
         return "combat";
