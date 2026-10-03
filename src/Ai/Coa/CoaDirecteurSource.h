@@ -46,6 +46,8 @@ enum class CoaDirVerbe : uint8
     // Lot D4c (SPEC-directeur-D4.md § 3.1, § 6.2-6.3), AVANT Inconnu :
     Prime,          // une prime sur la tete d'un joueur High Risk (cible = joueur, valeur = plafond)
     Chasser,        // un mercenaire designe chasseur de ce joueur (affectation, disque)
+    // Lot R3 (03/10/2026, coa-project/docs/CONCEPTION-recompenses-primes.md § 5), AVANT Inconnu :
+    Recompenser,    // un courrier au joueur : argent (valeur, cuivre) et objets de la liste blanche (texte)
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
 };
 
@@ -129,6 +131,12 @@ public:
     // verbes D4 sont refuses `colonnes_d4`, les verbes D2 et D3 passent. Vrai
     // implique ColonnesD3().
     virtual bool ColonnesD4() const { return false; }
+
+    // Lot R3 (03/10/2026). L'ENUM de `verbe` porte-t-il les douze valeurs D4 puis
+    // `recompenser` (ou les commence-t-il, migration future) ? Faux : `recompenser`
+    // est refuse `colonnes_recompense`, tous les autres verbes passent. Vrai
+    // implique ColonnesD4().
+    virtual bool ColonnesRecompense() const { return false; }
 };
 
 #endif

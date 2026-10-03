@@ -495,6 +495,12 @@ public:
     // nul : jamais. GuildesDeReserve : la liste lue (vide si mal formee).
     bool EstGuildeDeReserve(uint32 guildId) const;
     std::vector<uint32> GuildesDeReserve() const;
+    // Recompenses des primes, lot R3 (03/10/2026, coa-project/docs/CONCEPTION-recompenses-primes.md) :
+    // inertes tant que `recompenser` n'est pas dans directeurVerbes. Liste blanche des objets
+    // qu'un courrier de recompense peut porter (« 1397885,… », lecture stricte : un morceau mal
+    // forme, aucun objet) et plafond d'argent d'UNE commande, en cuivres.
+    std::string directeurRecompenseObjets;
+    uint32 directeurRecompenseMaxCuivre;
 
     // Oracle de decision Laya (voir Ai/Coa/CoaLayaOracle.h). Eteint par defaut :
     // sans lui le moteur se comporte exactement comme avant.

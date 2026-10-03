@@ -7,6 +7,7 @@
 
 #include "Channel.h"
 #include "ChannelMgr.h"
+#include "CharacterCache.h"
 #include "Chat.h"
 #include "Corpse.h"
 #include "DatabaseEnv.h"
@@ -14,7 +15,9 @@
 #include "GridDefines.h"
 #include "GridTerrainData.h"
 #include "Group.h"
+#include "Item.h"
 #include "Log.h"
+#include "Mail.h"
 #include "Map.h"
 #include "MapMgr.h"
 #include "MercenaryRewards.h"
@@ -562,10 +565,20 @@ struct EvenementMort
     uint32 carte = 0, zone = 0, aire = 0;
     float x = 0.0f, y = 0.0f;
     uint32 t = 0;            // Maintenant() a la mort
+    // Lot R3 (03/10/2026) : la victime est un CHASSEUR DE PRIME (affectation `chasser`
+    // active), tue par n'importe qui -- un compagnon bot du prime, une creature, un garde.
+    bool victimeChasseur = false;
 };
 constexpr size_t MORTS_FILE_MAX = 256;
 std::mutex verrouMorts;
 std::vector<EvenementMort> fileMorts;             // sous verrouMorts
+// Lot R3 (03/10/2026) : guids bas des chasseurs de prime actifs, SOUS verrouMorts.
+// Copie du magasin des affectations, refaite par MajCompteursAffectations (fil monde,
+// sous le verrou exclusif des consignes, puis verrouMorts : toujours dans cet ordre ;
+// DrainerMorts relache verrouMorts avant de prendre les consignes, PousserMort ne
+// prend que verrouMorts). Les crochets de mort (fils de carte) la lisent sans jamais
+// toucher le magasin (P-137).
+std::unordered_set<uint32> chasseursSuivis;
 struct MortRecente
 {
     EvenementMort e;
@@ -586,6 +599,11 @@ void MajCompteursAffectations()
             ++chasseurs;
     nbAffectations.store(static_cast<uint32>(affectations.size()), std::memory_order_relaxed);
     nbChasseurs.store(chasseurs, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> garde(verrouMorts);
+    chasseursSuivis.clear();
+    for (auto const& [guid, f] : affectations)
+        if (f.a.chasseur)
+            chasseursSuivis.insert(guid);
 }
 
 uint32 Maintenant()
@@ -614,6 +632,7 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Meteo:               return "meteo";
         case CoaDirVerbe::Prime:               return "prime";
         case CoaDirVerbe::Chasser:             return "chasser";
+        case CoaDirVerbe::Recompenser:         return "recompenser";
         default:                               return "inconnu";
     }
 }
@@ -632,6 +651,7 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "meteo")                return CoaDirVerbe::Meteo;
     if (nom == "prime")                return CoaDirVerbe::Prime;
     if (nom == "chasser")              return CoaDirVerbe::Chasser;
+    if (nom == "recompenser")          return CoaDirVerbe::Recompenser;
     return CoaDirVerbe::Inconnu;
 }
 
@@ -647,6 +667,14 @@ bool VerbeD3(CoaDirVerbe v)
 bool VerbeD4(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Prime || v == CoaDirVerbe::Chasser;
+}
+
+// Lot R3 (03/10/2026) : `recompenser` exige l'ENUM de la migration
+// 2026_10_03_00_coa_directeur_recompense.sql (D4 + `recompenser`) ; il lit
+// `valeur` et `texte` (colonnes D3) : ColonnesRecompense implique ColonnesD4.
+bool VerbeR(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Recompenser;
 }
 
 CoaDirCanal CanalDe(std::string const& nom)
@@ -680,7 +708,7 @@ char const* NomCanal(CoaDirCanal c)
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v);
+           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -760,6 +788,7 @@ public:
         // SYNCHRONE, au demarrage seulement ; relue au prochain demarrage.
         _colonnesD3 = false;
         _colonnesD4 = false;
+        _colonnesR = false;
         QueryResult colonnes = CharacterDatabase.Query(
             "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
@@ -785,6 +814,9 @@ public:
         // l'ENUM D3 exact ou tout ENUM qui le prolonge.
         _colonnesD3 = nbColonnes == 5 && (CommencePar(typeVerbe, ENUM_VERBE_D3) || d4);
         _colonnesD4 = d4;
+        // Lot R3 (03/10/2026) : meme regle, l'ENUM D4 prolonge de `recompenser`
+        // (ou d'autres valeurs apres lui). L'ENUM D4 seul : `recompenser` inerte.
+        _colonnesR = d4 && CommencePar(typeVerbe, ENUM_VERBE_R);
         if (_colonnesD3)
             LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
         else
@@ -795,6 +827,10 @@ public:
         else
             LOG_INFO("playerbots", "coa directeur : colonnes D4 absentes, verbes D4 inertes (verbe={})",
                      typeVerbe.empty() ? std::string("?") : typeVerbe);
+        if (_colonnesR)
+            LOG_INFO("playerbots", "coa directeur : colonnes recompense presentes, verbe recompenser lisible");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes recompense absentes, verbe recompenser inerte");
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -913,6 +949,7 @@ public:
 
     bool ColonnesD3() const override { return _colonnesD3; }
     bool ColonnesD4() const override { return _colonnesD4; }
+    bool ColonnesRecompense() const override { return _colonnesR; }
 
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
@@ -935,6 +972,10 @@ private:
     static constexpr char const* ENUM_VERBE_D4 =
         "enum('treve','reaffecter','alleger','suspendre_mercenaire','lever','peupler','faire_parler','repondre',"
         "'heure_du_jour','meteo','prime','chasser')";
+    // Lot R3 (03/10/2026) : l'ENUM de la migration 2026_10_03_00_coa_directeur_recompense.sql.
+    static constexpr char const* ENUM_VERBE_R =
+        "enum('treve','reaffecter','alleger','suspendre_mercenaire','lever','peupler','faire_parler','repondre',"
+        "'heure_du_jour','meteo','prime','chasser','recompenser')";
 
     // `type` est-il `attendu`, ou `attendu` prolonge de valeurs de plus ? Pour un
     // ENUM : meme debut sans la parenthese finale, puis `)` ou `,'`.
@@ -956,6 +997,7 @@ private:
     bool _enVol = false;
     bool _colonnesD3 = false;
     bool _colonnesD4 = false;
+    bool _colonnesR = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -2484,6 +2526,184 @@ void ExecuterRepondre(CoaDirCommande const& c)
     Accuser(c, "execute", nullptr);
 }
 
+// ---- recompense (lot R3, 03/10/2026)
+//
+// Verbe `recompenser` (coa-project/docs/CONCEPTION-recompenses-primes.md § 1.5, § 5) :
+// UN courrier au joueur `cible` (`joueur` 0 ou le meme), en ligne OU NON, portant
+// `valeur` cuivres et les objets de `texte` (« id:quantite[,id:quantite] », 4 au plus),
+// chacun de la liste blanche AiPlayerbot.Directeur.RecompenseObjets. `valeur` au plus
+// AiPlayerbot.Directeur.RecompenseMaxCuivre. Le montant est CALCULE par le service
+// (exploitation/directeur/recompenses.py, primes.py), jamais par le LLM : le jeu borne.
+// Refus (accuse `refuse`, ligne `coa directeur recompense: … statut=refuse`) :
+//   bornes (cible, `valeur` negative, rien a verser), plafond, objet (forme, liste
+//   blanche, gabarit, quantite), inconnu (personnage absent du cache), pas_humain.
+// IDEMPOTENCE. Le courrier (mail, mail_items, item_instance) ET l'accuse `execute` de la
+// commande partent dans la MEME transaction : apres un plantage, soit les deux sont
+// en base, soit aucun, et une commande encore `en_attente` n'a rien verse. Dans la vie
+// du processus, une commande n'est livree qu'une fois (dernierId de la source).
+// Joueur connecte (JoueurConnecte : en chargement compris) : MailDraft l'ajoute aussi a
+// sa liste en memoire (Mail.cpp, SendMailTo), sinon le courrier n'existerait qu'en base
+// et le serveur pourrait l'ecraser (conception § 1.5).
+constexpr size_t RECOMPENSE_OBJETS_MAX = 4;
+constexpr uint32 RECOMPENSE_QUANTITE_MAX = 20;
+
+// Un entier decimal de 1 a 10 chiffres, sans signe ni espace. -> faux sinon.
+bool EntierRecompense(std::string const& t, uint32& v)
+{
+    if (t.empty() || t.size() > 10 || !std::all_of(t.begin(), t.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+        return false;
+    unsigned long long const x = std::strtoull(t.c_str(), nullptr, 10);
+    if (x > 0xFFFFFFFFull)
+        return false;
+    v = static_cast<uint32>(x);
+    return true;
+}
+
+// L'objet `id` est-il dans AiPlayerbot.Directeur.RecompenseObjets (« 1397885,… ») ?
+// Lecture STRICTE : un morceau mal forme, et AUCUN objet n'est permis.
+bool ObjetRecompensePermis(uint32 id)
+{
+    std::string const& liste = sPlayerbotAIConfig.directeurRecompenseObjets;
+    if (!id || liste.find_first_not_of(" \t") == std::string::npos)
+        return false;
+    bool trouve = false;
+    size_t debut = 0;
+    while (debut <= liste.size())
+    {
+        size_t fin = liste.find(',', debut);
+        if (fin == std::string::npos)
+            fin = liste.size();
+        std::string morceau = liste.substr(debut, fin - debut);
+        morceau.erase(std::remove_if(morceau.begin(), morceau.end(), [](char ch) { return ch == ' ' || ch == '\t'; }),
+                      morceau.end());
+        uint32 v = 0;
+        if (!EntierRecompense(morceau, v) || !v)
+            return false;
+        trouve = trouve || v == id;
+        debut = fin + 1;
+    }
+    return trouve;
+}
+
+// `texte` -> [(objet, quantite)]. Vide : aucun objet (vrai). Faux : forme illisible, plus
+// de RECOMPENSE_OBJETS_MAX objets, quantite nulle ou au-dela de RECOMPENSE_QUANTITE_MAX.
+bool LireObjetsRecompense(std::string const& texte, std::vector<std::pair<uint32, uint32>>& objets)
+{
+    objets.clear();
+    if (texte.empty())
+        return true;
+    size_t debut = 0;
+    while (debut <= texte.size())
+    {
+        size_t fin = texte.find(',', debut);
+        if (fin == std::string::npos)
+            fin = texte.size();
+        std::string const morceau = texte.substr(debut, fin - debut);
+        size_t const deux = morceau.find(':');
+        uint32 id = 0, n = 0;
+        if (deux == std::string::npos || !EntierRecompense(morceau.substr(0, deux), id) ||
+            !EntierRecompense(morceau.substr(deux + 1), n) || !id || !n || n > RECOMPENSE_QUANTITE_MAX)
+            return false;
+        objets.emplace_back(id, n);
+        if (objets.size() > RECOMPENSE_OBJETS_MAX)
+            return false;
+        debut = fin + 1;
+    }
+    return !objets.empty();
+}
+
+void RefuserRecompense(CoaDirCommande const& c, char const* raison)
+{
+    LOG_INFO("playerbots",
+             "coa directeur recompense: id={} joueur={} cuivre={} objets={} action={} statut=refuse raison={}", c.id,
+             c.cible, c.valeur, c.texte.empty() ? std::string("-") : c.texte,
+             c.action.empty() ? std::string("-") : c.action, raison);
+    Refuser(c, raison);
+}
+
+void ExecuterRecompense(CoaDirCommande const& c)
+{
+    if (!CibleJoueurValide(c) || c.valeur < 0 || (c.valeur == 0 && c.texte.empty()))
+    {
+        RefuserRecompense(c, "bornes");
+        return;
+    }
+    uint32 const cuivre = static_cast<uint32>(c.valeur);
+    if (cuivre > sPlayerbotAIConfig.directeurRecompenseMaxCuivre)
+    {
+        RefuserRecompense(c, "plafond");
+        return;
+    }
+    std::vector<std::pair<uint32, uint32>> objets;
+    if (!LireObjetsRecompense(c.texte, objets))
+    {
+        RefuserRecompense(c, "objet");
+        return;
+    }
+    for (auto const& [id, n] : objets)
+    {
+        ItemTemplate const* gabarit = sObjectMgr->GetItemTemplate(id);
+        if (!ObjetRecompensePermis(id) || !gabarit || n > gabarit->GetMaxStackSize() ||
+            (gabarit->MaxCount > 0 && n > static_cast<uint32>(gabarit->MaxCount)))
+        {
+            RefuserRecompense(c, "objet");
+            return;
+        }
+    }
+    CharacterCacheEntry const* fiche =
+        sCharacterCache->GetCharacterCacheByGuid(ObjectGuid::Create<HighGuid::Player>(c.cible));
+    if (!fiche)
+    {
+        RefuserRecompense(c, "inconnu");
+        return;
+    }
+    Player* p = JoueurConnecte(c.cible);
+    if ((p && !Humain(p)) || (!p && sPlayerbotAIConfig.IsInRandomAccountList(fiche->AccountId)))
+    {
+        RefuserRecompense(c, "pas_humain");
+        return;
+    }
+    // Objets crees AVANT la transaction : un echec n'ecrit rien (rien n'est encore ajoute).
+    std::vector<Item*> crees;
+    for (auto const& [id, n] : objets)
+    {
+        Item* objet = Item::CreateItem(id, n, p);
+        if (!objet)
+        {
+            for (Item* x : crees)
+                delete x;
+            RefuserRecompense(c, "objet");
+            return;
+        }
+        crees.push_back(objet);
+    }
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    MailDraft brouillon("Votre prime", "Le contrat sur votre tête est soldé. Le Directeur.");
+    if (cuivre)
+        brouillon.AddMoney(cuivre);
+    for (Item* objet : crees)
+    {
+        objet->SaveToDB(trans);
+        brouillon.AddItem(objet);
+    }
+    brouillon.SendMailTo(trans, p ? MailReceiver(p, c.cible) : MailReceiver(c.cible),
+                         MailSender(MAIL_NORMAL, c.cible, MAIL_STATIONERY_GM));
+    // L'accuse dans la MEME transaction (voir plus haut). Meme garde de statut que
+    // CoaDirSourceMysql::Acquitter ; c'est la seule source en service.
+    if (source)
+        trans->Append(Acore::StringFormat(
+            "UPDATE coa_dir_commande SET statut = 'execute', raison = NULL, vu_le = NOW(3) WHERE id = {}"
+            " AND statut = 'en_attente'",
+            c.id));
+    CharacterDatabase.CommitTransaction(trans);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    Journaliser(c, "execute", nullptr);
+    LOG_INFO("playerbots",
+             "coa directeur recompense: id={} joueur={} cuivre={} objets={} action={} statut=execute en_ligne={}",
+             c.id, c.cible, cuivre, c.texte.empty() ? std::string("-") : c.texte,
+             c.action.empty() ? std::string("-") : c.action, p ? 1 : 0);
+}
+
 // ---- paroles (§ 5.2)
 
 constexpr uint32 PAROLE_DELAI_MAX_S = 120;
@@ -3459,27 +3679,40 @@ void DrainerMorts()
         char const victimeType = e.victimeHumaine ? 'H' : TypeBot(e.victime);
         char const tueurType = e.tueurType == 'J' ? TypeBot(e.tueur) : e.tueurType;
         // L'humain de cette mort, et le bot en face (s'il y en a un).
-        uint32 const humain = e.victimeHumaine ? e.victime : (tueurType == 'H' ? e.tueur : 0);
+        uint32 humain = e.victimeHumaine ? e.victime : (tueurType == 'H' ? e.tueur : 0);
         uint32 const bot = e.victimeHumaine ? ((tueurType == 'R' || tueurType == 'B') ? e.tueur : 0) : e.victime;
         uint32 prime = 0;
         bool chasseur = false;
-        if (humain && (nbPrimes.load(std::memory_order_relaxed) || nbChasseurs.load(std::memory_order_relaxed)))
+        if ((humain || e.victimeChasseur) &&
+            (nbPrimes.load(std::memory_order_relaxed) || nbChasseurs.load(std::memory_order_relaxed)))
         {
             std::shared_lock<std::shared_mutex> garde(verrouConsignes);
-            auto p = primes.find(humain);
+            auto a = bot ? affectations.find(bot) : affectations.end();
+            // Lot R3 : un chasseur tue par un bot ou une creature -- l'humain est SON prime.
+            if (!humain && e.victimeChasseur && a != affectations.end() && a->second.a.chasseur)
+                humain = a->second.joueur;
+            auto p = humain ? primes.find(humain) : primes.end();
             if (p != primes.end() && p->second.finS > maintenant)
                 prime = p->second.id;
-            auto a = bot ? affectations.find(bot) : affectations.end();
-            chasseur = a != affectations.end() && a->second.a.chasseur && a->second.joueur == humain;
+            chasseur = humain && a != affectations.end() && a->second.a.chasseur && a->second.joueur == humain;
         }
+        // Lot R3 (03/10/2026) : le tueur (maitre d'un familier, deja ramene par le
+        // crochet) est-il du GROUPE de l'humain de cette mort (lui excepte) ? Fil monde :
+        // le groupe se lit sur le joueur connecte. `prime_joueur` : cet humain (0 : aucun).
+        bool groupe = false;
+        if (humain && e.tueur && e.tueur != humain)
+            if (Player* ph = JoueurConnecte(humain))
+                if (Group* gr = ph->GetGroup())
+                    groupe = gr->IsMember(ObjectGuid::Create<HighGuid::Player>(e.tueur));
         ++nMorts;
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MORTS_TRACEES);
         LOG_INFO("playerbots",
                  "coa directeur mort: epoque={} n={} t={} victime={} victime_type={} tueur={} tueur_type={} entree={}"
-                 " niveau_v={} niveau_t={} carte={} zone={} aire={} x={:.1f} y={:.1f} prime={} chasseur={}",
+                 " niveau_v={} niveau_t={} carte={} zone={} aire={} x={:.1f} y={:.1f} prime={} chasseur={}"
+                 " groupe_du_prime={} prime_joueur={}",
                  EpoqueMonde(), nMorts, e.t, e.victime, victimeType, e.tueur, tueurType, e.entree,
                  static_cast<uint32>(e.niveauV), static_cast<uint32>(e.niveauT), e.carte, e.zone, e.aire, e.x, e.y,
-                 prime, chasseur ? 1 : 0);
+                 prime, chasseur ? 1 : 0, groupe ? 1 : 0, humain);
         if (e.victimeHumaine)
             mortsRecentes.push_back(MortRecente{e, chasseur});
     }
@@ -3863,13 +4096,28 @@ void SuivreEmbuscades()
 // rien d'autre. Seulement si un HUMAIN est victime ou tueur (session sans IA de
 // playerbots) ; les morts de bot a bot -- l'immense majorite -- ne coutent que
 // ce test. Les types R/B des bots sont resolus au fil monde (DrainerMorts).
+//
+// Lot R3 (03/10/2026, coa-project/docs/CONCEPTION-recompenses-primes.md § 2.2) : aussi
+// la mort d'un CHASSEUR DE PRIME, quel que soit son tueur (compagnon bot du prime,
+// creature, garde) : sans elle, une vague abattue par le groupe du joueur etait
+// indiscernable d'une vague perdue (arc 6, bot 2521, 02/10). Hors prime : un test
+// atomique de plus (nbChasseurs), aucun verrou.
 void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
 {
     bool const victimeHumaine = Humain(victime);
     bool const tueurHumain = tueurJoueur && Humain(tueurJoueur);
+    bool victimeChasseur = false;
     if (!victimeHumaine && !tueurHumain)
-        return;
+    {
+        if (!nbChasseurs.load(std::memory_order_relaxed))
+            return;
+        std::lock_guard<std::mutex> garde(verrouMorts);
+        if (!chasseursSuivis.count(victime->GetGUID().GetCounter()))
+            return;
+        victimeChasseur = true;
+    }
     EvenementMort e;
+    e.victimeChasseur = victimeChasseur;
     e.victime = victime->GetGUID().GetCounter();
     e.victimeHumaine = victimeHumaine;
     e.niveauV = victime->GetLevel();
@@ -5743,6 +5991,13 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "colonnes_d4");
         return;
     }
+    // 3 quater (lot R3, 03/10/2026). `recompenser` sans l'ENUM R3 au demarrage : il
+    // ne devrait pas exister en base, et `valeur`/`texte` pourraient ne pas avoir ete lus.
+    if (VerbeR(c.verbe) && (!source || !source->ColonnesRecompense() || !source->ColonnesD3()))
+    {
+        Refuser(c, "colonnes_recompense");
+        return;
+    }
     // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
     // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
     // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
@@ -5751,7 +6006,8 @@ void Recevoir(CoaDirCommande const& c)
     // couvert par le test de `joueur` (le prime).
     bool const visePersonne = c.verbe == CoaDirVerbe::Treve || c.verbe == CoaDirVerbe::HeureDuJour ||
                               c.verbe == CoaDirVerbe::Meteo || c.verbe == CoaDirVerbe::Prime;
-    if (c.verbe != CoaDirVerbe::Repondre &&
+    // Lot R3 : `recompenser` en est exempte aussi : une prime GAGNEE se paie, arret ou non.
+    if (c.verbe != CoaDirVerbe::Repondre && c.verbe != CoaDirVerbe::Recompenser &&
         ((c.joueur && CoaDirecteur::EstArrete(c.joueur)) || (visePersonne && CoaDirecteur::EstArrete(c.cible))))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REFUS_ARRET);
@@ -5801,6 +6057,9 @@ void Recevoir(CoaDirCommande const& c)
             break;
         case CoaDirVerbe::Meteo:
             ExecuterMeteo(c);
+            break;
+        case CoaDirVerbe::Recompenser:
+            ExecuterRecompense(c);
             break;
         default:
             Refuser(c, "verbe_eteint");   // inatteignable : VerbeImplemente l'a filtre
@@ -6881,11 +7140,15 @@ public:
 // `COABH\t<i>/<n>|<morceau>`, morceaux de 180 octets au plus. Le corps est fait
 // de lignes separees par `^`, champs separes par `|` :
 //   V|1                                         version du protocole
-//   P|arc|statut|etape|depuis_s|reste_s|plafond|simulee|chasseurs_actifs|vague   prime en cours (ou `P|-`)
+//   P|arc|statut|etape|depuis_s|reste_s|plafond|simulee|chasseurs_actifs|vague|pot   prime en cours (ou `P|-`)
 //     (chasseurs_actifs, vague : 02/10, EN FIN ; l'addon d'avant lit par index et les ignore.
 //     chasseurs_actifs : affectations `chasser` actives de ce joueur, magasin du jeu ;
-//     vague : <n> de `etape` = `vague_<n>` (coa_dir_arc, ecrit par primes.py), vide sinon.)
-//   H|arc|issue|etape|tenu_s|vague|tueur|fin_unix|simulee  primes closes, 4 au plus
+//     vague : <n> de `etape` = `vague_<n>` (coa_dir_arc, ecrit par primes.py), vide sinon.
+//     pot : 03/10 (lot R4), EN FIN : le pot en cours, en cuivres (`params.pot`, ecrit par
+//     primes.py a chaque gain), vide sans recompense.)
+//   H|arc|issue|etape|tenu_s|vague|tueur|fin_unix|simulee|gain  primes closes, 4 au plus
+//     (gain : 03/10 (lot R4), EN FIN : cuivres encaisses, `params.resultat.recompense.encaisse_cuivre`
+//     -- 0 pour une prime perdue --, vide sans recompense.)
 //   R|bot|nom|score|morts_du_joueur|morts_du_bot           rivaux, 4 au plus
 // (4 : la fenetre PvP n'en tient pas plus ; `simulee` vaut 1 sauf `false` explicite, comme primes.py)
 //   F                                           fin
@@ -6928,7 +7191,8 @@ std::string CorpsOnglet(uint32 guid)
         " CAST(TIMESTAMPDIFF(SECOND, IFNULL(debut, cree_le), UTC_TIMESTAMP()) AS CHAR),"
         " CAST(IFNULL(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue), -1) AS CHAR),"
         " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.plafond')), ''),"
-        " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.simulee')), '')"
+        " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.simulee')), ''),"
+        " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.pot')), 'null'), '')"
         " FROM coa_dir_arc WHERE joueur = {} AND genre = 'prime' AND statut IN ('demande', 'actif')"
         " ORDER BY id DESC LIMIT 1", guid);
     if (p)
@@ -6951,9 +7215,9 @@ std::string CorpsOnglet(uint32 guid)
         if (etape.rfind("vague_", 0) == 0 && etape.size() > 6 && etape.size() <= 9 &&
             std::all_of(etape.begin() + 6, etape.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
             vague = etape.substr(6);
-        corps += Acore::StringFormat("^P|{}|{}|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]), etape,
+        corps += Acore::StringFormat("^P|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]), etape,
                                      ChampOnglet(f[3]), ChampOnglet(f[4]), ChampOnglet(f[5]),
-                                     ChampOnglet(f[6]) == "false" ? 0 : 1, chasseursActifs, vague);
+                                     ChampOnglet(f[6]) == "false" ? 0 : 1, chasseursActifs, vague, ChampOnglet(f[7]));
     }
     else
         corps += "^P|-";
@@ -6964,16 +7228,17 @@ std::string CorpsOnglet(uint32 guid)
             " CAST(TIMESTAMPDIFF(SECOND, IFNULL(debut, cree_le), IFNULL(fin, cree_le)) AS CHAR)),"
             " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.resultat.vague')), 'null'), ''),"
             " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.resultat.tueur.nom')), 'null'), ''),"
-            " CAST(UNIX_TIMESTAMP(IFNULL(fin, cree_le)) AS CHAR), IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.simulee')), '')"
+            " CAST(UNIX_TIMESTAMP(IFNULL(fin, cree_le)) AS CHAR), IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.simulee')), ''),"
+            " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.resultat.recompense.encaisse_cuivre')), 'null'), '')"
             " FROM coa_dir_arc WHERE joueur = {} AND genre = 'prime' AND statut IN ('clos', 'refuse')"
             " ORDER BY id DESC LIMIT 4", guid))
     {
         do
         {
             Field* f = h->Fetch();
-            corps += Acore::StringFormat("^H|{}|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]),
+            corps += Acore::StringFormat("^H|{}|{}|{}|{}|{}|{}|{}|{}|{}", f[0].Get<uint32>(), ChampOnglet(f[1]),
                                          ChampOnglet(f[2]), ChampOnglet(f[3]), ChampOnglet(f[4]), ChampOnglet(f[5]),
-                                         ChampOnglet(f[6]), ChampOnglet(f[7]) == "false" ? 0 : 1);
+                                         ChampOnglet(f[6]), ChampOnglet(f[7]) == "false" ? 0 : 1, ChampOnglet(f[8]));
         } while (h->NextRow());
     }
     // Rivaux.

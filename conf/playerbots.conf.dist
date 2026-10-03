@@ -3512,7 +3512,9 @@ AiPlayerbot.Directeur.Missions = 0
 #
 #    AiPlayerbot.Directeur.TracerMorts
 #        Une ligne `coa directeur mort:` pour toute mort ou un HUMAIN est victime ou tueur (PvP, PvE,
-#        environnement), ecrite par le fil monde. A 0, les crochets de mort rendent la main au premier
+#        environnement), ecrite par le fil monde. Depuis le 03/10 (lot R3), aussi la mort d'un CHASSEUR DE
+#        PRIME quel que soit son tueur ; champs en fin de ligne : groupe_du_prime (le tueur est du
+#        groupe du joueur prime) et prime_joueur (ce joueur). A 0, les crochets de mort rendent la main au premier
 #        test. N'est pas requis par la prime (sa fin `tombe` se lit par l'etat du joueur) ; sans lui, le
 #        tueur n'est pas nomme.
 #        Default: 0
@@ -3592,3 +3594,22 @@ AiPlayerbot.Directeur.Embuscade = 1
 #        de ses PV (strategie de combat « coa chasseur prime », meme Decrochage = 0).
 #        Default: ""
 AiPlayerbot.Directeur.ReserveGuildes = ""
+
+#    AiPlayerbot.Directeur.RecompenseObjets
+#        Recompenses des primes (lot R3, coa-project/docs/CONCEPTION-recompenses-primes.md) :
+#        `recompenser` (dans Directeur.Verbes) envoie UN courrier au joueur prime, en ligne ou non :
+#        de l'argent (`valeur`, en cuivres) et des objets (`texte`, « id:quantite », 4 au plus, 20 de
+#        chaque au plus). Le montant est calcule par le service (recompenses.py), JAMAIS par le LLM.
+#        Cette option est la LISTE BLANCHE des objets permis (identifiants separes par des virgules) ;
+#        lecture stricte : un morceau mal forme et AUCUN objet n'est permis (refus `objet`).
+#        Courrier et accuse `execute` partent dans la meme transaction (aucun double paiement).
+#        Ligne `coa directeur recompense: id= joueur= cuivre= objets= action= statut=` dans CoaBots.log.
+#        Exige la migration 2026_10_03_00_coa_directeur_recompense.sql (sinon `colonnes_recompense`).
+#        Default: "1397885" (Adventurer's Cache)
+AiPlayerbot.Directeur.RecompenseObjets = "1397885"
+
+#    AiPlayerbot.Directeur.RecompenseMaxCuivre
+#        recompenser : argent d'UNE commande au plus, en cuivres ; au-dela, refus `plafond`. Le
+#        service lit cette ligne dans le fichier et plafonne ses versements en deca.
+#        Default: 200000 (20 po)
+AiPlayerbot.Directeur.RecompenseMaxCuivre = 200000

@@ -796,6 +796,9 @@ bool PlayerbotAIConfig::Initialize()
     directeurPrimeDetectionYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.PrimeDetectionYd", 360);  // P-167 : 250 -> 360
     directeurReserveGuildes = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.ReserveGuildes", "");
     directeurEmbuscade = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Embuscade", true);
+    // Lot R3 (03/10/2026) : Adventurer's Cache (1397885) seulement ; 20 po par commande au plus.
+    directeurRecompenseObjets = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.RecompenseObjets", "1397885");
+    directeurRecompenseMaxCuivre = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.RecompenseMaxCuivre", 200000);
     // Un plafond nul rendrait toute prime `bornes` sans le dire ; une meute nulle
     // interdirait au chasseur d'engager son propre prime.
     if (directeurMaxChasseursParPrime < 1)
