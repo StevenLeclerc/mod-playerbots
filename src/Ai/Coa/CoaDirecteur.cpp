@@ -569,6 +569,12 @@ struct Retraite
     uint32 fuirDe = 0;       // humain le plus proche a eviter (0 : aucun), recale chaque seconde
     uint32 essaiS = 0;       // Maintenant() de la derniere recherche de point
     uint8 essais = 0;        // recherches de point sans resultat
+    // Banc du 03/10 (arcs 12 a 14) : le LIEU DU COMBAT, fige au debut (position du chasseur,
+    // ou de son cadavre). Le prime, lui, bouge : fantome au cimetiere, ou bot releve ailleurs
+    // en 20 s -- mesure depuis lui, le chasseur concluait `deja_loin` sans quitter le corps.
+    uint32 carte = 0;
+    float sx = 0.0f, sy = 0.0f;
+    bool scene = false;
 };
 std::unordered_map<uint32, Retraite> retraites;   // cle : guid bas du bot
 std::atomic<uint32> nbRetraites{0};
@@ -5209,7 +5215,12 @@ void CommencerRetraite(uint32 bot, uint32 prime, uint32 joueur, char const* caus
         std::unique_lock<std::shared_mutex> garde(verrouConsignes);
         if (retraites.count(bot))
             return;
-        retraites[bot] = Retraite{bot, prime, joueur, maintenant, joueur, 0, 0};
+        Retraite nouvelle{bot, prime, joueur, maintenant, joueur, 0, 0};
+        nouvelle.carte = p->GetMapId();
+        nouvelle.sx = p->GetPositionX();
+        nouvelle.sy = p->GetPositionY();
+        nouvelle.scene = true;
+        retraites[bot] = nouvelle;
         nbRetraites.store(static_cast<uint32>(retraites.size()), std::memory_order_relaxed);
         // Mort : relever a l'esprit-guerisseur plutot qu'au cadavre, pres du prime
         // (meme etat que la releve d'un trajet ; SuivreMortsEnTrajet le retire).
@@ -5360,7 +5371,14 @@ void SuivreRetraites()
         if (!ancre || !ancre->IsInWorld() || ancre->IsBeingTeleported() || ancre->GetMapId() != bot->GetMapId() ||
             !ancre->IsAlive() || ancre->HasPlayerFlag(PLAYER_FLAGS_GHOST))
             ancre = bot;
-        if (ancre != bot && !proche && bot->GetExactDist2d(ancre) >= PREP_CARTE_MIN_YD)
+        // `deja_loin` exige AUSSI d'etre a PREP_CARTE_MIN_YD du lieu du combat (fige au debut).
+        bool const loinDeLaScene =
+            !r.scene || r.carte != bot->GetMapId() ||
+            (bot->GetPositionX() - r.sx) * (bot->GetPositionX() - r.sx) +
+                    (bot->GetPositionY() - r.sy) * (bot->GetPositionY() - r.sy) >=
+                PREP_CARTE_MIN_YD * PREP_CARTE_MIN_YD;
+        if (!proche && loinDeLaScene && (ancre == bot || bot->GetExactDist2d(ancre) >= PREP_CARTE_MIN_YD) &&
+            (ancre != bot || r.scene))
         {
             fins.push_back(Fin{r, "deja_loin"});
             continue;
