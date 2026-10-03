@@ -238,6 +238,16 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
                          (bot->GetVictim() == unit && !(primeAfk && estLePrime && enemy->GetVictim() != bot));
     if (chasseur && !primeEnFace && !riposte)
         return false;
+    // Banc du 03/10 (arc 13) : la reserve compte les deux factions, et en FFA un coup de
+    // zone d'un chasseur touche l'autre ; la riposte suivait, et Jimabliz (2337) a tue
+    // Asnar (24), chasseur de la MEME prime. Deux chasseurs d'un meme prime ne se
+    // prennent JAMAIS pour cible, riposte comprise.
+    if (chasseur && enemy->IsPlayer())
+    {
+        uint32 primeAutre = 0;
+        if (CoaDirecteur::ChasseurDe(enemy->GetGUID().GetCounter(), &primeAutre) && primeAutre == primeGuid)
+            return false;
+    }
     // Embuscade (02/10, option Directeur.Embuscade) : AVANT l'assaut de la prime
     // (etat du fil monde, CoaDirecteur::Embuscade), le chasseur ne convoite PAS son
     // prime -- ni « attack enemy player » (55), ni la traque ordinaire ne le
@@ -340,6 +350,13 @@ Unit* EnemyPlayerValue::Calculate()
     // (A) Pour ce seul couple : le bot voit-il sa proie ? Ailleurs : la proie
     // voit-elle le bot (test amont, inchange).
     auto const voit = [&](Unit* u) { return estLePrime(u) ? bot->CanSeeOrDetect(u) : u->CanSeeOrDetect(bot); };
+    // Banc du 03/10 (arc 13) : un autre chasseur du MEME prime n'est jamais une cible,
+    // ni par les references de combat (riposte a un coup de zone FFA) ni a portee.
+    auto const coequipier = [&](Unit const* u) {
+        uint32 primeAutre = 0;
+        return chasseur && u->IsPlayer() &&
+               CoaDirecteur::ChasseurDe(u->GetGUID().GetCounter(), &primeAutre) && primeAutre == primeGuid;
+    };
     // (C) Approche furtive : un chasseur FURTIF ne designe pas son prime ici
     // (etape 2). C'est la traque (CoaChasse.h, TraquerLaPrime) qui le mene au
     // contact, dans le dos, puis lance l'ouverture ou rompt la furtivite et lui
@@ -363,7 +380,7 @@ Unit* EnemyPlayerValue::Calculate()
     {
         Unit* pTarget = combatRef->GetOther(bot);
         if (!pTarget || pTarget == pVictim || !pTarget->IsPlayer() || !voit(pTarget) ||
-            !bot->IsWithinDist(pTarget, VISIBILITY_DISTANCE_NORMAL) || estLePrimeAfk(pTarget))
+            !bot->IsWithinDist(pTarget, VISIBILITY_DISTANCE_NORMAL) || estLePrimeAfk(pTarget) || coequipier(pTarget))
             continue;
 
         if ((bot->GetTeamId() == TEAM_HORDE && pTarget->HasAura(23333)) ||
@@ -408,7 +425,7 @@ Unit* EnemyPlayerValue::Calculate()
         if (pTarget == pVictim)
             continue;
 
-        if (approcheFurtive && estLePrime(pTarget))
+        if ((approcheFurtive && estLePrime(pTarget)) || coequipier(pTarget))
             continue;
 
         if (bot->GetTeamId() == TEAM_HORDE)
@@ -452,7 +469,7 @@ Unit* EnemyPlayerValue::Calculate()
 
                 if (Unit* pAttacker = pMember->getAttackerForHelper())
                     if (pAttacker->IsPlayer() && bot->IsWithinDist(pAttacker, maxAggroDistance * 2.0f) &&
-                        bot->IsWithinLOSInMap(pAttacker) && pAttacker != pVictim && voit(pAttacker))
+                        bot->IsWithinLOSInMap(pAttacker) && pAttacker != pVictim && voit(pAttacker) && !coequipier(pAttacker))
                         return pAttacker;
             }
         }

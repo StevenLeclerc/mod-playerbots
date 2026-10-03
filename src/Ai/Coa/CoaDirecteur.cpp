@@ -5352,8 +5352,13 @@ void SuivreRetraites()
         // L'ancre : le PRIME s'il est sur la carte du bot (le point sera a 600-1 200 yd de
         // lui), sinon le bot lui-meme. Deja a PREP_CARTE_MIN_YD du prime et aucun humain a
         // RETRAITE_HUMAIN_LU_YD : il a quitte la scene sans saut (`deja_loin`).
+        // Banc du 03/10 (arc 12) : le prime MORT passe en fantome et part au cimetiere ; mesure
+        // depuis lui, le chasseur reste sur le corps (`deja_loin`, Jimabliz a 2 yd de la
+        // cible) -- c'est le cas Krillock du 02/10 (le joueur revient a son corps). Prime
+        // mort ou fantome : l'ancre est le chasseur lui-meme, donc le lieu du combat.
         Player* ancre = JoueurConnecte(r.joueur);
-        if (!ancre || !ancre->IsInWorld() || ancre->IsBeingTeleported() || ancre->GetMapId() != bot->GetMapId())
+        if (!ancre || !ancre->IsInWorld() || ancre->IsBeingTeleported() || ancre->GetMapId() != bot->GetMapId() ||
+            !ancre->IsAlive() || ancre->HasPlayerFlag(PLAYER_FLAGS_GHOST))
             ancre = bot;
         if (ancre != bot && !proche && bot->GetExactDist2d(ancre) >= PREP_CARTE_MIN_YD)
         {
