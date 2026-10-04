@@ -809,11 +809,11 @@ bool PlayerbotAIConfig::Initialize()
         sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementAmbiances", "800325,92883,92950");
     directeurEvenementSons = sConfigMgr->GetOption<std::string>(
         "AiPlayerbot.Directeur.EvenementSons",
-        "6423,13363,14556,11564,6241,8571,9036,6594,6595,7256,14560,14564,6260,12827,10571");
+        "6423,13363,14556,11564,6241,8571,9036,6594,6595,7256,14560,14564,6260,12827,10571,450000");
     // `son:point` est positionnel : le client l'attenue selon MinDistance/DistanceCutoff de
     // SoundEntries.dbc (champs 26 et 27). Defaut : les sons ✔ dont la coupure est >= 100 yd.
     directeurEvenementSonsPoint =
-        sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementSonsPoint", "14556,11564,8571,6594,6595,7256,14560");
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementSonsPoint", "14556,11564,8571,6594,6595,7256,14560,450000");
     directeurEvenementMusiques = sConfigMgr->GetOption<std::string>(
         "AiPlayerbot.Directeur.EvenementMusiques", "11726,6077,6045,5037,2990,9774,10610,17673,14939");
     directeurEvenementKits = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementKits",

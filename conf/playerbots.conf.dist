@@ -3643,8 +3643,8 @@ AiPlayerbot.Directeur.RecompenseMaxCuivre = 200000
 #        Ligne `coa directeur evenement: id= sous_action= lieu= forme= joueur= valeur= motif=`.
 #        Exige la migration 2026_10_04_00_coa_directeur_evenement.sql (sinon `colonnes_evenement`).
 AiPlayerbot.Directeur.EvenementAmbiances = "800325,92883,92950"
-AiPlayerbot.Directeur.EvenementSons = "6423,13363,14556,11564,6241,8571,9036,6594,6595,7256,14560,14564,6260,12827,10571"
-AiPlayerbot.Directeur.EvenementSonsPoint = "14556,11564,8571,6594,6595,7256,14560"
+AiPlayerbot.Directeur.EvenementSons = "6423,13363,14556,11564,6241,8571,9036,6594,6595,7256,14560,14564,6260,12827,10571,450000"
+AiPlayerbot.Directeur.EvenementSonsPoint = "14556,11564,8571,6594,6595,7256,14560,450000"
 AiPlayerbot.Directeur.EvenementMusiques = "11726,6077,6045,5037,2990,9774,10610,17673,14939"
 AiPlayerbot.Directeur.EvenementKits = "8474,12003,8453,365,321,8753,8792,6706,8255"
 AiPlayerbot.Directeur.EvenementSorts = "56914,42345,42427,47840,43467,61236"
