@@ -178,6 +178,9 @@ bool ChasseurDe(uint32 botLow, uint32* joueur = nullptr, uint32* id = nullptr, b
 // RandomPlayerbotMgr (ni teleportation aleatoire, ni Randomize). Un humain liste
 // n'est JAMAIS traite en banc (Humain() est teste par le Directeur avant).
 bool CibleDeBanc(uint32 guidLow);
+// 04/10 : bot prepare par `P-0` hors prime (cible de contrat) : immobile (« stay » + riposte)
+// le temps de son repos. Tout fil (AiFactory), apres un compteur atomique.
+bool CibleImmobile(uint32 guidLow);
 
 // ------------------------------------------------------------------ retraite (03/10/2026)
 //

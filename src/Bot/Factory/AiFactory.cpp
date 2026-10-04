@@ -887,7 +887,8 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     // dans la liste (SuivreBancs). Jamais un bot mene par un humain, jamais en champ
     // de bataille.
     if (!player->InBattleground() && !(facade && facade->HasGameClientMaster()) &&
-        CoaDirecteur::CibleDeBanc(player->GetGUID().GetCounter()))
+        (CoaDirecteur::CibleDeBanc(player->GetGUID().GetCounter()) ||
+         CoaDirecteur::CibleImmobile(player->GetGUID().GetCounter())))   // 04/10 : cible de contrat
     {
         nonCombatEngine->removeAllStrategies();
         nonCombatEngine->addStrategiesNoInit("dps assist", "stay", "chat", "default", nullptr);

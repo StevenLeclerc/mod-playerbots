@@ -583,6 +583,7 @@ std::atomic<uint32> nbRetraites{0};
 void CommencerRetraite(uint32 bot, uint32 prime, uint32 joueur, char const* cause);
 bool LeverRetraite(uint32 bot, char const* motif);
 void SuivreRetraites();
+void SuivreImmobiles();   // 04/10 : cibles de contrat immobiles (section « repos de la reserve »)
 
 // Lot D4c : auras des DEFIS BLOQUANTS (PVE_ONLY, a vies, sans resurrection),
 // lues UNE fois au demarrage (DemarrerBus, requete synchrone sur acore_world),
@@ -4411,6 +4412,7 @@ void Entretien(uint32 diff)
     // Banc d'essai de prime (03/10/2026) : la liste relue, puis la trace (apres
     // l'embuscade : elle dit l'assaut de CETTE seconde). Sans banc : rien.
     SuivreBancs();
+    SuivreImmobiles();
     TracerBanc();
     // Retraite des chasseurs de reserve (03/10/2026). Sans retraite : un chargement.
     SuivreRetraites();
@@ -4905,6 +4907,65 @@ constexpr uint32 REPOS_RESERVE_S = 30 * MINUTE;
 std::unordered_map<uint32, uint32> reposReserve;   // guid bas -> Maintenant() de fin
 std::atomic<uint32> nbRepos{0};
 
+// 04/10 (contrat C1 en jeu : « la traque est fatigante », la cible errait de 900 a 190 yd entre
+// deux indices) : un bot prepare par `P-0` HORS prime (cible de contrat, reserve tenue prete) reste
+// IMMOBILE le temps de son repos : composition « stay » + riposte, celle de la cible de banc
+// (AiFactory). Pas la retraite (PoserRepos seul) : un chasseur en retraite doit pouvoir s'eloigner
+// a pied. Leve avec le repos (affectation `chasser`, bus eteint) et a son terme (SuivreImmobiles).
+// Fil monde seul pour l'ecriture ; lecture par AiFactory sous verrou partage.
+std::shared_mutex verrouImmobiles;
+std::unordered_map<uint32, uint32> immobiles;   // guid bas -> Maintenant() de fin
+std::atomic<uint32> nbImmobiles{0};
+
+void PoserImmobile(uint32 guid, uint32 finS)
+{
+    bool nouveau = false;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouImmobiles);
+        nouveau = !immobiles.count(guid);
+        immobiles[guid] = finS;
+        nbImmobiles.store(static_cast<uint32>(immobiles.size()), std::memory_order_relaxed);
+    }
+    if (nouveau)
+        BasculerComposition(guid);
+}
+
+void LeverImmobile(uint32 guid)
+{
+    if (!nbImmobiles.load(std::memory_order_relaxed))
+        return;
+    bool leve = false;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouImmobiles);
+        leve = immobiles.erase(guid) != 0;
+        nbImmobiles.store(static_cast<uint32>(immobiles.size()), std::memory_order_relaxed);
+    }
+    if (leve)
+        BasculerComposition(guid);
+}
+
+void SuivreImmobiles()
+{
+    if (!nbImmobiles.load(std::memory_order_relaxed))
+        return;
+    std::vector<uint32> finis;
+    {
+        std::unique_lock<std::shared_mutex> garde(verrouImmobiles);
+        uint32 const maintenant = Maintenant();
+        for (auto it = immobiles.begin(); it != immobiles.end();)
+            if (it->second <= maintenant)
+            {
+                finis.push_back(it->first);
+                it = immobiles.erase(it);
+            }
+            else
+                ++it;
+        nbImmobiles.store(static_cast<uint32>(immobiles.size()), std::memory_order_relaxed);
+    }
+    for (uint32 g : finis)
+        BasculerComposition(g);
+}
+
 void PoserRepos(uint32 guid, uint32 finS)
 {
     std::unique_lock<std::shared_mutex> garde(verrouConsignes);
@@ -4927,6 +4988,18 @@ bool LeverRepos(uint32 guid)
 
 void ViderRepos()
 {
+    {
+        std::vector<uint32> tous;
+        {
+            std::unique_lock<std::shared_mutex> garde(verrouImmobiles);
+            for (auto const& [g, f] : immobiles)
+                tous.push_back(g);
+            immobiles.clear();
+            nbImmobiles.store(0, std::memory_order_relaxed);
+        }
+        for (uint32 g : tous)
+            BasculerComposition(g);
+    }
     if (!nbRepos.load(std::memory_order_relaxed))
         return;
     std::unique_lock<std::shared_mutex> garde(verrouConsignes);
@@ -5634,6 +5707,7 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         if (horsPrime)
         {
             PoserRepos(c.cible, Maintenant() + REPOS_RESERVE_S);
+            PoserImmobile(c.cible, Maintenant() + REPOS_RESERVE_S);   // 04/10 : cible de contrat immobile
             LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos repos={}", c.id, c.cible,
                      c.joueur, REPOS_RESERVE_S);
         }
@@ -5795,6 +5869,7 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     if (horsPrime && !sautRefuse)
     {
         PoserRepos(c.cible, Maintenant() + REPOS_RESERVE_S);
+        PoserImmobile(c.cible, Maintenant() + REPOS_RESERVE_S);   // 04/10 : cible de contrat immobile
         LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos repos={}", c.id, c.cible,
                  c.joueur, REPOS_RESERVE_S);
     }
@@ -6499,6 +6574,7 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         if (LeverRepos(c.cible))
             LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} joueur={} motif=repos_fini raison=chasser", c.id,
                      c.cible, c.joueur);
+        LeverImmobile(c.cible);
         // Retraite (03/10/2026) : un chasseur de nouveau designe ne se retire plus ; un
         // chasseur de RESERVE est inscrit sur sa prime (il se retirera a sa fin).
         LeverRetraite(c.cible, "rappele");
@@ -7183,6 +7259,15 @@ bool CoaDirecteur::ChasseurDe(uint32 botLow, uint32* joueur, uint32* id, bool* a
     if (reserve)
         *reserve = it->second.a.reserve;
     return true;
+}
+
+bool CoaDirecteur::CibleImmobile(uint32 guidLow)
+{
+    if (!guidLow || !nbImmobiles.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(verrouImmobiles);
+    auto it = immobiles.find(guidLow);
+    return it != immobiles.end() && it->second > Maintenant();
 }
 
 bool CoaDirecteur::CibleDeBanc(uint32 guidLow)
