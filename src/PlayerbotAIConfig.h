@@ -513,10 +513,12 @@ public:
     // AUCUN id n'est permis). Defauts : les ids notes ✔ au banc de rendu du 04/10
     // (coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md).
     std::string directeurEvenementAmbiances;   // sorts de filtre d'ecran, poses sur le joueur
-    std::string directeurEvenementSons;        // SoundEntries.dbc
+    std::string directeurEvenementSons;        // SoundEntries.dbc, sous-action `son` (au joueur, direct)
+    std::string directeurEvenementSonsPoint;   // `son:point` (positionnel) : coupure DBC >= 100 yd seulement
     std::string directeurEvenementMusiques;    // SoundEntries.dbc (type 28)
     std::string directeurEvenementKits;        // SpellVisualKit.dbc (effets instantanes)
     std::string directeurEvenementSorts;       // aures cosmetiques durables, posees par un declencheur
+    std::string directeurEvenementSortsHaut;   // les memes, permises au SEUL lieu `haut` (45213) ; vide
     uint32 directeurEvenementReaffirmationSecondes;   // ambiance : repose de l'aure (5-25 s)
     uint32 directeurEvenementHauteurYd;               // lieu `haut` : declencheur au-dessus du sol (3-40)
     uint32 directeurEvenementDistanceYd;              // point a au plus N yd du joueur (10-100)

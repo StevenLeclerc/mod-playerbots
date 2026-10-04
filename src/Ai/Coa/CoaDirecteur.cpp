@@ -33,6 +33,8 @@
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "Timer.h"
 #include "TravelMgr.h"
 #include "Weather.h"
@@ -3519,19 +3521,25 @@ void SuivreMeteos()
 // rendu a l'ecran : docs/EVENEMENTS-banc-rendu-verdicts.md (banc du 04/10, 21:14-22:12 Paris).
 // UN verbe de bus, `evenement`, dont `texte` porte la SOUS-ACTION dans une grammaire fermee :
 //   ambiance                  aure de filtre d'ecran posee sur le joueur, reaffirmee, retiree
-//   son | son:point           PlayDirectSound au joueur | PlayDistanceSound d'un declencheur
+//   son | son:point           PlayDirectSound au joueur | PlayDistanceSound d'un declencheur (son
+//                             POSITIONNEL : liste a part EvenementSonsPoint, coupure DBC >= 100 yd)
 //   musique                   PlayDirectMusic au joueur (valeur 0 : arret, SUPPOSE)
 //   effet:<lieu>:<forme>      lieu joueur | point | haut ; forme kit | sort :
 //                             kit = SMSG_PLAY_SPELL_VISUAL (le KIT, jamais CastSpell : 9 sur 10
 //                             visibles au banc) ; sort = aure cosmetique durable posee par un
-//                             declencheur invisible sur lui-meme (`.aura` du banc)
+//                             declencheur invisible sur lui-meme (`.aura` du banc) ; le
+//                             declencheur ne vit pas plus que l'aure (duree du sort, Spell.dbc)
 //   annoncer:<message>        emote de boss (CHAT_MSG_RAID_BOSS_EMOTE) au seul joueur
 // `cible` = le joueur humain (`joueur` 0 ou le meme), `valeur` = l'id RESOLU par le service,
 // `duree_s` = la duree (ambiance, musique, sort), `carte/x/y/z` = le point (lieux point, haut).
 // LISTES BLANCHES FERMEES (AiPlayerbot.Directeur.Evenement*, lecture stricte : un morceau mal
-// forme et AUCUN id n'est permis) ; defauts = les ids notes ✔ au banc du 04/10.
-// TOUT est envoye AU SEUL JOUEUR (R7, P-134) : paquet direct, declencheur visible de son seul
-// invocateur (TempSummon::SetVisibleBySummonerOnly, Object.cpp:1865). Rien n'ecrit la zone.
+// forme et AUCUN id n'est permis) ; defauts = les ids notes ✔ au banc du 04/10 (10008 retire :
+// « rien » au banc, volume 0,12 dans SoundEntries.dbc).
+// Envoye AU SEUL JOUEUR (R7, P-134) : paquet direct, declencheur visible de son seul invocateur
+// (TempSummon::SetVisibleBySummonerOnly, Object.cpp:1865). UNE EXCEPTION : l'aure d'ambiance est
+// une vraie aure du joueur ; sa mise a jour (SMSG_AURA_UPDATE, AuraApplication::ClientUpdate,
+// SpellAuras.cpp:240) part a tout l'entourage, qui voit donc son ICONE en le ciblant. Le filtre
+// d'ecran ne devrait s'appliquer que chez le porteur (SUPPOSE, a eprouver en jeu).
 // Registre au fil monde seul ; `Lever…Si` sur lever, stop (arret), bus eteint.
 // Journal : `coa directeur evenement: id= sous_action= lieu= forme= joueur= valeur= motif=`.
 
@@ -3813,17 +3821,28 @@ void ExecuterEvenement(CoaDirCommande const& c)
                  c.dureeS >= EV_AMBIANCE_DUREE_MIN_S && c.dureeS <= EV_DUREE_MAX_S;
             break;
         case EvSous::Son:
-            ok = IdDeListe(sPlayerbotAIConfig.directeurEvenementSons, valeur) && c.dureeS == 0;
+            // Au point, un son est POSITIONNEL (SMSG_PLAY_OBJECT_SOUND) : le client l'attenue selon
+            // MinDistance/DistanceCutoff de SoundEntries.dbc, que le coeur ne charge pas (seul l'ID).
+            // D'ou une liste a part, des seuls sons dont la coupure est >= 100 yd (relevee au DBC).
+            ok = IdDeListe(lu.lieu == EvLieu::Point ? sPlayerbotAIConfig.directeurEvenementSonsPoint
+                                                    : sPlayerbotAIConfig.directeurEvenementSons,
+                           valeur) &&
+                 c.dureeS == 0;
             break;
         case EvSous::Musique:
+            // Une musique jouee est TOUJOURS enregistree (une echeance), sinon ni `lever`, ni
+            // `.directeur stop`, ni le bus eteint ne pourraient la couper.
             ok = valeur == 0 ? c.dureeS == 0
                              : IdDeListe(sPlayerbotAIConfig.directeurEvenementMusiques, valeur) &&
-                                   (c.dureeS == 0 || (c.dureeS >= EV_MUSIQUE_DUREE_MIN_S && c.dureeS <= EV_DUREE_MAX_S));
+                                   c.dureeS >= EV_MUSIQUE_DUREE_MIN_S && c.dureeS <= EV_DUREE_MAX_S;
             break;
         case EvSous::Effet:
+            // Lieu `haut` : EvenementSorts OU EvenementSortsHaut (le nuage d'orage 45213, ✘ pose au
+            // sol au banc) ; lieu `point` : EvenementSorts seul.
             ok = lu.forme == EvForme::Kit
                      ? IdDeListe(sPlayerbotAIConfig.directeurEvenementKits, valeur) && c.dureeS == 0
-                     : IdDeListe(sPlayerbotAIConfig.directeurEvenementSorts, valeur) &&
+                     : (IdDeListe(sPlayerbotAIConfig.directeurEvenementSorts, valeur) ||
+                        (lu.lieu == EvLieu::Haut && IdDeListe(sPlayerbotAIConfig.directeurEvenementSortsHaut, valeur))) &&
                            c.dureeS >= EV_SORT_DUREE_MIN_S && c.dureeS <= EV_DUREE_MAX_S;
             break;
         case EvSous::Annoncer:
@@ -3879,7 +3898,9 @@ void ExecuterEvenement(CoaDirCommande const& c)
         px = c.x;
         py = c.y;
         pz = lu.lieu == EvLieu::Haut ? sol + float(sPlayerbotAIConfig.directeurEvenementHauteurYd) : sol;
-        if (p->GetExactDist(px, py, sol) > portee)
+        // Distance au DECLENCHEUR (sol + hauteur pour `haut`) : au-dela de la portee, il serait
+        // hors de vue (P-165) et le kit ou le son perdu sans refus.
+        if (p->GetExactDist(px, py, pz) > portee)
         {
             RefuserEvenement(c, lu, "distance");
             return;
@@ -3955,7 +3976,7 @@ void ExecuterEvenement(CoaDirCommande const& c)
                 FinirMusique(ancienne, "remplace", par.c_str(), "remplace", false);
             }
             p->PlayDirectMusic(valeur, p);   // 0 : arret (SUPPOSE, voir FinirMusique)
-            if (valeur && c.dureeS)
+            if (valeur)                      // duree exigee plus haut : toujours une echeance
                 evMusiques[c.cible] = EvMusique{c.id, c.cible, valeur, maintenant + c.dureeS};
             break;
         }
@@ -3964,7 +3985,22 @@ void ExecuterEvenement(CoaDirCommande const& c)
                 EnvoyerKit(p, p->GetGUID(), valeur);
             else
             {
-                uint32 const vieMs = lu.forme == EvForme::Kit ? EV_DECLENCHEUR_KIT_MS : c.dureeS * IN_MILLISECONDS;
+                uint32 vieMs = lu.forme == EvForme::Kit ? EV_DECLENCHEUR_KIT_MS : c.dureeS * IN_MILLISECONDS;
+                if (lu.forme == EvForme::Sort)
+                {
+                    // Le declencheur ne survit pas a son aure : un sort a duree finie (42427 : 10 s,
+                    // 43467 : 12 s, 61236 : 25 s, 42345 : 35 s ; SpellDuration.dbc) s'eteint seul, et
+                    // un declencheur restant occuperait le quota (`plein`) pour rien. -1 : infini.
+                    SpellInfo const* info = sSpellMgr->GetSpellInfo(valeur);
+                    if (!info)
+                    {
+                        RefuserEvenement(c, lu, "sort");
+                        return;
+                    }
+                    int32 const sortMs = info->GetMaxDuration();
+                    if (sortMs > 0)
+                        vieMs = std::min<uint32>(vieMs, std::max<uint32>(uint32(sortMs), IN_MILLISECONDS));
+                }
                 Creature* d = PoserDeclencheur(p, px, py, pz, vieMs, lu.lieu == EvLieu::Haut);
                 if (!d)
                 {
@@ -3978,8 +4014,8 @@ void ExecuterEvenement(CoaDirCommande const& c)
                     return;
                 }
                 evDeclencheurs.push_back(EvDeclencheur{c.id, c.cible, d->GetGUID(), p->GetMapId(),
-                                                       maintenant + vieMs / IN_MILLISECONDS, lu.sous, lu.forme,
-                                                       valeur});
+                                                       maintenant + (vieMs + IN_MILLISECONDS - 1) / IN_MILLISECONDS,
+                                                       lu.sous, lu.forme, valeur});
                 if (lu.forme == EvForme::Kit)
                     evEnvois.push_back(EvEnvoi{c.id, c.cible, d->GetGUID(), true, valeur, getMSTime()});
             }
@@ -4066,7 +4102,8 @@ size_t LeverEvenementsSi(Predicat lever, char const* raison)
 }
 
 // Chaque seconde (Entretien, bus allume ou eteint) : envois differes dus, reaffirmation des
-// ambiances, echeances, deconnexion, changement de carte.
+// ambiances, echeances ; deconnexion (ambiances, musiques, declencheurs) et changement de carte
+// (ambiances, declencheurs).
 void SuivreEvenements()
 {
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
@@ -4139,25 +4176,33 @@ void SuivreEvenements()
     }
 
     // 3. Musiques et declencheurs echus : rien a envoyer (la musique va a son terme, le
-    // TempSummon s'efface seul) ; le registre les oublie.
+    // TempSummon s'efface seul) ; le registre les oublie. Un declencheur dont le joueur est
+    // parti (hors ligne, autre carte) est EFFACE aussitot : il ne compte plus dans les quotas.
     for (auto it = evMusiques.begin(); it != evMusiques.end();)
     {
-        if (it->second.finS <= maintenant || !JoueurConnecte(it->first))
+        bool const parti = !JoueurConnecte(it->first);
+        if (parti || it->second.finS <= maintenant)
         {
             EvMusique const m = it->second;
             it = evMusiques.erase(it);
-            FinirMusique(m, nullptr, nullptr, "echue", false);
+            FinirMusique(m, nullptr, nullptr, parti ? "hors_ligne" : "echue", false);
         }
         else
             ++it;
     }
     for (auto it = evDeclencheurs.begin(); it != evDeclencheurs.end();)
     {
-        if (it->finS <= maintenant)
+        Player* p = JoueurConnecte(it->joueur);
+        char const* motif = !p                                                    ? "hors_ligne"
+                            : (p->IsInWorld() && !p->IsBeingTeleported() &&
+                               p->GetMapId() != it->carte)                        ? "carte"
+                            : it->finS <= maintenant                              ? "echue"
+                                                                                  : nullptr;
+        if (motif)
         {
             EvDeclencheur const d = *it;
             it = evDeclencheurs.erase(it);
-            FinirDeclencheur(d, nullptr, nullptr, "echue", false);
+            FinirDeclencheur(d, nullptr, nullptr, motif, std::string_view(motif) != "echue");
         }
         else
             ++it;
