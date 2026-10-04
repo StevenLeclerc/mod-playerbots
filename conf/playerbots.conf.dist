@@ -3623,6 +3623,48 @@ AiPlayerbot.Directeur.RecompenseObjets = "1397885"
 #        Default: 200000 (20 po)
 AiPlayerbot.Directeur.RecompenseMaxCuivre = 200000
 
+#    AiPlayerbot.Directeur.EvenementAmbiances, EvenementSons, EvenementMusiques, EvenementKits,
+#    AiPlayerbot.Directeur.EvenementSorts
+#        Lot C des evenements (04/10, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3, § 5.1) :
+#        verbe `evenement` (dans Directeur.Verbes), `texte` = sous-action, `valeur` = id. Sous-actions :
+#        ambiance (aure de filtre d'ecran sur le joueur, reaffirmee, retiree), son | son:point,
+#        musique (valeur 0 : arret), effet:joueur|point|haut:kit (kit visuel, SpellVisualKit.dbc),
+#        effet:point|haut:sort (aure cosmetique durable d'un declencheur invisible), annoncer:<texte>
+#        (emote de boss au seul joueur). Tout est envoye AU SEUL JOUEUR vise ; le declencheur n'est
+#        visible que de lui. Ces cinq options sont les LISTES BLANCHES FERMEES des ids permis
+#        (separes par des virgules) ; lecture stricte : un morceau mal forme et AUCUN id n'est permis
+#        (refus `liste_blanche_ou_bornes`). Defauts : les ids notes ✔ au banc de rendu du 04/10
+#        (coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md). 45213 (nuage d'orage) n'y est pas : ✘
+#        au banc pose sur le joueur, a ajouter a EvenementSorts pour le lieu `haut`.
+#        Ligne `coa directeur evenement: id= sous_action= lieu= forme= joueur= valeur= motif=`.
+#        Exige la migration 2026_10_04_00_coa_directeur_evenement.sql (sinon `colonnes_evenement`).
+AiPlayerbot.Directeur.EvenementAmbiances = "800325,92883,92950"
+AiPlayerbot.Directeur.EvenementSons = "10008,6423,13363,14556,11564,6241,8571,9036,6594,6595,7256,14560,14564,6260,12827,10571"
+AiPlayerbot.Directeur.EvenementMusiques = "11726,6077,6045,5037,2990,9774,10610,17673,14939"
+AiPlayerbot.Directeur.EvenementKits = "8474,12003,8453,365,321,8753,8792,6706,8255"
+AiPlayerbot.Directeur.EvenementSorts = "56914,42345,42427,47840,43467,61236"
+
+#    AiPlayerbot.Directeur.EvenementReaffirmationSecondes
+#        ambiance : l'aure est reposee toutes les N secondes (5-25) ; sa duree est bornee a N + 10 s,
+#        si bien qu'une aure sauvee avec le personnage (deconnexion, plantage) s'eteint seule.
+#        Default: 20
+AiPlayerbot.Directeur.EvenementReaffirmationSecondes = 20
+
+#    AiPlayerbot.Directeur.EvenementHauteurYd
+#        lieu `haut` : le declencheur est pose N yd au-dessus du sol (3-40), pour un effet qui doit
+#        venir du ciel (nuage d'orage). Default: 12
+AiPlayerbot.Directeur.EvenementHauteurYd = 12
+
+#    AiPlayerbot.Directeur.EvenementDistanceYd
+#        lieux `point` et `haut` : le point est a au plus N yd du joueur (10-100 ; la visibilite est
+#        de 100 yd), sinon refus `distance`. Default: 90
+AiPlayerbot.Directeur.EvenementDistanceYd = 90
+
+#    AiPlayerbot.Directeur.EvenementDeclencheursParJoueur
+#        declencheurs vivants par joueur au plus (1-16), 64 pour tout le royaume ; au-dela, refus
+#        `plein`. Default: 8
+AiPlayerbot.Directeur.EvenementDeclencheursParJoueur = 8
+
 #    AiPlayerbot.Directeur.PrimeBanc
 #        Banc d'essai de prime (coa-project/outils/banc-prime.py) : guids bas de BOTS separes par
 #        des virgules, par exemple "4242". Lecture stricte : un morceau mal forme et AUCUN bot.

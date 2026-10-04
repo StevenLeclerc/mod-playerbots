@@ -507,6 +507,20 @@ public:
     // forme, aucun objet) et plafond d'argent d'UNE commande, en cuivres.
     std::string directeurRecompenseObjets;
     uint32 directeurRecompenseMaxCuivre;
+    // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3) :
+    // inertes tant que `evenement` n'est pas dans directeurVerbes. LISTES BLANCHES FERMEES des ids
+    // qu'une commande `evenement` peut jouer (« id,id », lecture stricte : un morceau mal forme et
+    // AUCUN id n'est permis). Defauts : les ids notes ✔ au banc de rendu du 04/10
+    // (coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md).
+    std::string directeurEvenementAmbiances;   // sorts de filtre d'ecran, poses sur le joueur
+    std::string directeurEvenementSons;        // SoundEntries.dbc
+    std::string directeurEvenementMusiques;    // SoundEntries.dbc (type 28)
+    std::string directeurEvenementKits;        // SpellVisualKit.dbc (effets instantanes)
+    std::string directeurEvenementSorts;       // aures cosmetiques durables, posees par un declencheur
+    uint32 directeurEvenementReaffirmationSecondes;   // ambiance : repose de l'aure (5-25 s)
+    uint32 directeurEvenementHauteurYd;               // lieu `haut` : declencheur au-dessus du sol (3-40)
+    uint32 directeurEvenementDistanceYd;              // point a au plus N yd du joueur (10-100)
+    uint32 directeurEvenementDeclencheursParJoueur;   // declencheurs vivants par joueur (1-16)
     // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas
     // de BOTS separes par des virgules ("4242,4243"). Un bot liste est traite COMME UN
     // HUMAIN PRIME, pour la prime seulement (verbes `prime`, `chasser`, `recompenser`,

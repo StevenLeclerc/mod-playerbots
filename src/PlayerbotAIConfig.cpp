@@ -801,6 +801,33 @@ bool PlayerbotAIConfig::Initialize()
     // Lot R3 (03/10/2026) : Adventurer's Cache (1397885) seulement ; 20 po par commande au plus.
     directeurRecompenseObjets = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.RecompenseObjets", "1397885");
     directeurRecompenseMaxCuivre = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.RecompenseMaxCuivre", 200000);
+    // Lot C des evenements (04/10/2026) : defauts = ids notes ✔ au banc du 04/10 (verdicts :
+    // coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md). 45213 (nuage d'orage, ✘ au banc pose
+    // sur le joueur) n'est PAS dans les sorts : a ajouter a la main pour le lieu `haut`.
+    directeurEvenementAmbiances =
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementAmbiances", "800325,92883,92950");
+    directeurEvenementSons = sConfigMgr->GetOption<std::string>(
+        "AiPlayerbot.Directeur.EvenementSons",
+        "10008,6423,13363,14556,11564,6241,8571,9036,6594,6595,7256,14560,14564,6260,12827,10571");
+    directeurEvenementMusiques = sConfigMgr->GetOption<std::string>(
+        "AiPlayerbot.Directeur.EvenementMusiques", "11726,6077,6045,5037,2990,9774,10610,17673,14939");
+    directeurEvenementKits = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementKits",
+                                                                "8474,12003,8453,365,321,8753,8792,6706,8255");
+    directeurEvenementSorts = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementSorts",
+                                                                 "56914,42345,42427,47840,43467,61236");
+    directeurEvenementReaffirmationSecondes =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementReaffirmationSecondes", 20);
+    directeurEvenementHauteurYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementHauteurYd", 12);
+    directeurEvenementDistanceYd = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementDistanceYd", 90);
+    directeurEvenementDeclencheursParJoueur =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementDeclencheursParJoueur", 8);
+    // 92883 et 92950 durent 30 s : une repose au-dela de 25 s laisserait un trou ; sous 5 s,
+    // une aure reposee a chaque seconde. Au-dela de 100 yd, le declencheur est hors de vue
+    // (Visibility.Distance.Continents) ; au-dela de 40 yd de haut, hors de tout cadre.
+    directeurEvenementReaffirmationSecondes = std::clamp<uint32>(directeurEvenementReaffirmationSecondes, 5, 25);
+    directeurEvenementHauteurYd = std::clamp<uint32>(directeurEvenementHauteurYd, 3, 40);
+    directeurEvenementDistanceYd = std::clamp<uint32>(directeurEvenementDistanceYd, 10, 100);
+    directeurEvenementDeclencheursParJoueur = std::clamp<uint32>(directeurEvenementDeclencheursParJoueur, 1, 16);
     // Banc d'essai de prime (03/10/2026) : vide par defaut, rien ne change.
     directeurPrimeBanc = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.PrimeBanc", "");
     // Un plafond nul rendrait toute prime `bornes` sans le dire ; une meute nulle
