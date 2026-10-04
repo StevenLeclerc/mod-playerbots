@@ -48,6 +48,9 @@ enum class CoaDirVerbe : uint8
     Chasser,        // un mercenaire designe chasseur de ce joueur (affectation, disque)
     // Lot R3 (03/10/2026, coa-project/docs/CONCEPTION-recompenses-primes.md § 5), AVANT Inconnu :
     Recompenser,    // un courrier au joueur : argent (valeur, cuivre) et objets de la liste blanche (texte)
+    // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 5.1),
+    // AVANT Inconnu : `texte` = sous-action (ambiance, son, musique, effet, annoncer), `valeur` = id.
+    Evenement,
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
 };
 
@@ -137,6 +140,12 @@ public:
     // est refuse `colonnes_recompense`, tous les autres verbes passent. Vrai
     // implique ColonnesD4().
     virtual bool ColonnesRecompense() const { return false; }
+
+    // Lot C des evenements (04/10/2026). L'ENUM de `verbe` porte-t-il les treize valeurs R3
+    // en tete ET la valeur 'evenement' (ordre commun : recompenser, pister, attirer, soigner,
+    // evenement) ? Faux : `evenement` est refuse `colonnes_evenement`, tous les autres verbes
+    // passent. Vrai implique ColonnesRecompense().
+    virtual bool ColonnesEvenement() const { return false; }
 };
 
 #endif

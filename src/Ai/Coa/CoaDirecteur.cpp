@@ -33,6 +33,8 @@
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "Timer.h"
 #include "TravelMgr.h"
 #include "Weather.h"
@@ -681,6 +683,7 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Prime:               return "prime";
         case CoaDirVerbe::Chasser:             return "chasser";
         case CoaDirVerbe::Recompenser:         return "recompenser";
+        case CoaDirVerbe::Evenement:           return "evenement";
         default:                               return "inconnu";
     }
 }
@@ -700,6 +703,7 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "prime")                return CoaDirVerbe::Prime;
     if (nom == "chasser")              return CoaDirVerbe::Chasser;
     if (nom == "recompenser")          return CoaDirVerbe::Recompenser;
+    if (nom == "evenement")            return CoaDirVerbe::Evenement;
     return CoaDirVerbe::Inconnu;
 }
 
@@ -723,6 +727,14 @@ bool VerbeD4(CoaDirVerbe v)
 bool VerbeR(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Recompenser;
+}
+
+// Lot C des evenements (04/10/2026, docs/EVENEMENTS-grimoire-directeur.md § 5.1) :
+// `evenement` exige l'ENUM R3 en tete ET la valeur 'evenement' (migration
+// 2026_10_04_00_coa_directeur_evenement.sql) ; il lit `texte` et `valeur` (colonnes D3).
+bool VerbeEv(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Evenement;
 }
 
 CoaDirCanal CanalDe(std::string const& nom)
@@ -756,7 +768,7 @@ char const* NomCanal(CoaDirCanal c)
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v);
+           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -837,6 +849,7 @@ public:
         _colonnesD3 = false;
         _colonnesD4 = false;
         _colonnesR = false;
+        _colonnesEv = false;
         QueryResult colonnes = CharacterDatabase.Query(
             "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
@@ -865,6 +878,11 @@ public:
         // Lot R3 (03/10/2026) : meme regle, l'ENUM D4 prolonge de `recompenser`
         // (ou d'autres valeurs apres lui). L'ENUM D4 seul : `recompenser` inerte.
         _colonnesR = d4 && CommencePar(typeVerbe, ENUM_VERBE_R);
+        // Lot C des evenements (04/10/2026) : l'ENUM R3 en tete ET la valeur 'evenement'
+        // quelque part apres (« contient », ordre commun recompenser, pister, attirer,
+        // soigner, evenement : un chantier livre dans le desordre n'eteint pas les autres).
+        // Entre apostrophes : 'evenement_x' ne la contient pas.
+        _colonnesEv = _colonnesR && typeVerbe.find(",'evenement'") != std::string::npos;
         if (_colonnesD3)
             LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
         else
@@ -879,6 +897,10 @@ public:
             LOG_INFO("playerbots", "coa directeur : colonnes recompense presentes, verbe recompenser lisible");
         else
             LOG_INFO("playerbots", "coa directeur : colonnes recompense absentes, verbe recompenser inerte");
+        if (_colonnesEv)
+            LOG_INFO("playerbots", "coa directeur : colonnes evenement presentes, verbe evenement lisible");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes evenement absentes, verbe evenement inerte");
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -998,6 +1020,7 @@ public:
     bool ColonnesD3() const override { return _colonnesD3; }
     bool ColonnesD4() const override { return _colonnesD4; }
     bool ColonnesRecompense() const override { return _colonnesR; }
+    bool ColonnesEvenement() const override { return _colonnesEv; }
 
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
@@ -1046,6 +1069,7 @@ private:
     bool _colonnesD3 = false;
     bool _colonnesD4 = false;
     bool _colonnesR = false;
+    bool _colonnesEv = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -3491,6 +3515,700 @@ void SuivreMeteos()
     }
 }
 
+// ------------------------------------------------------------------ lot C : verbe `evenement` (04/10/2026)
+//
+// coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3, § 3.5, § 5.1-5.2 (lot C) ;
+// rendu a l'ecran : docs/EVENEMENTS-banc-rendu-verdicts.md (banc du 04/10, 21:14-22:12 Paris).
+// UN verbe de bus, `evenement`, dont `texte` porte la SOUS-ACTION dans une grammaire fermee :
+//   ambiance                  aure de filtre d'ecran posee sur le joueur, reaffirmee, retiree
+//   son | son:point           PlayDirectSound au joueur | PlayDistanceSound d'un declencheur (son
+//                             POSITIONNEL : liste a part EvenementSonsPoint, coupure DBC >= 100 yd)
+//   musique                   PlayDirectMusic au joueur (valeur 0 : arret, SUPPOSE)
+//   effet:<lieu>:<forme>      lieu joueur | point | haut ; forme kit | sort :
+//                             kit = SMSG_PLAY_SPELL_VISUAL (le KIT, jamais CastSpell : 9 sur 10
+//                             visibles au banc) ; sort = aure cosmetique durable posee par un
+//                             declencheur invisible sur lui-meme (`.aura` du banc) ; le
+//                             declencheur ne vit pas plus que l'aure (duree du sort, Spell.dbc)
+//   annoncer:<message>        emote de boss (CHAT_MSG_RAID_BOSS_EMOTE) au seul joueur
+// `cible` = le joueur humain (`joueur` 0 ou le meme), `valeur` = l'id RESOLU par le service,
+// `duree_s` = la duree (ambiance, musique, sort), `carte/x/y/z` = le point (lieux point, haut).
+// LISTES BLANCHES FERMEES (AiPlayerbot.Directeur.Evenement*, lecture stricte : un morceau mal
+// forme et AUCUN id n'est permis) ; defauts = les ids notes ✔ au banc du 04/10 (10008 retire :
+// « rien » au banc, volume 0,12 dans SoundEntries.dbc).
+// Envoye AU SEUL JOUEUR (R7, P-134) : paquet direct, declencheur visible de son seul invocateur
+// (TempSummon::SetVisibleBySummonerOnly, Object.cpp:1865). UNE EXCEPTION : l'aure d'ambiance est
+// une vraie aure du joueur ; sa mise a jour (SMSG_AURA_UPDATE, AuraApplication::ClientUpdate,
+// SpellAuras.cpp:240) part a tout l'entourage, qui voit donc son ICONE en le ciblant. Le filtre
+// d'ecran ne devrait s'appliquer que chez le porteur (SUPPOSE, a eprouver en jeu).
+// Registre au fil monde seul ; `Lever…Si` sur lever, stop (arret), bus eteint.
+// Journal : `coa directeur evenement: id= sous_action= lieu= forme= joueur= valeur= motif=`.
+
+constexpr uint32 EV_AMBIANCE_DUREE_MIN_S = 30;     // schema (scenario_evenement.schema.json : 30-1800)
+constexpr uint32 EV_DUREE_MAX_S = 3600;
+constexpr uint32 EV_MUSIQUE_DUREE_MIN_S = 10;
+constexpr uint32 EV_SORT_DUREE_MIN_S = 5;
+constexpr uint32 EV_DECLENCHEUR_KIT_MS = 10 * IN_MILLISECONDS;   // vie d'un declencheur de kit ou de son
+constexpr uint32 EV_ENVOI_DIFFERE_MS = 1000;       // le client doit connaitre le declencheur avant le paquet
+constexpr float EV_SOL_ECART_MAX_YD = 15.0f;       // z du service et sol lu : au-dela, refus `sol`
+constexpr size_t EV_DECLENCHEURS_MAX = 64;          // tout le royaume
+constexpr size_t EV_ENVOIS_MAX = 128;
+
+enum class EvSous : uint8 { Aucune, Ambiance, Son, Musique, Effet, Annoncer };
+enum class EvLieu : uint8 { Joueur, Point, Haut };
+enum class EvForme : uint8 { Aucune, Kit, Sort };
+
+struct EvLu
+{
+    EvSous sous = EvSous::Aucune;
+    EvLieu lieu = EvLieu::Joueur;
+    EvForme forme = EvForme::Aucune;
+    std::string message;   // annoncer
+};
+
+char const* NomEvSous(EvSous s)
+{
+    switch (s)
+    {
+        case EvSous::Ambiance: return "ambiance";
+        case EvSous::Son:      return "son";
+        case EvSous::Musique:  return "musique";
+        case EvSous::Effet:    return "effet";
+        case EvSous::Annoncer: return "annoncer";
+        default:               return "inconnue";
+    }
+}
+
+char const* NomEvLieu(EvLieu l)
+{
+    return l == EvLieu::Point ? "point" : l == EvLieu::Haut ? "haut" : "joueur";
+}
+
+char const* NomEvForme(EvForme f)
+{
+    return f == EvForme::Kit ? "kit" : f == EvForme::Sort ? "sort" : "-";
+}
+
+// `texte` -> sous-action. Grammaire FERMEE, casse exacte ; tout le reste : faux (refus `texte`).
+bool LireSousAction(std::string const& t, EvLu& lu)
+{
+    lu = EvLu();
+    if (t == "ambiance")      { lu.sous = EvSous::Ambiance; return true; }
+    if (t == "son")           { lu.sous = EvSous::Son; return true; }
+    if (t == "son:point")     { lu.sous = EvSous::Son; lu.lieu = EvLieu::Point; return true; }
+    if (t == "musique")       { lu.sous = EvSous::Musique; return true; }
+    if (t == "effet:joueur:kit") { lu.sous = EvSous::Effet; lu.forme = EvForme::Kit; return true; }
+    if (t == "effet:point:kit")  { lu.sous = EvSous::Effet; lu.lieu = EvLieu::Point; lu.forme = EvForme::Kit; return true; }
+    if (t == "effet:haut:kit")   { lu.sous = EvSous::Effet; lu.lieu = EvLieu::Haut; lu.forme = EvForme::Kit; return true; }
+    if (t == "effet:point:sort") { lu.sous = EvSous::Effet; lu.lieu = EvLieu::Point; lu.forme = EvForme::Sort; return true; }
+    if (t == "effet:haut:sort")  { lu.sous = EvSous::Effet; lu.lieu = EvLieu::Haut; lu.forme = EvForme::Sort; return true; }
+    static constexpr char const PREFIXE_ANNONCE[] = "annoncer:";
+    size_t const n = sizeof(PREFIXE_ANNONCE) - 1;
+    if (t.size() > n && t.compare(0, n, PREFIXE_ANNONCE) == 0)
+    {
+        lu.message = t.substr(n);
+        // `%` : le cadre d'emote de boss du client formate le texte avec le nom de
+        // l'emetteur (%s) ; un `%` seul y serait interprete. Refuse, comme au service.
+        if (lu.message.find('%') != std::string::npos ||
+            lu.message.find_first_not_of(' ') == std::string::npos)
+            return false;
+        lu.sous = EvSous::Annoncer;
+        return true;
+    }
+    return false;
+}
+
+// L'id `id` est-il dans la liste `liste` (« 800325,92883 ») ? Lecture STRICTE, comme
+// ObjetRecompensePermis : un morceau mal forme (vide compris) et AUCUN id n'est permis.
+bool IdDeListe(std::string const& liste, uint32 id)
+{
+    if (!id || liste.find_first_not_of(" \t") == std::string::npos)
+        return false;
+    bool trouve = false;
+    size_t debut = 0;
+    while (debut <= liste.size())
+    {
+        size_t fin = liste.find(',', debut);
+        if (fin == std::string::npos)
+            fin = liste.size();
+        std::string morceau = liste.substr(debut, fin - debut);
+        morceau.erase(std::remove_if(morceau.begin(), morceau.end(), [](char ch) { return ch == ' ' || ch == '\t'; }),
+                      morceau.end());
+        uint32 v = 0;
+        if (!EntierRecompense(morceau, v) || !v)
+            return false;
+        trouve = trouve || v == id;
+        debut = fin + 1;
+    }
+    return trouve;
+}
+
+struct EvAmbiance
+{
+    uint32 id;
+    uint32 joueur;
+    uint32 sort;
+    uint32 finS;           // Maintenant()
+    uint32 carte;          // carte a la pose : en changer met fin a l'ambiance
+    uint32 dernierMs;      // getMSTime() de la derniere (re)pose
+};
+std::unordered_map<uint32, EvAmbiance> evAmbiances;   // cle : guid du joueur ; fil monde seul
+
+struct EvMusique
+{
+    uint32 id;
+    uint32 joueur;
+    uint32 musique;
+    uint32 finS;
+};
+std::unordered_map<uint32, EvMusique> evMusiques;     // cle : guid du joueur ; fil monde seul
+
+struct EvDeclencheur
+{
+    uint32 id;
+    uint32 joueur;
+    ObjectGuid guid;
+    uint32 carte;
+    uint32 finS;           // Maintenant() ; le TempSummon s'efface seul a son terme
+    EvSous sous;
+    EvForme forme;
+    uint32 valeur;
+};
+std::vector<EvDeclencheur> evDeclencheurs;            // fil monde seul
+
+struct EvEnvoi
+{
+    uint32 id;
+    uint32 joueur;
+    ObjectGuid guid;       // le declencheur
+    bool kit;              // vrai : kit visuel ; faux : son
+    uint32 valeur;
+    uint32 poseMs;         // getMSTime() de l'invocation
+};
+std::vector<EvEnvoi> evEnvois;                         // fil monde seul
+
+// SMSG_PLAY_SPELL_VISUAL, meme forme que Unit::SendPlaySpellVisual(guid, id) (Unit.cpp),
+// mais au SEUL joueur (SendDirectMessage) au lieu de SendMessageToSet.
+void EnvoyerKit(Player* p, ObjectGuid guid, uint32 kit)
+{
+    WorldPacket data(SMSG_PLAY_SPELL_VISUAL, 8 + 4);
+    data << guid;
+    data << uint32(kit);   // SpellVisualKit.dbc
+    p->SendDirectMessage(&data);
+}
+
+// Duree bornee de l'aure d'ambiance : jamais plus que la periode de reaffirmation + 10 s,
+// ni que l'echeance. Une aure sauvee avec le personnage (deconnexion, sauvegarde
+// automatique, plantage) s'eteint donc d'elle-meme peu apres la reconnexion -- 800325 est
+// INFINIE dans Spell.dbc : posee telle quelle, elle survivrait a tout.
+int32 DureeAureAmbianceMs(EvAmbiance const& a)
+{
+    uint32 const periodeS = sPlayerbotAIConfig.directeurEvenementReaffirmationSecondes;
+    uint32 const maintenant = Maintenant();
+    uint32 const resteS = a.finS > maintenant ? a.finS - maintenant : 1;
+    return static_cast<int32>(std::min(periodeS + 10, resteS) * IN_MILLISECONDS);
+}
+
+bool PoserAureAmbiance(Player* p, EvAmbiance const& a)
+{
+    Aura* aure = p->AddAura(a.sort, p);
+    if (!aure)
+        return false;
+    int32 const ms = DureeAureAmbianceMs(a);
+    aure->SetMaxDuration(ms);
+    aure->SetDuration(ms);
+    aure->SetNeedClientUpdateForTargets();
+    return true;
+}
+
+void RetirerAureAmbiance(Player* p, EvAmbiance const& a)
+{
+    // Seule l'aure posee par le joueur sur lui-meme (AddAura : lanceur = p).
+    p->RemoveAurasDueToSpell(a.sort, p->GetGUID());
+}
+
+void JournaliserEvenement(uint32 id, EvSous sous, EvLieu lieu, EvForme forme, uint32 joueur, uint32 valeur,
+                          char const* motif)
+{
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action={} lieu={} forme={} joueur={} valeur={} motif={}",
+             id, NomEvSous(sous), NomEvLieu(lieu), NomEvForme(forme), joueur, valeur, motif);
+}
+
+void CloreEvenement(uint32 id, uint32 joueur, char const* statut, char const* raison)
+{
+    if (!statut)
+        return;
+    LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=evenement cible={} joueur={} statut={} raison={}", id,
+             joueur, joueur, statut, raison ? raison : "-");
+    if (source)
+        source->Clore(id, statut, raison);
+}
+
+void FinirAmbiance(EvAmbiance const& a, char const* statut, char const* raison, char const* motif, bool retirer)
+{
+    if (retirer)
+        if (Player* p = ObjectAccessor::FindPlayerByLowGUID(a.joueur))
+            RetirerAureAmbiance(p, a);
+    JournaliserEvenement(a.id, EvSous::Ambiance, EvLieu::Joueur, EvForme::Aucune, a.joueur, a.sort, motif);
+    CloreEvenement(a.id, a.joueur, statut, raison);
+}
+
+// Arret de la musique : SMSG_PLAY_MUSIC d'id 0. SUPPOSE (non lu dans le client) : que le
+// client 3.3.5a coupe alors la musique en cours ; a eprouver en jeu. Sans effet, la musique
+// va a son terme (banc du 04/10 : « la musique va jusqu'au bout »).
+void FinirMusique(EvMusique const& m, char const* statut, char const* raison, char const* motif, bool couper)
+{
+    if (couper)
+        if (Player* p = ObjectAccessor::FindPlayerByLowGUID(m.joueur))
+            p->PlayDirectMusic(0, p);
+    JournaliserEvenement(m.id, EvSous::Musique, EvLieu::Joueur, EvForme::Aucune, m.joueur, m.musique, motif);
+    CloreEvenement(m.id, m.joueur, statut, raison);
+}
+
+void FinirDeclencheur(EvDeclencheur const& d, char const* statut, char const* raison, char const* motif, bool effacer)
+{
+    if (effacer)
+        if (Map* map = sMapMgr->FindBaseNonInstanceMap(d.carte))
+            if (Creature* cr = map->GetCreature(d.guid))
+                cr->DespawnOrUnsummon();
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action={} lieu=declencheur forme={} joueur={} valeur={}"
+             " motif={}", d.id, NomEvSous(d.sous), NomEvForme(d.forme), d.joueur, d.valeur, motif);
+    // Un kit ou un son ponctuel a deja ete accuse `execute` : seule sa levee explicite
+    // (lever, arret, bus eteint) est ecrite, jamais son terme naturel.
+    CloreEvenement(d.id, d.joueur, statut, raison);
+}
+
+// Un declencheur invisible, visible de son SEUL invocateur, pose a (x, y, z), vivant `vieMs`.
+// Player::SummonCreature (WorldObject::SummonCreature, Object.cpp:2383) avec
+// visibleBySummonerOnly ; WORLD_TRIGGER (Unit.h:38, 12999 « World Invisible Trigger »,
+// flags_extra 130 : declencheur, non selectionnable). Nul : invocation refusee par le coeur.
+Creature* PoserDeclencheur(Player* p, float x, float y, float z, uint32 vieMs, bool enHauteur)
+{
+    TempSummon* s = p->SummonCreature(WORLD_TRIGGER, x, y, z, 0.0f, TEMPSUMMON_TIMED_DESPAWN, vieMs, nullptr, true);
+    if (!s)
+        return nullptr;
+    if (enHauteur)
+        s->SetDisableGravity(true);   // SUPPOSE utile : rien ne le fait tomber sans mouvement
+    return s;
+}
+
+void RefuserEvenement(CoaDirCommande const& c, EvLu const& lu, char const* raison)
+{
+    JournaliserEvenement(c.id, lu.sous, lu.lieu, lu.forme, c.cible, static_cast<uint32>(std::max(c.valeur, 0)),
+                         raison);
+    Refuser(c, raison);
+}
+
+void ExecuterEvenement(CoaDirCommande const& c)
+{
+    EvLu lu;
+    if (!TexteBusValide(c.texte) || !LireSousAction(c.texte, lu))
+    {
+        RefuserEvenement(c, lu, "texte");
+        return;
+    }
+    if (!CibleJoueurValide(c) || c.valeur < 0)
+    {
+        RefuserEvenement(c, lu, "bornes");
+        return;
+    }
+    uint32 const valeur = static_cast<uint32>(c.valeur);
+    // Bornes et liste blanche, par sous-action.
+    bool ok = false;
+    switch (lu.sous)
+    {
+        case EvSous::Ambiance:
+            ok = IdDeListe(sPlayerbotAIConfig.directeurEvenementAmbiances, valeur) &&
+                 c.dureeS >= EV_AMBIANCE_DUREE_MIN_S && c.dureeS <= EV_DUREE_MAX_S;
+            break;
+        case EvSous::Son:
+            // Au point, un son est POSITIONNEL (SMSG_PLAY_OBJECT_SOUND) : le client l'attenue selon
+            // MinDistance/DistanceCutoff de SoundEntries.dbc, que le coeur ne charge pas (seul l'ID).
+            // D'ou une liste a part, des seuls sons dont la coupure est >= 100 yd (relevee au DBC).
+            ok = IdDeListe(lu.lieu == EvLieu::Point ? sPlayerbotAIConfig.directeurEvenementSonsPoint
+                                                    : sPlayerbotAIConfig.directeurEvenementSons,
+                           valeur) &&
+                 c.dureeS == 0;
+            break;
+        case EvSous::Musique:
+            // Une musique jouee est TOUJOURS enregistree (une echeance), sinon ni `lever`, ni
+            // `.directeur stop`, ni le bus eteint ne pourraient la couper.
+            ok = valeur == 0 ? c.dureeS == 0
+                             : IdDeListe(sPlayerbotAIConfig.directeurEvenementMusiques, valeur) &&
+                                   c.dureeS >= EV_MUSIQUE_DUREE_MIN_S && c.dureeS <= EV_DUREE_MAX_S;
+            break;
+        case EvSous::Effet:
+            // Lieu `haut` : EvenementSorts OU EvenementSortsHaut (le nuage d'orage 45213, ✘ pose au
+            // sol au banc) ; lieu `point` : EvenementSorts seul.
+            ok = lu.forme == EvForme::Kit
+                     ? IdDeListe(sPlayerbotAIConfig.directeurEvenementKits, valeur) && c.dureeS == 0
+                     : (IdDeListe(sPlayerbotAIConfig.directeurEvenementSorts, valeur) ||
+                        (lu.lieu == EvLieu::Haut && IdDeListe(sPlayerbotAIConfig.directeurEvenementSortsHaut, valeur))) &&
+                           c.dureeS >= EV_SORT_DUREE_MIN_S && c.dureeS <= EV_DUREE_MAX_S;
+            break;
+        case EvSous::Annoncer:
+            ok = valeur == 0 && c.dureeS == 0;
+            break;
+        default:
+            break;
+    }
+    if (!ok)
+    {
+        RefuserEvenement(c, lu, "liste_blanche_ou_bornes");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        RefuserEvenement(c, lu, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        RefuserEvenement(c, lu, "pas_humain");
+        return;
+    }
+    if (!p->IsInWorld() || p->IsBeingTeleported() || !CarteDeSuspension(p->GetMapId()))
+    {
+        RefuserEvenement(c, lu, "carte");
+        return;
+    }
+
+    // Point (son:point, effet:point, effet:haut) : sur la carte du joueur, a portee de vue,
+    // sur un sol sec proche du z du service.
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    bool const auPoint = lu.lieu != EvLieu::Joueur;
+    if (auPoint)
+    {
+        Map* map = p->GetMap();
+        float const portee = float(sPlayerbotAIConfig.directeurEvenementDistanceYd);
+        // Distance AVANT le sol : SolSec lit GetGridHeight, qui CREE la grille si elle
+        // n'existe pas (voir SolSec) ; un point lointain ne doit rien charger.
+        if (c.carte != p->GetMapId() || !std::isfinite(c.x) || !std::isfinite(c.y) ||
+            p->GetExactDist2d(c.x, c.y) > portee)
+        {
+            RefuserEvenement(c, lu, "distance");
+            return;
+        }
+        float sol = 0.0f;
+        if (c.z < POSE_Z_INCONNU_MAX || !SolSec(map, c.x, c.y, c.z, sol) || std::fabs(sol - c.z) > EV_SOL_ECART_MAX_YD)
+        {
+            RefuserEvenement(c, lu, "sol");
+            return;
+        }
+        px = c.x;
+        py = c.y;
+        pz = lu.lieu == EvLieu::Haut ? sol + float(sPlayerbotAIConfig.directeurEvenementHauteurYd) : sol;
+        // Distance au DECLENCHEUR (sol + hauteur pour `haut`) : au-dela de la portee, il serait
+        // hors de vue (P-165) et le kit ou le son perdu sans refus.
+        if (p->GetExactDist(px, py, pz) > portee)
+        {
+            RefuserEvenement(c, lu, "distance");
+            return;
+        }
+        uint32 parJoueur = 0;
+        for (EvDeclencheur const& d : evDeclencheurs)
+            if (d.joueur == c.cible)
+                ++parJoueur;
+        if (evDeclencheurs.size() >= EV_DECLENCHEURS_MAX || evEnvois.size() >= EV_ENVOIS_MAX ||
+            parJoueur >= sPlayerbotAIConfig.directeurEvenementDeclencheursParJoueur)
+        {
+            RefuserEvenement(c, lu, "plein");
+            return;
+        }
+    }
+
+    uint32 const maintenant = Maintenant();
+    switch (lu.sous)
+    {
+        case EvSous::Ambiance:
+        {
+            if (!p->IsAlive())
+            {
+                RefuserEvenement(c, lu, "mort");
+                return;
+            }
+            EvAmbiance const nouvelle{c.id, c.cible, valeur, maintenant + c.dureeS, p->GetMapId(), getMSTime()};
+            auto it = evAmbiances.find(c.cible);
+            if (it != evAmbiances.end())
+            {
+                // Une ambiance par joueur, la derniere remplace. L'ancienne aure n'est
+                // retiree que si le sort change (sinon la nouvelle pose la rafraichit).
+                EvAmbiance const ancienne = it->second;
+                evAmbiances.erase(it);
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
+                std::string const par = Acore::StringFormat("par_{}", c.id);
+                FinirAmbiance(ancienne, "remplace", par.c_str(), "remplace", ancienne.sort != valeur);
+            }
+            if (!PoserAureAmbiance(p, nouvelle))
+            {
+                RefuserEvenement(c, lu, "sort");
+                return;
+            }
+            evAmbiances[c.cible] = nouvelle;
+            break;
+        }
+        case EvSous::Son:
+            if (!auPoint)
+                p->PlayDirectSound(valeur, p);
+            else
+            {
+                Creature* d = PoserDeclencheur(p, px, py, pz, EV_DECLENCHEUR_KIT_MS, false);
+                if (!d)
+                {
+                    RefuserEvenement(c, lu, "declencheur");
+                    return;
+                }
+                evDeclencheurs.push_back(EvDeclencheur{c.id, c.cible, d->GetGUID(), p->GetMapId(),
+                                                       maintenant + EV_DECLENCHEUR_KIT_MS / IN_MILLISECONDS,
+                                                       lu.sous, lu.forme, valeur});
+                evEnvois.push_back(EvEnvoi{c.id, c.cible, d->GetGUID(), false, valeur, getMSTime()});
+            }
+            break;
+        case EvSous::Musique:
+        {
+            auto it = evMusiques.find(c.cible);
+            if (it != evMusiques.end())
+            {
+                EvMusique const ancienne = it->second;
+                evMusiques.erase(it);
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
+                std::string const par = Acore::StringFormat("par_{}", c.id);
+                FinirMusique(ancienne, "remplace", par.c_str(), "remplace", false);
+            }
+            p->PlayDirectMusic(valeur, p);   // 0 : arret (SUPPOSE, voir FinirMusique)
+            if (valeur)                      // duree exigee plus haut : toujours une echeance
+                evMusiques[c.cible] = EvMusique{c.id, c.cible, valeur, maintenant + c.dureeS};
+            break;
+        }
+        case EvSous::Effet:
+            if (lu.forme == EvForme::Kit && !auPoint)
+                EnvoyerKit(p, p->GetGUID(), valeur);
+            else
+            {
+                uint32 vieMs = lu.forme == EvForme::Kit ? EV_DECLENCHEUR_KIT_MS : c.dureeS * IN_MILLISECONDS;
+                if (lu.forme == EvForme::Sort)
+                {
+                    // Le declencheur ne survit pas a son aure : un sort a duree finie (42427 : 10 s,
+                    // 43467 : 12 s, 61236 : 25 s, 42345 : 35 s ; SpellDuration.dbc) s'eteint seul, et
+                    // un declencheur restant occuperait le quota (`plein`) pour rien. -1 : infini.
+                    SpellInfo const* info = sSpellMgr->GetSpellInfo(valeur);
+                    if (!info)
+                    {
+                        RefuserEvenement(c, lu, "sort");
+                        return;
+                    }
+                    int32 const sortMs = info->GetMaxDuration();
+                    if (sortMs > 0)
+                        vieMs = std::min<uint32>(vieMs, std::max<uint32>(uint32(sortMs), IN_MILLISECONDS));
+                }
+                Creature* d = PoserDeclencheur(p, px, py, pz, vieMs, lu.lieu == EvLieu::Haut);
+                if (!d)
+                {
+                    RefuserEvenement(c, lu, "declencheur");
+                    return;
+                }
+                if (lu.forme == EvForme::Sort && !d->AddAura(valeur, d))
+                {
+                    d->DespawnOrUnsummon();
+                    RefuserEvenement(c, lu, "sort");
+                    return;
+                }
+                evDeclencheurs.push_back(EvDeclencheur{c.id, c.cible, d->GetGUID(), p->GetMapId(),
+                                                       maintenant + (vieMs + IN_MILLISECONDS - 1) / IN_MILLISECONDS,
+                                                       lu.sous, lu.forme, valeur});
+                if (lu.forme == EvForme::Kit)
+                    evEnvois.push_back(EvEnvoi{c.id, c.cible, d->GetGUID(), true, valeur, getMSTime()});
+            }
+            break;
+        case EvSous::Annoncer:
+        {
+            WorldPacket data;
+            ChatHandler::BuildChatPacket(data, CHAT_MSG_RAID_BOSS_EMOTE, LANG_UNIVERSAL, ObjectGuid::Empty,
+                                         p->GetGUID(), lu.message, 0);
+            p->SendDirectMessage(&data);
+            break;
+        }
+        default:
+            break;
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots",
+             "coa directeur evenement: id={} sous_action={} lieu={} forme={} joueur={} valeur={} motif=pose duree_s={}"
+             " octets={}",
+             c.id, NomEvSous(lu.sous), NomEvLieu(lu.lieu), NomEvForme(lu.forme), c.cible, valeur, c.dureeS,
+             lu.message.size());
+    Accuser(c, "execute", nullptr);
+}
+
+// Leve tout ce que l'evenement a pose pour les commandes ou `lever(id, joueur)` est vrai :
+// aure retiree, musique coupee (SUPPOSE), declencheurs effaces, envois differes oublies.
+template <typename Predicat>
+size_t LeverEvenementsSi(Predicat lever, char const* raison)
+{
+    if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
+        return 0;
+    std::vector<EvAmbiance> ambiances;
+    for (auto it = evAmbiances.begin(); it != evAmbiances.end();)
+    {
+        if (lever(it->second.id, it->second.joueur))
+        {
+            ambiances.push_back(it->second);
+            it = evAmbiances.erase(it);
+        }
+        else
+            ++it;
+    }
+    std::vector<EvMusique> musiques;
+    for (auto it = evMusiques.begin(); it != evMusiques.end();)
+    {
+        if (lever(it->second.id, it->second.joueur))
+        {
+            musiques.push_back(it->second);
+            it = evMusiques.erase(it);
+        }
+        else
+            ++it;
+    }
+    std::vector<EvDeclencheur> declencheurs;
+    for (auto it = evDeclencheurs.begin(); it != evDeclencheurs.end();)
+    {
+        if (lever(it->id, it->joueur))
+        {
+            declencheurs.push_back(*it);
+            it = evDeclencheurs.erase(it);
+        }
+        else
+            ++it;
+    }
+    evEnvois.erase(std::remove_if(evEnvois.begin(), evEnvois.end(),
+                                  [&lever](EvEnvoi const& e) { return lever(e.id, e.joueur); }),
+                   evEnvois.end());
+    for (EvAmbiance const& a : ambiances)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        FinirAmbiance(a, "leve", raison, raison, true);
+    }
+    for (EvMusique const& m : musiques)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        FinirMusique(m, "leve", raison, raison, true);
+    }
+    for (EvDeclencheur const& d : declencheurs)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        FinirDeclencheur(d, "leve", raison, raison, true);
+    }
+    return ambiances.size() + musiques.size() + declencheurs.size();
+}
+
+// Chaque seconde (Entretien, bus allume ou eteint) : envois differes dus, reaffirmation des
+// ambiances, echeances ; deconnexion (ambiances, musiques, declencheurs) et changement de carte
+// (ambiances, declencheurs).
+void SuivreEvenements()
+{
+    if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
+        return;
+    uint32 const maintenant = Maintenant();
+    uint32 const maintenantMs = getMSTime();
+
+    // 1. Envois differes : le declencheur existe depuis au moins EV_ENVOI_DIFFERE_MS.
+    for (auto it = evEnvois.begin(); it != evEnvois.end();)
+    {
+        if (getMSTimeDiff(it->poseMs, maintenantMs) < EV_ENVOI_DIFFERE_MS)
+        {
+            ++it;
+            continue;
+        }
+        Player* p = ObjectAccessor::FindPlayerByLowGUID(it->joueur);
+        Creature* d = p && p->IsInWorld() ? ObjectAccessor::GetCreature(*p, it->guid) : nullptr;
+        if (d)
+        {
+            if (it->kit)
+                EnvoyerKit(p, it->guid, it->valeur);
+            else
+                d->PlayDistanceSound(it->valeur, p);
+        }
+        LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action={} lieu=declencheur joueur={} valeur={}"
+                 " motif={}", it->id, it->kit ? "effet" : "son", it->joueur, it->valeur, d ? "envoye" : "perdu");
+        it = evEnvois.erase(it);
+    }
+
+    // 2. Ambiances.
+    uint32 const periodeMs = sPlayerbotAIConfig.directeurEvenementReaffirmationSecondes * IN_MILLISECONDS;
+    struct FinA { EvAmbiance a; char const* motif; bool retirer; };
+    std::vector<FinA> finsA;
+    for (auto it = evAmbiances.begin(); it != evAmbiances.end();)
+    {
+        EvAmbiance& a = it->second;
+        Player* p = JoueurConnecte(it->first);
+        char const* motif = nullptr;
+        if (!p)
+            motif = "hors_ligne";
+        else if (!p->IsInWorld() || p->IsBeingTeleported())
+        {
+            ++it;
+            continue;
+        }
+        else if (p->GetMapId() != a.carte)
+            motif = "carte";
+        else if (a.finS <= maintenant)
+            motif = "echue";
+        if (motif)
+        {
+            finsA.push_back(FinA{a, motif, p != nullptr});
+            it = evAmbiances.erase(it);
+            continue;
+        }
+        if (getMSTimeDiff(a.dernierMs, maintenantMs) >= periodeMs)
+        {
+            // Mort : AddAura refuse (Unit.cpp) ; la pose suivante la rendra au vivant.
+            if (p->IsAlive())
+                PoserAureAmbiance(p, a);
+            a.dernierMs = maintenantMs;
+        }
+        ++it;
+    }
+    for (FinA const& f : finsA)
+    {
+        if (std::string_view(f.motif) == "echue")
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECHUES);
+        FinirAmbiance(f.a, nullptr, nullptr, f.motif, f.retirer);
+    }
+
+    // 3. Musiques et declencheurs echus : rien a envoyer (la musique va a son terme, le
+    // TempSummon s'efface seul) ; le registre les oublie. Un declencheur dont le joueur est
+    // parti (hors ligne, autre carte) est EFFACE aussitot : il ne compte plus dans les quotas.
+    for (auto it = evMusiques.begin(); it != evMusiques.end();)
+    {
+        bool const parti = !JoueurConnecte(it->first);
+        if (parti || it->second.finS <= maintenant)
+        {
+            EvMusique const m = it->second;
+            it = evMusiques.erase(it);
+            FinirMusique(m, nullptr, nullptr, parti ? "hors_ligne" : "echue", false);
+        }
+        else
+            ++it;
+    }
+    for (auto it = evDeclencheurs.begin(); it != evDeclencheurs.end();)
+    {
+        Player* p = JoueurConnecte(it->joueur);
+        char const* motif = !p                                                    ? "hors_ligne"
+                            : (p->IsInWorld() && !p->IsBeingTeleported() &&
+                               p->GetMapId() != it->carte)                        ? "carte"
+                            : it->finS <= maintenant                              ? "echue"
+                                                                                  : nullptr;
+        if (motif)
+        {
+            EvDeclencheur const d = *it;
+            it = evDeclencheurs.erase(it);
+            FinirDeclencheur(d, nullptr, nullptr, motif, std::string_view(motif) != "echue");
+        }
+        else
+            ++it;
+    }
+}
+
 // ------------------------------------------------------------------ lot D4c : prime et morts tracees
 //
 // SPEC-directeur-D4.md § 3.3, § 6.2. DEUX ETATS NEUFS :
@@ -4429,6 +5147,8 @@ void Entretien(uint32 diff)
     // Lot D3 : ciels, meteos, paroles (fil monde seul).
     SuivreCiels();
     SuivreMeteos();
+    // Lot C des evenements : ambiances reaffirmees, envois differes, echeances.
+    SuivreEvenements();
     LivrerParoles();
     if (!aReconstruire.empty())
         Reconstruire();
@@ -4453,14 +5173,16 @@ void ExecuterLever(CoaDirCommande const& c)
                   LeverCielsSi([](Ciel const&) { return true; }, "lever") +
                   LeverMeteosSi([](MeteoJoueur const&) { return true; }, "lever") +
                   LeverParolesSi([](Parole const&) { return true; }, "lever") +
-                  LeverPrimesSi([](Prime const&) { return true; }, "lever")
+                  LeverPrimesSi([](Prime const&) { return true; }, "lever") +
+                  LeverEvenementsSi([](uint32, uint32) { return true; }, "lever")
             : LeverSi([&c](Treve const& t) { return t.id == c.cible; }, "lever") +
                   LeverSuspensionsSi([&c](Suspension const& s) { return s.id == c.cible; }, "lever") +
                   LeverAffectationsSi([&c](AffectationInterne const& f) { return f.a.id == c.cible; }, "lever") +
                   LeverCielsSi([&c](Ciel const& x) { return x.id == c.cible; }, "lever") +
                   LeverMeteosSi([&c](MeteoJoueur const& m) { return m.id == c.cible; }, "lever") +
                   LeverParolesSi([&c](Parole const& p) { return p.id == c.cible; }, "lever") +
-                  LeverPrimesSi([&c](Prime const& p) { return p.id == c.cible; }, "lever");
+                  LeverPrimesSi([&c](Prime const& p) { return p.id == c.cible; }, "lever") +
+                  LeverEvenementsSi([&c](uint32 id, uint32) { return id == c.cible; }, "lever");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     // Rien a lever n'est pas un refus : la consigne a pu echoir ou etre
     // remplacee entre-temps, et l'intention (qu'elle ne soit plus) est tenue.
@@ -6668,6 +7390,13 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "colonnes_recompense");
         return;
     }
+    // 3 quinquies (lot C des evenements, 04/10/2026). `evenement` sans la valeur d'ENUM au
+    // demarrage : il ne devrait pas exister en base, `texte`/`valeur` pourraient manquer.
+    if (VerbeEv(c.verbe) && (!source || !source->ColonnesEvenement() || !source->ColonnesD3()))
+    {
+        Refuser(c, "colonnes_evenement");
+        return;
+    }
     // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
     // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
     // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
@@ -6675,7 +7404,8 @@ void Recevoir(CoaDirCommande const& c)
     // Lot D4c : `prime` vise le joueur lui-meme (sa cible) ; `chasser` est
     // couvert par le test de `joueur` (le prime).
     bool const visePersonne = c.verbe == CoaDirVerbe::Treve || c.verbe == CoaDirVerbe::HeureDuJour ||
-                              c.verbe == CoaDirVerbe::Meteo || c.verbe == CoaDirVerbe::Prime;
+                              c.verbe == CoaDirVerbe::Meteo || c.verbe == CoaDirVerbe::Prime ||
+                              c.verbe == CoaDirVerbe::Evenement;   // lot C : vise le joueur lui-meme
     // Lot R3 : `recompenser` en est exempte aussi : une prime GAGNEE se paie, arret ou non.
     if (c.verbe != CoaDirVerbe::Repondre && c.verbe != CoaDirVerbe::Recompenser &&
         ((c.joueur && CoaDirecteur::EstArrete(c.joueur)) || (visePersonne && CoaDirecteur::EstArrete(c.cible))))
@@ -6730,6 +7460,9 @@ void Recevoir(CoaDirCommande const& c)
             break;
         case CoaDirVerbe::Recompenser:
             ExecuterRecompense(c);
+            break;
+        case CoaDirVerbe::Evenement:
+            ExecuterEvenement(c);
             break;
         default:
             Refuser(c, "verbe_eteint");   // inatteignable : VerbeImplemente l'a filtre
@@ -7167,6 +7900,8 @@ void CoaDirecteur::TraiterBus(uint32 diff)
         LeverParolesSi([](Parole const&) { return true; }, "bus_eteint");
         // Lot D4c : les chasseurs sont deja leves (affectations) ; la prime aussi.
         LeverPrimesSi([](Prime const&) { return true; }, "bus_eteint");
+        // Lot C des evenements : aures retirees, musiques coupees, declencheurs effaces.
+        LeverEvenementsSi([](uint32, uint32) { return true; }, "bus_eteint");
         PurgerMortsEnTrajet();
         PurgerPactes();
         ViderPreparations("bus_eteint");
@@ -7741,7 +8476,9 @@ public:
             LeverParolesSi([guidLow](Parole const& p) { return p.joueur == guidLow; }, "arret") +
             // Lot D4c : sa prime (ses chasseurs, affectations de joueur = lui,
             // sont deja leves `arret` juste au-dessus).
-            LeverPrimesSi([guidLow](Prime const& p) { return p.joueur == guidLow; }, "arret");
+            LeverPrimesSi([guidLow](Prime const& p) { return p.joueur == guidLow; }, "arret") +
+            // Lot C des evenements : son ambiance, sa musique, ses declencheurs.
+            LeverEvenementsSi([guidLow](uint32, uint32 joueur) { return joueur == guidLow; }, "arret");
         if (levees)
             LOG_INFO("playerbots", "coa directeur : stop de {} leve {} consigne(s)", guidLow, levees);
         if (!DemandeArretTropTot(guidLow, true))
