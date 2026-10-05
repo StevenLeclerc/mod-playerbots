@@ -3677,12 +3677,20 @@ AiPlayerbot.Directeur.EvenementDeclencheursParJoueur = 8
 #        (n monstres 1-6 de l'entree `valeur`, au point carte/x/y/z disperses dans `rayon` 0-15 yd, niveau
 #        du joueur + d (-1, 0, +1), vie `duree_s` 60-3600 s hors combat, vue scene|hors_vue, arrivee
 #        aucune|naissance), `ordre:attaquer|tenir|errer|charger_vers` (`valeur` = id de l'invocation,
-#        0 = toutes celles du joueur) et `retirer` / `retirer:immediat`. 0 : invoquer et ordre refuses
-#        `apparitions_eteintes` (retirer reste permis). Levee immediate sur lever, stop, bus eteint,
-#        deconnexion et changement de carte du joueur. Ligne `coa directeur evenement: ... sous_action=
-#        invoquer ... posees= tues= tues_humain= tues_bot= disparus= retires=` a la levee et a la fin.
+#        0 = toutes celles du joueur) et `retirer` / `retirer:immediat`.
+#        ETEINT (0) : invoquer et ordre refuses `apparitions_eteintes` ; retirer reste PERMIS et execute
+#        (menage : exempt aussi du budget, de l'arret et de l'interrupteur du verbe) ; l'exclusion
+#        d'echelle du coeur (CanScale) vaut quelle que soit cette option (sans effet sans gabarit en base).
+#        Point hors sanctuaire, capitale et lieu sans JcJ (refus `lieu`). Levee immediate sur lever,
+#        stop, bus eteint, deconnexion et changement de carte du joueur, renforts SmartAI compris.
+#        Ligne `coa directeur evenement: ... sous_action=invoquer ... posees= tues= tues_humain= tues_bot=
+#        disparus= retires= renforts=` a la levee et a la fin.
 #        Exige l'exclusion de la plage 9100000-9109999 de l'echelle de niveau (mod-ascension-compat,
-#        CanScale) dans le MEME binaire : sans elle, chaque invocation est refusee `echelle`.
+#        CanScale) dans le MEME binaire. Sans elle, l'invocation PASSE (notre niveau gagne a la creation)
+#        puis OnAllCreatureUpdate d'Ascension reecrit le niveau : chaque invoque est alors RETIRE a la
+#        seconde suivante (`motif=echelle`). Preuve avant d'allumer : objdump (docs/EVENEMENTS-lot-D.md).
+#        Lue par PlayerbotAIConfig::Initialize seulement : `.reload config` SEUL ne change rien, il faut
+#        `reload config` PUIS `playerbots rndbot reload` (allumage comme retour arriere).
 #        Default: 0
 AiPlayerbot.Directeur.EvenementApparitions = 0
 
