@@ -3798,8 +3798,20 @@ void RefuserEvenement(CoaDirCommande const& c, EvLu const& lu, char const* raiso
     Refuser(c, raison);
 }
 
+// Lot D des evenements (05/10/2026) : definis plus bas, APRES le lot C (bloc « lot D des evenements »).
+bool EstApparition(std::string const& t);
+void ExecuterApparition(CoaDirCommande const& c);
+template <typename Predicat>
+size_t LeverInvoquesSi(Predicat lever, char const* raison);
+
 void ExecuterEvenement(CoaDirCommande const& c)
 {
+    // Lot D (05/10/2026) : invoquer, ordre, retirer ont leur propre grammaire et leurs gardes.
+    if (EstApparition(c.texte))
+    {
+        ExecuterApparition(c);
+        return;
+    }
     EvLu lu;
     if (!TexteBusValide(c.texte) || !LireSousAction(c.texte, lu))
     {
@@ -4045,8 +4057,10 @@ void ExecuterEvenement(CoaDirCommande const& c)
 template <typename Predicat>
 size_t LeverEvenementsSi(Predicat lever, char const* raison)
 {
+    // Lot D : les invoques d'abord (retrait immediat, ligne `tues=` par lot).
+    size_t const invoques = LeverInvoquesSi(lever, raison);
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
-        return 0;
+        return invoques;
     std::vector<EvAmbiance> ambiances;
     for (auto it = evAmbiances.begin(); it != evAmbiances.end();)
     {
@@ -4098,7 +4112,7 @@ size_t LeverEvenementsSi(Predicat lever, char const* raison)
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
         FinirDeclencheur(d, "leve", raison, raison, true);
     }
-    return ambiances.size() + musiques.size() + declencheurs.size();
+    return invoques + ambiances.size() + musiques.size() + declencheurs.size();
 }
 
 // Chaque seconde (Entretien, bus allume ou eteint) : envois differes dus, reaffirmation des
@@ -4206,6 +4220,686 @@ void SuivreEvenements()
         }
         else
             ++it;
+    }
+}
+
+// ------------------------------------------------------------------ lot D des evenements (05/10/2026) : apparitions
+//
+// coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.5 (monstres), § 2.6 (ordres), § 2.10 (retirer),
+// § 5.2 (lot D reduit a E4 pour la Faille d'orage) ; compte rendu : docs/EVENEMENTS-lot-D.md.
+// Trois sous-actions de plus au verbe `evenement`, ETEINTES tant que Directeur.EvenementApparitions = 0
+// (`retirer` excepte : il ne pose rien) :
+//   invoquer:<n>:<d>:<vue>:<arrivee>
+//        n monstres (1-6) de l'entree `valeur` -- liste blanche EvenementCreatures ET plage
+//        9100000-9109999 imposee (exclue de l'echelle de niveau par mod-ascension-compat, CanScale) --
+//        au point carte/x/y/z (sol controle, a EvenementInvocationDistanceYd du joueur au plus),
+//        disperses dans `rayon` (0-15 yd) ; niveau = niveau du joueur + d (d : -1, 0, +1), pose par le
+//        crochet OnBeforeCreatureSelectLevel de ce fichier ; vie `duree_s` (60-3600 s) en
+//        TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT (4, grimoire § 2.5 ; la seule forme permise) ; vue
+//        `scene` (mise en scene) ou `hors_vue` (refus `vue` si un humain est a moins de 110 yd du
+//        point, regle V6) ; arrivee `aucune` ou `naissance` (7398 lance par l'invoque sur lui-meme, si
+//        EvenementSortsArrivee le permet). Jamais visibleBySummonerOnly ni phase : les bots le voient.
+//        Map::SummonCreature SANS invocateur : aucun lien au joueur (ni m_CreatedByPlayer, ni crochet
+//        OnPlayerBeforeTempSummonInitStats). Tout ou rien : un echec en cours retire ceux deja poses.
+//   ordre:attaquer | ordre:tenir | ordre:errer | ordre:charger_vers
+//        `valeur` = id de la commande `invoquer` visee, 0 = tous les invoques vivants du joueur.
+//        attaquer : AttackStart sur le joueur `cible` ; tenir : reste sur place (foyer = position,
+//        mouvement de repos) ; errer : erre dans `rayon` (3-30 yd) autour de sa position ;
+//        charger_vers : court au point carte/x/y/z (foyer = ce point). Hors combat seulement, sauf
+//        attaquer. Liste fermee : `tenir` et `charger_vers` sont ceux du grimoire (§ 2.6) ; `attaquer`
+//        et `errer` sont le minimum demande au lot ; fuir_*, etat et faction ne sont pas faits.
+//   retirer | retirer:immediat
+//        `valeur` = id de la commande `invoquer`, 0 = tous ceux du joueur. `retirer` attend qu'aucun
+//        humain ne voie l'invoque (portee de vue de la carte + 10 yd), EV_RETRAIT_HORS_VUE_MAX_S au
+//        plus ; `retirer:immediat` : tout de suite (issues `immediat`, grimoire § 2.10).
+// Registre au FIL MONDE seul (P-137) ; morts relevees chaque seconde par lecture (aucun crochet de
+// mort : la creature est lue sur le fil monde, cartes a l'arret). Levee immediate sur lever, stop
+// (arret), bus eteint, deconnexion et changement de carte du joueur. Journal :
+// `coa directeur evenement: id= sous_action=invoquer joueur= valeur= motif= posees= tues= tues_humain=
+// tues_bot= disparus= retires=` a la levee et a la fin ; `tues_humain`/`tues_bot` : le joueur qui a
+// marque la creature (GetLootRecipient, premier frappeur) ; le reste des tues n'a aucun joueur marqueur.
+
+constexpr uint32 EV_ENTREE_MIN = 9100000;           // plage des gabarits d'evenement (grimoire § 2.5, § 5.5)
+constexpr uint32 EV_ENTREE_MAX = 9109999;
+constexpr uint32 EV_INVOQUER_NOMBRE_MAX = 6;         // grimoire § 2.5 : 6 monstres par groupe et par etape
+constexpr float EV_INVOQUER_DISPERSION_MAX_YD = 15.0f;
+constexpr float EV_INVOQUER_DISPERSION_MIN_YD = 2.0f;   // plusieurs monstres : jamais empiles
+constexpr uint32 EV_INVOQUER_VIE_MIN_S = 60;
+constexpr float EV_HORS_VUE_YD = 110.0f;             // regle V6
+constexpr float EV_ERRER_MIN_YD = 3.0f;
+constexpr float EV_ERRER_MAX_YD = 30.0f;
+constexpr uint32 EV_RETRAIT_HORS_VUE_MAX_S = 300;    // au-dela, retire meme vu
+constexpr float EV_VU_MARGE_YD = 10.0f;
+constexpr size_t EV_INVOQUES_MAX = 64;               // tout le royaume
+constexpr uint32 EV_SORT_NAISSANCE = 7398;           // « Birth », effet 46, le monstre sur lui-meme
+
+// Niveau impose au monstre en cours de creation (Map::SummonCreature -> Creature::Create ->
+// UpdateEntry -> SelectLevel -> OnBeforeCreatureSelectLevel). Pose par le fil monde autour de l'appel
+// seulement ; thread_local : un fil de carte qui cree une creature au meme instant lit toujours 0.
+thread_local uint8 evNiveauForce = 0;
+
+enum class EvApp : uint8 { Aucune, Invoquer, Ordre, Retirer };
+enum class EvOrdre : uint8 { Aucun, Attaquer, Tenir, Errer, ChargerVers };
+
+struct EvAppLu
+{
+    EvApp sous = EvApp::Aucune;
+    uint32 nombre = 0;
+    int32 delta = 0;
+    bool horsVue = false;
+    bool naissance = false;
+    EvOrdre ordre = EvOrdre::Aucun;
+    bool immediat = false;
+};
+
+char const* NomEvOrdre(EvOrdre o)
+{
+    switch (o)
+    {
+        case EvOrdre::Attaquer:    return "attaquer";
+        case EvOrdre::Tenir:       return "tenir";
+        case EvOrdre::Errer:       return "errer";
+        case EvOrdre::ChargerVers: return "charger_vers";
+        default:                   return "-";
+    }
+}
+
+char const* NomEvApp(EvApp s)
+{
+    return s == EvApp::Invoquer ? "invoquer" : s == EvApp::Ordre ? "ordre" : s == EvApp::Retirer ? "retirer" : "inconnue";
+}
+
+// Le `texte` releve-t-il du lot D ? (prefixe seul : la grammaire est lue par LireApparition)
+bool EstApparition(std::string const& t)
+{
+    return t == "retirer" || t.rfind("retirer:", 0) == 0 || t.rfind("ordre:", 0) == 0 ||
+           t.rfind("invoquer:", 0) == 0;
+}
+
+// Grammaire FERMEE, casse exacte ; tout le reste : faux (refus `texte`).
+bool LireApparition(std::string const& t, EvAppLu& lu)
+{
+    lu = EvAppLu();
+    if (t == "retirer")          { lu.sous = EvApp::Retirer; return true; }
+    if (t == "retirer:immediat") { lu.sous = EvApp::Retirer; lu.immediat = true; return true; }
+    if (t == "ordre:attaquer")     { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::Attaquer; return true; }
+    if (t == "ordre:tenir")        { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::Tenir; return true; }
+    if (t == "ordre:errer")        { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::Errer; return true; }
+    if (t == "ordre:charger_vers") { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::ChargerVers; return true; }
+    static constexpr char const PREFIXE[] = "invoquer:";
+    size_t const n = sizeof(PREFIXE) - 1;
+    if (t.size() <= n || t.compare(0, n, PREFIXE) != 0)
+        return false;
+    std::vector<std::string> morceaux;
+    size_t debut = n;
+    while (true)
+    {
+        size_t const fin = t.find(':', debut);
+        morceaux.push_back(t.substr(debut, fin == std::string::npos ? std::string::npos : fin - debut));
+        if (fin == std::string::npos)
+            break;
+        debut = fin + 1;
+    }
+    if (morceaux.size() != 4)
+        return false;
+    // n : un seul chiffre, 1 a 6.
+    if (morceaux[0].size() != 1 || morceaux[0][0] < '1' || morceaux[0][0] > char('0' + EV_INVOQUER_NOMBRE_MAX))
+        return false;
+    lu.nombre = uint32(morceaux[0][0] - '0');
+    if (morceaux[1] == "-1")
+        lu.delta = -1;
+    else if (morceaux[1] == "0")
+        lu.delta = 0;
+    else if (morceaux[1] == "+1")
+        lu.delta = 1;
+    else
+        return false;
+    if (morceaux[2] == "hors_vue")
+        lu.horsVue = true;
+    else if (morceaux[2] != "scene")
+        return false;
+    if (morceaux[3] == "naissance")
+        lu.naissance = true;
+    else if (morceaux[3] != "aucune")
+        return false;
+    lu.sous = EvApp::Invoquer;
+    return true;
+}
+
+struct EvInvoque
+{
+    uint32 id;               // commande `invoquer`
+    uint32 joueur;
+    ObjectGuid guid;
+    uint32 carte;
+    uint32 entree;
+    uint8 niveau;            // niveau pose ; un autre lu plus tard : `echelle` au journal (une fois)
+    bool mort = false;
+    bool echelleSignalee = false;
+    uint32 retraitDepuisS = 0;   // Maintenant() de la demande de retrait hors de vue ; 0 : aucune
+};
+std::vector<EvInvoque> evInvoques;                    // fil monde seul
+
+struct EvLot
+{
+    uint32 id;
+    uint32 joueur;
+    uint32 entree;
+    uint32 posees = 0;
+    uint32 tues = 0;
+    uint32 tuesHumain = 0;
+    uint32 tuesBot = 0;
+    uint32 disparus = 0;     // disparus sans qu'on les ait vus morts ni retires (echeance, grille dechargee)
+    uint32 retires = 0;
+    bool retraitDemande = false;
+};
+std::unordered_map<uint32, EvLot> evLots;            // cle : id de la commande `invoquer` ; fil monde seul
+
+Creature* CreatureInvoquee(EvInvoque const& v)
+{
+    Map* map = sMapMgr->FindBaseNonInstanceMap(v.carte);
+    return map ? map->GetCreature(v.guid) : nullptr;
+}
+
+// Un humain en vue de la creature (portee de vue de la carte + marge) ?
+bool VueDUnHumain(Creature* cr)
+{
+    Map* map = cr->GetMap();
+    float const portee = map->GetVisibilityRange() + EV_VU_MARGE_YD;
+    for (auto const& ref : map->GetPlayers())
+    {
+        Player* p = ref.GetSource();
+        if (p && p->IsInWorld() && Humain(p) && cr->IsWithinDist(p, portee))
+            return true;
+    }
+    return false;
+}
+
+bool HumainAMoinsDe(Map* map, float x, float y, float z, float yd)
+{
+    for (auto const& ref : map->GetPlayers())
+    {
+        Player* p = ref.GetSource();
+        if (p && p->IsInWorld() && Humain(p) && p->GetExactDist(x, y, z) <= yd)
+            return true;
+    }
+    return false;
+}
+
+uint32 InvoquesVivantsDe(uint32 joueur)
+{
+    uint32 n = 0;
+    for (EvInvoque const& v : evInvoques)
+        if (v.joueur == joueur && !v.mort)
+            ++n;
+    return n;
+}
+
+void JournaliserLot(EvLot const& l, char const* motif)
+{
+    LOG_INFO("playerbots",
+             "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif={} posees={} tues={}"
+             " tues_humain={} tues_bot={} disparus={} retires={}",
+             l.id, l.joueur, l.entree, motif, l.posees, l.tues, l.tuesHumain, l.tuesBot, l.disparus, l.retires);
+}
+
+// Premiere lecture d'un invoque mort : compte au lot, avec le joueur qui l'avait marque.
+void NoterMort(EvInvoque& v, Creature* cr)
+{
+    v.mort = true;
+    auto it = evLots.find(v.id);
+    if (it == evLots.end())
+        return;
+    ++it->second.tues;
+    if (Player* marqueur = cr->GetLootRecipient())
+    {
+        if (Humain(marqueur))
+            ++it->second.tuesHumain;
+        else
+            ++it->second.tuesBot;
+    }
+}
+
+// Retire l'invoque (s'il existe encore) et tient les comptes du lot. Le lot n'est pas efface ici.
+void EffacerInvoque(EvInvoque& v)
+{
+    auto it = evLots.find(v.id);
+    Creature* cr = CreatureInvoquee(v);
+    if (!cr)
+    {
+        if (!v.mort && it != evLots.end())
+            ++it->second.disparus;
+        return;
+    }
+    if (!v.mort && !cr->IsAlive())
+        NoterMort(v, cr);
+    cr->DespawnOrUnsummon();
+    if (it != evLots.end())
+        ++it->second.retires;
+}
+
+// Retrait IMMEDIAT de tout invoque et de tout lot pour lesquels `lever(id, joueur)` est vrai ;
+// chaque lot leve est journalise (tues=) et clos `leve`. Rend le nombre de lots leves.
+template <typename Predicat>
+size_t LeverInvoquesSi(Predicat lever, char const* raison)
+{
+    if (evInvoques.empty() && evLots.empty())
+        return 0;
+    std::vector<EvInvoque> partis;
+    for (auto it = evInvoques.begin(); it != evInvoques.end();)
+    {
+        if (lever(it->id, it->joueur))
+        {
+            partis.push_back(*it);
+            it = evInvoques.erase(it);
+        }
+        else
+            ++it;
+    }
+    for (EvInvoque& v : partis)
+        EffacerInvoque(v);
+    std::vector<EvLot> lots;
+    for (auto it = evLots.begin(); it != evLots.end();)
+    {
+        if (lever(it->first, it->second.joueur))
+        {
+            lots.push_back(it->second);
+            it = evLots.erase(it);
+        }
+        else
+            ++it;
+    }
+    for (EvLot const& l : lots)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        JournaliserLot(l, raison);
+        CloreEvenement(l.id, l.joueur, "leve", raison);
+    }
+    return lots.size();
+}
+
+void RefuserApparition(CoaDirCommande const& c, EvAppLu const& lu, char const* raison)
+{
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action={} ordre={} joueur={} valeur={} motif={}",
+             c.id, NomEvApp(lu.sous), NomEvOrdre(lu.ordre), c.cible, c.valeur, raison);
+    Refuser(c, raison);
+}
+
+// Point d'apparition ou de course : sur la carte du joueur, a la portee d'invocation, sur un sol sec
+// proche du z du service. Rend le sol dans `sol` ; faux : `raison` dit pourquoi.
+bool PointApparition(CoaDirCommande const& c, Player* p, float& sol, char const*& raison)
+{
+    float const portee = float(sPlayerbotAIConfig.directeurEvenementInvocationDistanceYd);
+    // Distance AVANT le sol : SolSec cree la grille (voir SolSec).
+    if (c.carte != p->GetMapId() || !std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) ||
+        p->GetExactDist2d(c.x, c.y) > portee)
+    {
+        raison = "distance";
+        return false;
+    }
+    if (c.z < POSE_Z_INCONNU_MAX || !SolSec(p->GetMap(), c.x, c.y, c.z, sol) || std::fabs(sol - c.z) > EV_SOL_ECART_MAX_YD)
+    {
+        raison = "sol";
+        return false;
+    }
+    return true;
+}
+
+void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
+{
+    uint32 const entree = static_cast<uint32>(c.valeur);
+    if (entree < EV_ENTREE_MIN || entree > EV_ENTREE_MAX ||
+        !IdDeListe(sPlayerbotAIConfig.directeurEvenementCreatures, entree) || c.dureeS < EV_INVOQUER_VIE_MIN_S ||
+        c.dureeS > EV_DUREE_MAX_S || !std::isfinite(c.rayon) || c.rayon < 0.0f ||
+        c.rayon > EV_INVOQUER_DISPERSION_MAX_YD ||
+        (lu.naissance && !IdDeListe(sPlayerbotAIConfig.directeurEvenementSortsArrivee, EV_SORT_NAISSANCE)))
+    {
+        RefuserApparition(c, lu, "liste_blanche_ou_bornes");
+        return;
+    }
+    if (!sObjectMgr->GetCreatureTemplate(entree))
+    {
+        RefuserApparition(c, lu, "gabarit");   // lot E (donnees) absent
+        return;
+    }
+    float sol = 0.0f;
+    char const* raison = nullptr;
+    if (!PointApparition(c, p, sol, raison))
+    {
+        RefuserApparition(c, lu, raison);
+        return;
+    }
+    Map* map = p->GetMap();
+    if (lu.horsVue && HumainAMoinsDe(map, c.x, c.y, sol, EV_HORS_VUE_YD))
+    {
+        RefuserApparition(c, lu, "vue");
+        return;
+    }
+    if (evInvoques.size() + lu.nombre > EV_INVOQUES_MAX ||
+        InvoquesVivantsDe(c.cible) + lu.nombre > sPlayerbotAIConfig.directeurEvenementInvoquesParJoueur)
+    {
+        RefuserApparition(c, lu, "plein");
+        return;
+    }
+    if (evLots.count(c.id))
+    {
+        RefuserApparition(c, lu, "deja_pose");   // inatteignable : une commande n'est livree qu'une fois
+        return;
+    }
+    uint32 const niveauMax = std::min<uint32>(sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL), 80u);
+    uint8 const niveau = static_cast<uint8>(std::clamp<int32>(int32(p->GetLevel()) + lu.delta, 1, int32(niveauMax)));
+    float const dispersion = lu.nombre > 1 ? std::max(c.rayon, EV_INVOQUER_DISPERSION_MIN_YD) : c.rayon;
+    uint32 const vieMs = c.dureeS * IN_MILLISECONDS;
+
+    std::vector<EvInvoque> poses;
+    char const* echec = nullptr;
+    for (uint32 i = 0; i < lu.nombre && !echec; ++i)
+    {
+        float x = c.x, y = c.y, z = sol;
+        if (dispersion > 0.0f)
+        {
+            float const part = 2.0f * float(M_PI) / float(lu.nombre);
+            float const angle = part * float(i) + frand(0.0f, part);
+            float const d = dispersion * frand(0.5f, 1.0f);
+            float const tx = c.x + d * std::cos(angle);
+            float const ty = c.y + d * std::sin(angle);
+            float solI = 0.0f;
+            // Sol du point disperse proche du sol du centre ; sinon, le centre (deja controle).
+            if (SolSec(map, tx, ty, sol, solI) && std::fabs(solI - sol) <= EV_SOL_ECART_MAX_YD)
+            {
+                x = tx;
+                y = ty;
+                z = solI;
+            }
+        }
+        float const face = std::atan2(p->GetPositionY() - y, p->GetPositionX() - x);
+        evNiveauForce = niveau;
+        TempSummon* s = map->SummonCreature(entree, Position(x, y, z, face), nullptr, vieMs, nullptr);
+        evNiveauForce = 0;
+        if (!s)
+        {
+            echec = "invocation";
+            break;
+        }
+        // Forme du coeur (WorldObject::SummonCreature) : le type se pose apres InitStats.
+        s->SetTempSummonType(TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT);
+        EvInvoque v;
+        v.id = c.id;
+        v.joueur = c.cible;
+        v.guid = s->GetGUID();
+        v.carte = p->GetMapId();
+        v.entree = entree;
+        v.niveau = niveau;
+        poses.push_back(v);
+        // Preuve de l'exclusion de l'echelle de niveau, a chaque pose : un autre niveau veut dire
+        // qu'un crochet l'a reecrit (mod-ascension-compat sans l'exclusion de la plage).
+        if (s->GetLevel() != niveau)
+        {
+            LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif=echelle"
+                     " niveau_voulu={} niveau_lu={}", c.id, c.cible, entree, niveau, s->GetLevel());
+            echec = "echelle";
+            break;
+        }
+        if (lu.naissance)
+            s->CastSpell(s, EV_SORT_NAISSANCE, true);   // rendu SUPPOSE (banc du 04/10 : « on voit rien » par .aura)
+    }
+    if (echec)
+    {
+        for (EvInvoque const& v : poses)
+            if (Creature* cr = CreatureInvoquee(v))
+                cr->DespawnOrUnsummon();
+        RefuserApparition(c, lu, echec);
+        return;
+    }
+    EvLot l;
+    l.id = c.id;
+    l.joueur = c.cible;
+    l.entree = entree;
+    l.posees = uint32(poses.size());
+    evLots[c.id] = l;
+    evInvoques.insert(evInvoques.end(), poses.begin(), poses.end());
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots",
+             "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif=pose posees={} niveau={}"
+             " duree_s={} dispersion={:.1f} vue={} arrivee={} x={:.1f} y={:.1f} z={:.1f}",
+             c.id, c.cible, entree, poses.size(), niveau, c.dureeS, dispersion, lu.horsVue ? "hors_vue" : "scene",
+             lu.naissance ? "naissance" : "aucune", c.x, c.y, sol);
+    Accuser(c, "execute", nullptr);
+}
+
+void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
+{
+    uint32 const vise = static_cast<uint32>(c.valeur);   // 0 : tous les invoques du joueur
+    float sol = 0.0f;
+    if (lu.ordre == EvOrdre::Errer &&
+        (!std::isfinite(c.rayon) || c.rayon < EV_ERRER_MIN_YD || c.rayon > EV_ERRER_MAX_YD))
+    {
+        RefuserApparition(c, lu, "liste_blanche_ou_bornes");
+        return;
+    }
+    if (lu.ordre == EvOrdre::ChargerVers)
+    {
+        char const* raison = nullptr;
+        if (!PointApparition(c, p, sol, raison))
+        {
+            RefuserApparition(c, lu, raison);
+            return;
+        }
+    }
+    if (lu.ordre == EvOrdre::Attaquer && !p->IsAlive())
+    {
+        RefuserApparition(c, lu, "mort");
+        return;
+    }
+    uint32 vises = 0, appliques = 0;
+    for (EvInvoque const& v : evInvoques)
+    {
+        if (v.joueur != c.cible || v.mort || (vise && v.id != vise))
+            continue;
+        ++vises;
+        Creature* cr = CreatureInvoquee(v);
+        if (!cr || !cr->IsAlive())
+            continue;
+        if (lu.ordre == EvOrdre::Attaquer)
+        {
+            if (cr->AI() && cr->GetMapId() == p->GetMapId() && cr->IsValidAttackTarget(p))
+            {
+                cr->AI()->AttackStart(p);
+                ++appliques;
+            }
+            continue;
+        }
+        if (cr->IsInCombat())
+            continue;   // un combat en cours n'est jamais interrompu
+        MotionMaster* mm = cr->GetMotionMaster();
+        switch (lu.ordre)
+        {
+            case EvOrdre::Tenir:
+                cr->SetHomePosition(cr->GetPosition());
+                cr->SetDefaultMovementType(IDLE_MOTION_TYPE);
+                mm->Clear();
+                mm->MoveIdle();
+                break;
+            case EvOrdre::Errer:
+                cr->SetHomePosition(cr->GetPosition());
+                cr->SetWanderDistance(c.rayon);
+                cr->SetDefaultMovementType(RANDOM_MOTION_TYPE);
+                mm->Clear();
+                mm->MoveRandom(c.rayon);
+                break;
+            case EvOrdre::ChargerVers:
+                cr->SetHomePosition(c.x, c.y, sol, cr->GetOrientation());
+                cr->SetDefaultMovementType(IDLE_MOTION_TYPE);
+                mm->Clear();
+                mm->MovePoint(0, c.x, c.y, sol);
+                break;
+            default:
+                break;
+        }
+        ++appliques;
+    }
+    if (!vises)
+    {
+        RefuserApparition(c, lu, "aucun_invoque");
+        return;
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=ordre ordre={} joueur={} valeur={} motif=pose"
+             " vises={} appliques={}", c.id, NomEvOrdre(lu.ordre), c.cible, vise, vises, appliques);
+    Accuser(c, "execute", appliques ? nullptr : "aucun_applique");
+}
+
+void ExecuterRetirer(CoaDirCommande const& c, EvAppLu const& lu)
+{
+    uint32 const vise = static_cast<uint32>(c.valeur);   // 0 : tous ceux du joueur
+    uint32 const joueur = c.cible;
+    // `vises` : les invoques du joueur designes (morts compris), dans les deux formes.
+    size_t n = static_cast<size_t>(std::count_if(evInvoques.begin(), evInvoques.end(), [vise, joueur](EvInvoque const& v)
+                                                 { return v.joueur == joueur && (!vise || v.id == vise); }));
+    if (lu.immediat)
+        LeverInvoquesSi([vise, joueur](uint32 id, uint32 j) { return j == joueur && (!vise || id == vise); }, "retirer");
+    else
+    {
+        uint32 const maintenant = Maintenant();
+        for (EvInvoque& v : evInvoques)
+            if (v.joueur == joueur && (!vise || v.id == vise) && !v.retraitDepuisS)
+                v.retraitDepuisS = std::max<uint32>(maintenant, 1);
+        for (auto& [id, l] : evLots)
+            if (l.joueur == joueur && (!vise || id == vise))
+                l.retraitDemande = true;
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=retirer joueur={} valeur={} motif=pose"
+             " immediat={} vises={}", c.id, joueur, vise, lu.immediat ? 1 : 0, n);
+    // Rien a retirer n'est pas un refus (meme regle que `lever`) : ils ont pu mourir ou s'effacer.
+    Accuser(c, "execute", n ? nullptr : "rien_a_retirer");
+}
+
+void ExecuterApparition(CoaDirCommande const& c)
+{
+    EvAppLu lu;
+    if (!TexteBusValide(c.texte) || !LireApparition(c.texte, lu))
+    {
+        RefuserApparition(c, lu, "texte");
+        return;
+    }
+    if (!CibleJoueurValide(c) || c.valeur < 0)
+    {
+        RefuserApparition(c, lu, "bornes");
+        return;
+    }
+    if (lu.sous == EvApp::Retirer)
+    {
+        ExecuterRetirer(c, lu);
+        return;
+    }
+    if (!sPlayerbotAIConfig.directeurEvenementApparitions)
+    {
+        RefuserApparition(c, lu, "apparitions_eteintes");
+        return;
+    }
+    if (lu.sous == EvApp::Invoquer && c.valeur == 0)
+    {
+        RefuserApparition(c, lu, "liste_blanche_ou_bornes");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        RefuserApparition(c, lu, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        RefuserApparition(c, lu, "pas_humain");
+        return;
+    }
+    if (!p->IsInWorld() || p->IsBeingTeleported() || !CarteDeSuspension(p->GetMapId()))
+    {
+        RefuserApparition(c, lu, "carte");
+        return;
+    }
+    if (lu.sous == EvApp::Invoquer)
+        ExecuterInvoquer(c, lu, p);
+    else
+        ExecuterOrdre(c, lu, p);
+}
+
+// Chaque seconde (Entretien, bus allume ou eteint) : joueur parti (hors ligne, autre carte) -> retrait
+// immediat ; morts relevees ; niveau surveille ; retraits hors de vue ; fins de lot.
+void SuivreInvoques()
+{
+    if (evInvoques.empty() && evLots.empty())
+        return;
+    uint32 const maintenant = Maintenant();
+
+    // 1. Fermetures implicites (grimoire § 1.3) : le joueur deconnecte ou change de carte.
+    std::vector<std::pair<uint32, char const*>> partis;
+    for (EvInvoque const& v : evInvoques)
+    {
+        if (std::any_of(partis.begin(), partis.end(), [&v](auto const& x) { return x.first == v.joueur; }))
+            continue;
+        Player* p = JoueurConnecte(v.joueur);
+        if (!p)
+            partis.emplace_back(v.joueur, "hors_ligne");
+        else if (p->IsInWorld() && !p->IsBeingTeleported() && p->GetMapId() != v.carte)
+            partis.emplace_back(v.joueur, "carte");
+    }
+    for (auto const& [joueur, motif] : partis)
+    {
+        uint32 const j = joueur;
+        LeverInvoquesSi([j](uint32, uint32 x) { return x == j; }, motif);
+    }
+
+    // 2. Chaque invoque.
+    for (auto it = evInvoques.begin(); it != evInvoques.end();)
+    {
+        EvInvoque& v = *it;
+        Creature* cr = CreatureInvoquee(v);
+        if (!cr)
+        {
+            auto l = evLots.find(v.id);
+            if (!v.mort && l != evLots.end())
+                ++l->second.disparus;
+            it = evInvoques.erase(it);
+            continue;
+        }
+        if (!v.mort && !cr->IsAlive())
+            NoterMort(v, cr);
+        else if (!v.mort && !v.echelleSignalee && cr->GetLevel() != v.niveau)
+        {
+            v.echelleSignalee = true;
+            LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif=echelle"
+                     " niveau_voulu={} niveau_lu={}", v.id, v.joueur, v.entree, v.niveau, cr->GetLevel());
+        }
+        if (v.retraitDepuisS &&
+            (maintenant - v.retraitDepuisS >= EV_RETRAIT_HORS_VUE_MAX_S || !VueDUnHumain(cr)))
+        {
+            EffacerInvoque(v);
+            it = evInvoques.erase(it);
+            continue;
+        }
+        ++it;
+    }
+
+    // 3. Lots vides : fin (morts et corps effaces, echus, ou retires hors de vue).
+    std::vector<EvLot> finis;
+    for (auto it = evLots.begin(); it != evLots.end();)
+    {
+        uint32 const id = it->first;
+        if (std::none_of(evInvoques.begin(), evInvoques.end(), [id](EvInvoque const& v) { return v.id == id; }))
+        {
+            finis.push_back(it->second);
+            it = evLots.erase(it);
+        }
+        else
+            ++it;
+    }
+    for (EvLot const& l : finis)
+    {
+        JournaliserLot(l, l.retraitDemande ? "retire" : "fin");
+        if (l.retraitDemande)
+            CloreEvenement(l.id, l.joueur, "leve", "retirer");
     }
 }
 
@@ -5149,6 +5843,8 @@ void Entretien(uint32 diff)
     SuivreMeteos();
     // Lot C des evenements : ambiances reaffirmees, envois differes, echeances.
     SuivreEvenements();
+    // Lot D des evenements : invoques (morts, retraits hors de vue, joueur parti, fins de lot).
+    SuivreInvoques();
     LivrerParoles();
     if (!aReconstruire.empty())
         Reconstruire();
@@ -8758,8 +9454,32 @@ public:
     }
 };
 
+// Lot D des evenements (05/10/2026) : le NIVEAU d'un monstre d'evenement. Creature::SelectLevel
+// (Creature.cpp) appelle OnBeforeCreatureSelectLevel pendant la creation (UpdateEntry). Seul
+// ExecuterInvoquer pose evNiveauForce, sur le fil monde et autour de son appel a
+// Map::SummonCreature ; partout ailleurs il vaut 0 et ce crochet ne fait rien. La plage
+// 9100000-9109999 est exclue de l'echelle de mod-ascension-compat (CanScale), qui sans cela
+// reecrirait le niveau a la creation puis chaque seconde : ExecuterInvoquer relit le niveau apres la
+// pose (refus `echelle`) et SuivreInvoques chaque seconde (ligne `motif=echelle`).
+class coa_directeur_niveau_creaturescript : public AllCreatureScript
+{
+public:
+    coa_directeur_niveau_creaturescript() : AllCreatureScript("coa_directeur_niveau_creaturescript") {}
+
+    void OnBeforeCreatureSelectLevel(CreatureTemplate const* /*cinfo*/, Creature* creature, uint8& level) override
+    {
+        if (!evNiveauForce || !creature)
+            return;
+        uint32 const entree = creature->GetEntry();
+        if (entree < EV_ENTREE_MIN || entree > EV_ENTREE_MAX)
+            return;
+        level = evNiveauForce;
+    }
+};
+
 void AddSC_coa_directeur()
 {
+    new coa_directeur_niveau_creaturescript();
     new coa_directeur_commandscript();
     new coa_directeur_worldscript();
     new coa_directeur_playerscript();
