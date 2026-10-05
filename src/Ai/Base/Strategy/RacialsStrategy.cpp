@@ -6,6 +6,11 @@
 
 #include "RacialsStrategy.h"
 #include "Playerbots.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
+
+#include <algorithm>
+#include <iterator>
 
 namespace
 {
@@ -97,7 +102,18 @@ void RacialsStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
             "medium health", { NextAction("gift of the naaru", ACTION_LIGHT_HEAL + 5) }));
     }
 
-    if (botAI->HasSpell("lifeblood"))
+    // CoA (2026-10-02) : le Lifeblood d'herboristerie (55428, 55480, 55500-55503) n'a AUCUN
+    // effet dans le Spell.dbc du serveur (Effect = 0 sur les trois). Lance, il ne soignerait
+    // rien, et l'action finissait IMPOSSIBLE a chaque tick « medium health » chez les
+    // herboristes. Le declencheur n'est donc pose que si le sort que « lifeblood » resout
+    // (la meme valeur « spell id » que l'action lancera) porte au moins un effet. Un sort
+    // resolu qui en a un, comme le Lifeblood 804963 des Venomancer, garde son declencheur
+    // tel quel.
+    uint32 const lifebloodId = botAI->HasSpell("lifeblood")
+        ? botAI->GetAiObjectContext()->GetValue<uint32>("spell id", "lifeblood")->Get() : 0;
+    SpellInfo const* const lifeblood = lifebloodId ? sSpellMgr->GetSpellInfo(lifebloodId) : nullptr;
+    if (lifeblood && std::any_of(std::begin(lifeblood->Effects), std::end(lifeblood->Effects),
+                                 [](SpellEffectInfo const& effect) { return effect.IsEffect(); }))
     {
         triggers.push_back(new TriggerNode(
             "medium health", { NextAction("lifeblood", ACTION_LIGHT_HEAL + 5) }));

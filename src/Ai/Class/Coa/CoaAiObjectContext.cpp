@@ -246,8 +246,45 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
     constexpr int32 LongAura = 5 * MINUTE * IN_MILLISECONDS;
     int32 const duration = info->GetMaxDuration();
 
+    // UN SORT QUI NEUTRALISE SON PROPRE LANCEUR N'EST JAMAIS UN BUFF (02/10/2026).
+    //
+    // Moon Gaze 562723 (Bloodmage, niveau 16, 70 personnages) porte trois auras sur le
+    // lanceur : MOD_SHAPESHIFT, DUMMY et MOD_STUN, pour 300 s, retirees seulement en
+    // entrant en combat JcJ (AuraInterruptFlags 0x00800000). Sa description : « While
+    // active, you are unable to move, attack, or cast spells or abilities. » C'est la
+    // bascule vers la barre de Cursed Form, que les bots n'utilisent pas. L'effet DUMMY
+    // suffisait pourtant a le classer KIND_BUFF ci-dessous (aura, sur soi, positif,
+    // >= 5 min, pas un shapeshift) : « coa buff » le relancait toutes les 270 s, et le
+    // bot restait etourdi et immobile, y compris quand une creature l'attaquait. Mesure
+    // le 02/10 : 37 personnages avec l'aura 562723 lancee par eux-memes ; les trois sorts
+    // les plus refuses de « coa attack failures » sont des sorts Bloodmage refuses
+    // STUNNED (Sanguine Rupture x61 467, Scarlet Delirium x57 172, Taldaram's Torment
+    // x23 129). Sur tous les sorts connus d'un personnage, Moon Gaze est le seul qui
+    // reunisse une aura d'incapacite sur le lanceur et une duree >= 5 min : le filtre ne
+    // touche rien d'autre. La racine n'est pas incluse : on lance encore enracine.
+    bool selfIncapacitating = false;
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect() || !IsAuraEffect(effect) || effect.TargetA.GetTarget() != TARGET_UNIT_CASTER)
+            continue;
+
+        switch (effect.ApplyAuraName)
+        {
+            case SPELL_AURA_MOD_STUN: case SPELL_AURA_MOD_PACIFY: case SPELL_AURA_MOD_SILENCE:
+            case SPELL_AURA_MOD_PACIFY_SILENCE: case SPELL_AURA_MOD_FEAR: case SPELL_AURA_MOD_CONFUSE:
+                selfIncapacitating = true;
+                break;
+            default:
+                break;
+        }
+    }
+
     // Only the ability itself: a spell it triggers is not the stance the bot stands in.
-    if (!depth && IsStance(info))
+    // Same rule for a stance as for a buff: one that incapacitates its caster would be
+    // taken out of combat and kept, and the bot with it. No such spell is known by any
+    // character today (releve du 02/10 : War Standards 801506, Power Cell 806624 et
+    // les autres candidats du DBC ne figurent dans aucun livre de sorts).
+    if (!depth && IsStance(info) && !selfIncapacitating)
         ability.kind |= KIND_STANCE;
 
     for (SpellEffectInfo const& effect : info->Effects)
@@ -324,7 +361,7 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
 
         // Stances and forms (no duration) are left out: two of them would take turns forever.
         if (aura && (self || ally) && !heal && info->IsPositive() && duration >= LongAura &&
-            effect.ApplyAuraName != SPELL_AURA_MOD_SHAPESHIFT)
+            effect.ApplyAuraName != SPELL_AURA_MOD_SHAPESHIFT && !selfIncapacitating)
             ability.kind |= KIND_BUFF;
 
         // A proc rider is not part of the cast: "when you hit, deal nature damage" describes
@@ -716,9 +753,16 @@ void DropManaSpells(Player* bot, std::vector<Usable>& spells)
 // niveau et la taille du livre de sorts, alors que la distance change a chaque tick.
 // Y porter le filtre empoisonnerait le cache.
 //
-// La portee MAXIMALE n'est volontairement pas filtree : un sort hors d'atteinte parce
-// que le bot est trop LOIN se corrige en s'approchant, et le retirer de la liste priverait
-// le moteur de la raison de le faire. Seul le « trop pres » est sans recours pour le bot.
+// La portee MAXIMALE est filtree depuis le 2026-10-02 (quatrieme passe, en bas). On
+// ecrivait ici qu'un sort trop LOIN « se corrige en s'approchant » et qu'il fallait le
+// laisser pour donner au moteur la raison d'avancer : c'etait faux. Le seul mouvement de
+// portee d'un bot CoA est « enemy out of spell » -> « reach spell », qui le place a
+// AiPlayerbot.SpellDistance (28.5 yd) sans rien lire de cette liste ; un sort a 20 yd
+// n'y entre donc jamais, et il etait refuse OUT_OF_RANGE a chaque tick.
+//
+// Les passes suivantes (deuxieme a quatrieme) ajoutent d'autres causes « ne peut pas
+// reussir ici » ; STUNNED et NO_POWER restent hors de ce filtre, pour la raison dite
+// plus haut.
 void DropUncastableHere(Player* bot, Unit* target, std::vector<Usable>& spells)
 {
     if (!bot || !target)
@@ -795,6 +839,103 @@ void DropUncastableHere(Player* bot, Unit* target, std::vector<Usable>& spells)
             return (info->FacingCasterFlags & SPELL_FACING_FLAG_INFRONT)
                 && !bot->HasInArc(static_cast<float>(M_PI), target)
                 && !bot->IsWithinBoundaryRadius(target);
+        }),
+        spells.end());
+
+    // Troisieme passe, ajoutee le 2026-10-02 : le TYPE de la cible, qui ne change pas
+    // d'un tick a l'autre. Releve « coa attack failures » du 02/10 20:58 UTC :
+    //
+    //   TARGET_IS_PLAYER   x19 721  Imprison (801067), « Imprison a Demon » :
+    //                               TargetCreatureType = 4 (demons seuls), tente
+    //                               sur des joueurs
+    //   TARGET_NOT_PLAYER  x21 034  Moonflow (575030), SPELL_ATTR3_ONLY_ON_PLAYER,
+    //                               tente sur des creatures
+    //
+    // Ni l'un ni l'autre n'est mis au banc (IsLastingFailure ne les connait pas) : le
+    // sort etait reverifie a chaque tick, Spell construit et CheckCast complet, pour un
+    // refus connu d'avance. Un Imprison tente sur un non-demon qui n'est pas un joueur
+    // rendait BAD_TARGETS et mettait le sort au banc 20 s, y compris contre le demon
+    // suivant.
+    //
+    // Recopie de SpellInfo::CheckTarget (SpellInfo.cpp), que Spell::CheckCast appelle
+    // sans condition sur la cible explicite : les trois tests ne dependent que du
+    // sort et de la cible. CheckTargetCreatureType est appele tel quel, avec son cas
+    // particulier (Curse of Doom) et le masque de type dynamique (une forme de demon
+    // rend Imprison valable sur un joueur).
+    spells.erase(std::remove_if(spells.begin(), spells.end(),
+        [bot, target](Usable const& spell)
+        {
+            // Le sort que CheckCast verra : le remplacant s'il y en a un (voir
+            // EffectiveSpell et StrictCheck). Un remplacant peut viser autre chose que
+            // le sort de base ; juger la base l'ecarterait a tort.
+            SpellInfo const* info = EffectiveSpell(bot, spell.info);
+
+            if (target->IsPlayer())
+            {
+                if (info->HasAttribute(SPELL_ATTR5_NOT_ON_PLAYER))
+                    return true;
+            }
+            else
+            {
+                if (info->HasAttribute(SPELL_ATTR3_ONLY_ON_PLAYER))
+                    return true;
+                if (info->HasAttribute(SPELL_ATTR5_NOT_ON_PLAYER_CONTROLLED_NPC) && target->IsControlledByPlayer())
+                    return true;
+            }
+
+            return !info->CheckTargetCreatureType(target);
+        }),
+        spells.end());
+
+    // Quatrieme passe, ajoutee le 2026-10-02 : la portee MAXIMALE. Refus OUT_OF_RANGE
+    // releves le 02/10 (port 8888 et CoaBots.log) : Hypovolemic Shock 572305, Leyfeed
+    // 520269 et Resonance Rune 803679 portent a 20 yd, Starsunder 802470 a 5 yd, Glacial
+    // Rune 807842 a 30 yd (au sol). Un bot a distance se tient a SpellDistance = 28.5 yd :
+    // il les tentait a chaque tick, Spell construit et CheckCast complet, pour un refus
+    // certain. Aucun changement de jeu : StrictCheck les refusait deja tous.
+    //
+    // Le test ne doit JAMAIS etre plus strict que Spell::CheckRange (Spell.cpp), sans quoi
+    // il retirerait un sort que le coeur accepte. D'ou, a chaque endroit ou le coeur a
+    // deux branches, la plus large :
+    //   - portee : celle de Unit::GetSpellMaxRangeForTarget (colonne amie ou hostile,
+    //     bonus de portee des techniques de melee) plus SPELLMOD_RANGE, comme le coeur ;
+    //     et au moins SpellInfo::GetMaxRange avec le bot comme porteur de modificateurs,
+    //     qui ajoute le cas Starcaller 801975 (50 yd) ;
+    //   - sort a distance : la tolerance non stricte du coeur (10 %, 3 yd au plus) est
+    //     ajoutee, alors que StrictCheck verifie en strict ;
+    //   - sort de melee : la branche « leeway » du coeur (max - MIN_MELEE_REACH), la plus
+    //     large des deux, IsWithinMeleeRange ajoutant lui-meme le leeway s'il y en a.
+    //
+    // Ne sont PAS concernes : un sort sans portee maximale (0 : melee nue ou soi), la portee
+    // ID 1 (le coeur ne verifie rien), et un sort qui ne prend ni cible unite ni point au sol
+    // (il vise le lanceur ou sa zone, la cible d'attaque n'y joue aucun role).
+    spells.erase(std::remove_if(spells.begin(), spells.end(),
+        [bot, target](Usable const& spell)
+        {
+            // Soi-meme, et le vehicule qui porte le bot : le coeur ne teste pas la portee
+            // contre lui (targetIsVehicleBase, Spell::CheckRange).
+            if (target == bot || bot->GetVehicleBase() == target)
+                return false;
+
+            // Le sort que StrictCheck verra, remplacant compris (voir la troisieme passe).
+            SpellInfo const* info = EffectiveSpell(bot, spell.info);
+            if (!info->RangeEntry || info->RangeEntry->ID == 1)
+                return false;
+            if (!(info->GetExplicitTargetMask() & (TARGET_FLAG_UNIT_MASK | TARGET_FLAG_DEST_LOCATION)))
+                return false;
+
+            float maxRange = bot->GetSpellMaxRangeForTarget(target, info);
+            bot->ApplySpellMod(info->Id, SPELLMOD_RANGE, maxRange);
+            bool const friendly = info->RangeEntry->RangeMax[1] != info->RangeEntry->RangeMax[0] &&
+                !bot->IsHostileTo(target);
+            maxRange = std::max(maxRange, info->GetMaxRange(friendly, bot));
+            if (maxRange <= 0.0f)
+                return false;
+
+            if (info->RangeEntry->Flags == SPELL_RANGE_MELEE)
+                return !bot->IsWithinMeleeRange(target, std::max(maxRange - MIN_MELEE_REACH, 0.0f));
+
+            return !bot->IsWithinCombatRange(target, maxRange + std::min(3.0f, maxRange * 0.1f));
         }),
         spells.end());
 }
@@ -2103,6 +2244,19 @@ public:
         // in. Same trigger and priority as MeleeCombatStrategy.
         if (!ranged)
             triggers.push_back(new TriggerNode("enemy out of melee", { NextAction("reach melee", ACTION_HIGH + 1) }));
+
+        // CoA (2026-10-02) : « coa ranged » derive de CombatStrategy et non de
+        // RangedCombatStrategy ; elle n'avait donc aucun recul, et un bot a distance colle au
+        // contact n'en repartait jamais (« reach spell » rapproche, ne recule pas). Meme
+        // declencheur, meme action et meme priorite que RangedCombatStrategy.cpp (amont) :
+        // « enemy too close for spell » -> « flee », ACTION_MOVE + 4. Ce declencheur ne
+        // part que si la cible ne frappe PAS ce bot, ou si elle est gelee ou enracinee
+        // (RangeTriggers.cpp) : sans effet en un contre un, il joue en groupe, PvE compris
+        // (le monstre tenu par le tank). Pose ici, dans la strategie existante, et non par
+        // un addStrategy (P-130). « coa heal » passe aussi ranged = true mais n'est pas
+        // « coa ranged » : il n'est pas touche.
+        if (ranged && getName() == "coa ranged")
+            triggers.push_back(new TriggerNode("enemy too close for spell", { NextAction("flee", ACTION_MOVE + 4) }));
 
         triggers.push_back(new TriggerNode("coa enemy casting", { NextAction("coa interrupt", InterruptPriority()) }));
         triggers.push_back(new TriggerNode("coa dispel", { NextAction("coa dispel", DispelPriority()) }));
