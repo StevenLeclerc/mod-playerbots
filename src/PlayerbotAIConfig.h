@@ -523,6 +523,13 @@ public:
     uint32 directeurEvenementHauteurYd;               // lieu `haut` : declencheur au-dessus du sol (3-40)
     uint32 directeurEvenementDistanceYd;              // point a au plus N yd du joueur (10-100)
     uint32 directeurEvenementDeclencheursParJoueur;   // declencheurs vivants par joueur (1-16)
+    // Lot D des evenements (05/10/2026, grimoire § 2.5-2.6, § 2.10) : sous-actions invoquer, ordre,
+    // retirer. ETEINTES tant que directeurEvenementApparitions est faux (retirer excepte).
+    bool directeurEvenementApparitions;               // interrupteur d'invoquer et d'ordre (defaut faux)
+    std::string directeurEvenementCreatures;          // entrees permises (plage 9100000-9109999 imposee)
+    std::string directeurEvenementSortsArrivee;       // sorts d'arrivee permis (7398 « naissance »)
+    uint32 directeurEvenementInvoquesParJoueur;       // invoques vivants par joueur (1-24)
+    uint32 directeurEvenementInvocationDistanceYd;    // point d'apparition a au plus N yd du joueur (20-250)
     // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas
     // de BOTS separes par des virgules ("4242,4243"). Un bot liste est traite COMME UN
     // HUMAIN PRIME, pour la prime seulement (verbes `prime`, `chasser`, `recompenser`,

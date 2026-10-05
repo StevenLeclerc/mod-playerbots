@@ -3671,6 +3671,48 @@ AiPlayerbot.Directeur.EvenementDistanceYd = 90
 #        `plein`. Default: 8
 AiPlayerbot.Directeur.EvenementDeclencheursParJoueur = 8
 
+#    AiPlayerbot.Directeur.EvenementApparitions
+#        Lot D des evenements (05/10, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.5-2.6,
+#        § 2.10 ; compte rendu docs/EVENEMENTS-lot-D.md) : sous-actions `invoquer:<n>:<d>:<vue>:<arrivee>`
+#        (n monstres 1-6 de l'entree `valeur`, au point carte/x/y/z disperses dans `rayon` 0-15 yd, niveau
+#        du joueur + d (-1, 0, +1), vie `duree_s` 60-3600 s hors combat, vue scene|hors_vue, arrivee
+#        aucune|naissance), `ordre:attaquer|tenir|errer|charger_vers` (`valeur` = id de l'invocation,
+#        0 = toutes celles du joueur) et `retirer` / `retirer:immediat`.
+#        ETEINT (0) : invoquer et ordre refuses `apparitions_eteintes` ; retirer reste PERMIS et execute
+#        (menage : exempt aussi du budget, de l'arret et de l'interrupteur du verbe) ; l'exclusion
+#        d'echelle du coeur (CanScale) vaut quelle que soit cette option (sans effet sans gabarit en base).
+#        Point hors sanctuaire, capitale et lieu sans JcJ (refus `lieu`). Levee immediate sur lever,
+#        stop, bus eteint, deconnexion et changement de carte du joueur, renforts SmartAI compris.
+#        Ligne `coa directeur evenement: ... sous_action=invoquer ... posees= tues= tues_humain= tues_bot=
+#        disparus= retires= renforts=` a la levee et a la fin.
+#        Exige l'exclusion de la plage 9100000-9109999 de l'echelle de niveau (mod-ascension-compat,
+#        CanScale) dans le MEME binaire. Sans elle, l'invocation PASSE (notre niveau gagne a la creation)
+#        puis OnAllCreatureUpdate d'Ascension reecrit le niveau : chaque invoque est alors RETIRE a la
+#        seconde suivante (`motif=echelle`). Preuve avant d'allumer : objdump (docs/EVENEMENTS-lot-D.md).
+#        Lue par PlayerbotAIConfig::Initialize seulement : `.reload config` SEUL ne change rien, il faut
+#        `reload config` PUIS `playerbots rndbot reload` (allumage comme retour arriere).
+#        Default: 0
+AiPlayerbot.Directeur.EvenementApparitions = 0
+
+#    AiPlayerbot.Directeur.EvenementCreatures, EvenementSortsArrivee
+#        LISTES BLANCHES FERMEES (lecture stricte, comme les autres Evenement*) : les entrees qu'`invoquer`
+#        peut poser -- la plage 9100000-9109999 est imposee en plus par le code -- et les sorts d'arrivee
+#        (`naissance` = 7398 « Birth », lance par l'invoque sur lui-meme). Default : les quatre gabarits
+#        d'orage de la Faille (lot E) ; "7398".
+AiPlayerbot.Directeur.EvenementCreatures = "9100001,9100002,9100003,9100004"
+AiPlayerbot.Directeur.EvenementSortsArrivee = "7398"
+
+#    AiPlayerbot.Directeur.EvenementInvoquesParJoueur
+#        invoques VIVANTS par joueur au plus (1-24), 64 en tout dans le royaume ; au-dela, refus `plein`.
+#        Default: 12
+AiPlayerbot.Directeur.EvenementInvoquesParJoueur = 12
+
+#    AiPlayerbot.Directeur.EvenementInvocationDistanceYd
+#        invoquer et ordre:charger_vers : le point est a au plus N yd (au sol, 20-250) du joueur, sinon
+#        refus `distance`. Le pied de la faille est a 155-205 yd du joueur dans la Faille d'orage.
+#        Default: 220
+AiPlayerbot.Directeur.EvenementInvocationDistanceYd = 220
+
 #    AiPlayerbot.Directeur.PrimeBanc
 #        Banc d'essai de prime (coa-project/outils/banc-prime.py) : guids bas de BOTS separes par
 #        des virgules, par exemple "4242". Lecture stricte : un morceau mal forme et AUCUN bot.

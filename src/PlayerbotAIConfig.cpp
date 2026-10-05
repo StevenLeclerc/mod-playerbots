@@ -834,6 +834,17 @@ bool PlayerbotAIConfig::Initialize()
     directeurEvenementHauteurYd = std::clamp<uint32>(directeurEvenementHauteurYd, 3, 40);
     directeurEvenementDistanceYd = std::clamp<uint32>(directeurEvenementDistanceYd, 10, 100);
     directeurEvenementDeclencheursParJoueur = std::clamp<uint32>(directeurEvenementDeclencheursParJoueur, 1, 16);
+    // Lot D des evenements (05/10/2026) : eteint par defaut ; les 4 gabarits d'orage de la Faille
+    // (9100001-9100004, lot E) ; « naissance » 7398 ; 12 invoques vivants par joueur ; 220 yd.
+    directeurEvenementApparitions = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementApparitions", false);
+    directeurEvenementCreatures = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementCreatures",
+                                                                     "9100001,9100002,9100003,9100004");
+    directeurEvenementSortsArrivee =
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.EvenementSortsArrivee", "7398");
+    directeurEvenementInvoquesParJoueur =
+        std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementInvoquesParJoueur", 12), 1, 24);
+    directeurEvenementInvocationDistanceYd = std::clamp<uint32>(
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementInvocationDistanceYd", 220), 20, 250);
     // Banc d'essai de prime (03/10/2026) : vide par defaut, rien ne change.
     directeurPrimeBanc = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.PrimeBanc", "");
     // Un plafond nul rendrait toute prime `bornes` sans le dire ; une meute nulle
