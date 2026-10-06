@@ -543,6 +543,16 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
             {
                 if (aff.mission == CoaDirecteur::CoaDirMission::Quete && DemarrerQueteDeMission(aff))
                     return true;
+                // Bots actifs (07/10/2026) : un inscrit a un evenement ne s'assied jamais (RPG_REST, tire ici, et
+                // le repli de RandomChangeStatus quand aucun statut n'est permis) : il erre, et l'errance le mene
+                // au joueur servi (NewRpgWanderRandomAction). « Ils m'ont regarde mourir sans bouger » (06/10).
+                if (aff.mission == CoaDirecteur::CoaDirMission::Evenement && sPlayerbotAIConfig.directeurEvenementBots)
+                {
+                    if (bot->getStandState() != UNIT_STAND_STATE_STAND)
+                        bot->SetStandState(UNIT_STAND_STATE_STAND);
+                    info.ChangeToWanderRandom();
+                    return true;
+                }
                 return RandomChangeStatus({RPG_WANDER_RANDOM, RPG_REST});
             }
             return RandomChangeStatus({RPG_GO_CAMP, RPG_GO_GRIND, RPG_WANDER_RANDOM, RPG_WANDER_NPC, RPG_DO_QUEST,
@@ -617,6 +627,21 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
         }
         case RPG_REST:
         {
+            // Bots actifs (07/10/2026) : un inscrit a un evenement assis d'AVANT son inscription (ou de l'ancien
+            // tirage) se leve tout de suite. Sans affectation : un chargement atomique.
+            {
+                CoaDirecteur::Affectation aff;
+                if (sPlayerbotAIConfig.directeurMissions && sPlayerbotAIConfig.directeurEvenementBots &&
+                    CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) && aff.presence &&
+                    aff.phase == CoaDirecteur::CoaDirPhase::Sejour &&
+                    aff.mission == CoaDirecteur::CoaDirMission::Evenement && aff.carte == bot->GetMapId())
+                {
+                    if (bot->getStandState() != UNIT_STAND_STATE_STAND)
+                        bot->SetStandState(UNIT_STAND_STATE_STAND);
+                    info.ChangeToIdle();
+                    return true;
+                }
+            }
             // REST -> IDLE
             if (info.HasStatusPersisted(statusRestDuration))
             {
@@ -704,6 +729,33 @@ bool NewRpgWanderRandomAction::Execute(Event /*event*/)
     {
         if (IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL))
             return false;
+        // Bots actifs (07/10/2026) : un inscrit a un evenement rejoint le joueur servi (a
+        // EVENEMENT_RALLIEMENT_CIBLE_YD de lui, cote bot, sol sec a +-6 yd du sien) des qu'il en est a plus de
+        // EVENEMENT_RALLIEMENT_YD et que le joueur est dans la laisse ; deja pres de lui, il reste a ses cotes
+        // (l'errance dans le disque de 40 yd l'eloignerait, puis il reviendrait : va-et-vient). Joueur absent,
+        // mort ou hors laisse, ou pas de point sec pres de lui (eau, pente) : l'errance d'origine.
+        if (aff.mission == CoaDirecteur::CoaDirMission::Evenement)
+        {
+            float jx = 0.0f, jy = 0.0f, jz = 0.0f;
+            bool const joueur = CoaDirecteur::JoueurDEvenement(bot, jx, jy, jz);
+            if (joueur && bot->GetExactDist2d(jx, jy) <= CoaDirecteur::EVENEMENT_RALLIEMENT_YD)
+                return false;   // a ses cotes : il attend (les assaillants de l'evenement le feront frapper)
+            if (joueur)
+            {
+                CoaDirecteur::Affectation autourDuJoueur = aff;
+                autourDuJoueur.x = jx;
+                autourDuJoueur.y = jy;
+                autourDuJoueur.z = jz;
+                float px = jx, py = jy, pz = jz;
+                if (CoaDirecteur::PointPres(bot->GetMap(), autourDuJoueur, bot->GetPositionX(), bot->GetPositionY(),
+                                            CoaDirecteur::EVENEMENT_RALLIEMENT_CIBLE_YD, px, py, pz) &&
+                    MoveTo(bot->GetMapId(), px, py, pz, false, false, false, true, MovementPriority::MOVEMENT_NORMAL))
+                {
+                    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PATROUILLES);
+                    return true;
+                }
+            }
+        }
         float x = aff.x, y = aff.y, z = aff.z;
         CoaDirecteur::Affectation disque = aff;
         if (aff.mission == CoaDirecteur::CoaDirMission::Bande)

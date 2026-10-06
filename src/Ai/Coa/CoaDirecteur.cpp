@@ -5944,6 +5944,10 @@ std::unordered_map<uint32, std::vector<ObjectGuid>> evfCibles;    // cle : guid 
 std::atomic<uint32> evfNbJoueurs{0};                              // evfCibles.size(), chemin chaud sans verrou
 std::atomic<uint32> evfEvaluations{0};                            // cibles rendues a GrindTargetValue (bilan) :
                                                                   // des EVALUATIONS, ni des attaques ni des bots
+std::atomic<uint32> evfAssaillants{0};                            // bots actifs (07/10) : calculs de « attackers »
+                                                                  // ou un invoque A PORTEE a ete ajoute (bilan)
+std::atomic<uint32> evfDefenses{0};                               // ... ou un invoque qui frappe un humain de
+                                                                  // l'evenement ou un inscrit a ete ajoute (bilan)
 uint32 evfBilanS = 0;                                             // fil monde : derniere ligne de bilan
 constexpr uint32 EVF_BILAN_S = 60;
 
@@ -5977,8 +5981,10 @@ void PublierCiblesEvenement()
             if (f.a.presence && f.a.mission == CoaDirecteur::CoaDirMission::Evenement && f.a.finS > maintenant)
                 ++inscrits;
     }
-    LOG_INFO("playerbots", "coa directeur evenement_bots: joueurs={} cibles={} inscrits={} evaluations={}", joueurs, cibles,
-             inscrits, evfEvaluations.exchange(0, std::memory_order_relaxed));
+    // Bots actifs (07/10) : deux champs EN FIN de ligne (un lecteur de l'ancienne forme s'arrete a evaluations).
+    LOG_INFO("playerbots", "coa directeur evenement_bots: joueurs={} cibles={} inscrits={} evaluations={} assaillants={}"
+             " defenses={}", joueurs, cibles, inscrits, evfEvaluations.exchange(0, std::memory_order_relaxed),
+             evfAssaillants.exchange(0, std::memory_order_relaxed), evfDefenses.exchange(0, std::memory_order_relaxed));
 }
 }  // namespace (lot F : la fonction publique, puis retour a l'espace anonyme)
 
@@ -6022,6 +6028,98 @@ Unit* CoaDirecteur::CibleDEvenement(Player* bot)
     if (meilleure)
         evfEvaluations.fetch_add(1, std::memory_order_relaxed);
     return meilleure;
+}
+
+// Bots actifs (07/10/2026) : voir CoaDirecteur.h. Fil de carte du bot (AttackersValue::Calculate). Meme garde que
+// CibleDEvenement ; la copie des guids sous verrou partage ; chaque creature relue PAR LE BOT (P-137).
+void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie)
+{
+    if (!bot || evfNbJoueurs.load(std::memory_order_relaxed) == 0)
+        return;
+    CoaDirecteur::Affectation aff;
+    if (!CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) || !aff.presence ||
+        aff.mission != CoaDirecteur::CoaDirMission::Evenement || !aff.missionParam || aff.carte != bot->GetMapId() ||
+        !bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive())
+        return;
+    std::vector<ObjectGuid> guids;
+    {
+        std::shared_lock<std::shared_mutex> garde(evfVerrou);
+        auto const it = evfCibles.find(aff.missionParam);
+        if (it == evfCibles.end())
+            return;
+        guids = it->second;
+    }
+    float const laisse = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+    std::vector<Unit*> defense, aPortee;
+    for (ObjectGuid const& g : guids)
+    {
+        Creature* cr = ObjectAccessor::GetCreature(*bot, g);   // carte du bot : nul si l'invoque est ailleurs
+        if (!cr || !cr->IsInWorld() || cr->IsDuringRemoveFromWorld() || !cr->IsAlive())
+            continue;
+        float const cx = cr->GetPositionX() - aff.x;
+        float const cy = cr->GetPositionY() - aff.y;
+        float const centre2 = cx * cx + cy * cy;
+        float const d = bot->GetDistance(cr);
+        // (b) DEFENSE : sa victime est le joueur servi, ou un autre inscrit du MEME evenement (meme joueur servi).
+        bool protege = false;
+        if (Unit* victime = cr->GetVictim())
+        {
+            if (victime->IsPlayer() && victime != bot)
+            {
+                uint32 const v = victime->GetGUID().GetCounter();
+                CoaDirecteur::Affectation autre;
+                protege = v == aff.missionParam ||
+                          (CoaDirecteur::AffectationDe(v, &autre) && autre.presence &&
+                           autre.mission == CoaDirecteur::CoaDirMission::Evenement &&
+                           autre.missionParam == aff.missionParam);
+            }
+        }
+        if (protege && d <= CoaDirecteur::EVENEMENT_DEFENSE_YD &&
+            centre2 <= CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD * CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD)
+        {
+            defense.push_back(cr);
+            continue;
+        }
+        // (a) A PORTEE : dans la laisse, a la portee d'engagement (celle de CibleDEvenement).
+        if (centre2 <= laisse * laisse && d <= CoaDirecteur::EVENEMENT_ENGAGEMENT_YD)
+            aPortee.push_back(cr);
+    }
+    if (!defense.empty())
+    {
+        sortie.insert(sortie.end(), defense.begin(), defense.end());
+        evfDefenses.fetch_add(1, std::memory_order_relaxed);
+    }
+    else if (!aPortee.empty())
+    {
+        sortie.insert(sortie.end(), aPortee.begin(), aPortee.end());
+        evfAssaillants.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+bool CoaDirecteur::JoueurDEvenement(Player* bot, float& x, float& y, float& z)
+{
+    // Relecture : PAS de garde sur evfNbJoueurs ici -- entre deux vagues aucun invoque n'est publie (compteur a 0),
+    // et c'est justement quand il n'y a rien a frapper que le bot doit rejoindre le joueur. Appelee seulement pour
+    // un bot dont l'affectation porte la mission Evenement (NewRpgWanderRandomAction) : l'option suffit.
+    if (!bot || !sPlayerbotAIConfig.directeurEvenementBots)
+        return false;
+    CoaDirecteur::Affectation aff;
+    if (!CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) || !aff.presence ||
+        aff.mission != CoaDirecteur::CoaDirMission::Evenement || !aff.missionParam ||
+        aff.phase != CoaDirecteur::CoaDirPhase::Sejour || aff.carte != bot->GetMapId() || !bot->IsInWorld())
+        return false;
+    Player* j = ObjectAccessor::GetPlayer(*bot, ObjectGuid::Create<HighGuid::Player>(aff.missionParam));
+    if (!j || !j->IsInWorld() || !j->IsAlive() || j->GetMapId() != bot->GetMapId())
+        return false;
+    float const laisse = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+    float const dx = j->GetPositionX() - aff.x;
+    float const dy = j->GetPositionY() - aff.y;
+    if (dx * dx + dy * dy > laisse * laisse)
+        return false;   // il kite hors de la laisse : le bot reste au lieu (la laisse le ramenerait)
+    x = j->GetPositionX();
+    y = j->GetPositionY();
+    z = j->GetPositionZ();
+    return true;
 }
 
 namespace

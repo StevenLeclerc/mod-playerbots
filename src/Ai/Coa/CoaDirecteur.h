@@ -45,6 +45,7 @@
 
 #include "Define.h"
 #include <string>
+#include <vector>
 
 class Map;
 class Player;
@@ -577,6 +578,32 @@ void Compter(CoaDirCompteur c);
 // Sans inscription publiee : UN chargement atomique, puis le code d'origine.
 constexpr float EVENEMENT_ENGAGEMENT_YD = 50.0f;
 Unit* CibleDEvenement(Player* bot);
+
+// Bots ACTIFS (07/10/2026, coa-project/docs/EVENEMENTS-bots-actifs.md). Retour du commanditaire apres la
+// Faille du 06/10 (23:07-23:11 Paris) : « Ils m'ont regarde mourir sans bouger ». LU : CibleDEvenement n'est
+// interrogee que par `grind target`, donc par « no target » -> « attack anything » (4,0) du moteur HORS combat,
+// que AttackAnythingAction::isUseful coupe des que le bot est en combat (bot->IsInCombat()) ; en combat, et hors
+// combat par « dps assist » (50,0) / « tank assist », la cible vient de la valeur « attackers », qui ne contient
+// que les assaillants du BOT et de son groupe : un invoque qui frappe le joueur (hors groupe) n'y est jamais.
+// AssaillantsDEvenement est appelee par AttackersValue::Calculate pour un bot INSCRIT (meme garde que
+// CibleDEvenement) et AJOUTE aux assaillants, avant le tri d'origine (RemoveNonThreating : vivant, attaquable,
+// en vue) : (b) DEFENSE d'abord -- les invoques de l'evenement dont la victime est le joueur servi ou un autre
+// inscrit du meme evenement, a EVENEMENT_DEFENSE_YD du bot et a EVENEMENT_DEFENSE_CENTRE_YD du centre ; s'il y
+// en a, eux SEULS (ils deviennent la cible du choix d'origine, DpsTargetValue / TankTargetValue) ; sinon (a)
+// tout invoque a EVENEMENT_ENGAGEMENT_YD du bot et dans la laisse (rayon + 30). Un combat legitime n'est pas
+// interrompu : ses assaillants restent dans la liste, le choix d'origine les departage. Fil de carte du bot.
+// Sans inscription publiee : UN chargement atomique.
+constexpr float EVENEMENT_DEFENSE_YD = 80.0f;
+constexpr float EVENEMENT_DEFENSE_CENTRE_YD = 100.0f;
+// (c) jamais plante : un inscrit en SEJOUR qui n'a rien a frapper rejoint le joueur servi (point a
+// EVENEMENT_RALLIEMENT_CIBLE_YD de lui, cote bot) s'il en est a plus de EVENEMENT_RALLIEMENT_YD et que le joueur
+// est dans la laisse ; jamais de repos assis (NewRpgAction.cpp).
+constexpr float EVENEMENT_RALLIEMENT_YD = 15.0f;
+constexpr float EVENEMENT_RALLIEMENT_CIBLE_YD = 8.0f;
+void AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie);
+// Le joueur servi par un inscrit en sejour, s'il est sur la carte du bot, vivant, et dans la laisse : sa position.
+// -> faux sinon (pas inscrit, pas en sejour, joueur absent, mort, hors laisse). Fil de carte du bot.
+bool JoueurDEvenement(Player* bot, float& x, float& y, float& z);
 }  // namespace CoaDirecteur
 
 void AddSC_coa_directeur();
