@@ -3495,9 +3495,13 @@ AiPlayerbot.Directeur.Missions = 0
 #        toute mission) et prend pour cible, en priorite et sans les filtres de niveau, de rang, de gris
 #        ni de distance des statuts RPG, le plus proche monstre VIVANT invoque pour ce joueur (lot D,
 #        entrees 9100000-9109999) a 50 yd de lui au plus et dans sa laisse. Un bot deja proche du joueur
-#        peut etre inscrit (exempte du refus `a_vue`). Exige aussi Directeur.Missions = 1. Libere par la
+#        peut etre inscrit (exempte du refus `a_vue`) et le centre d'une inscription peut etre a moins de
+#        40 yd du joueur (au point de l'evenement). Les invoques en cours de retrait ne sont plus des cibles.
+#        Un bot hors groupe qui frappe le premier prend le butin et l'XP du monstre au joueur.
+#        Exige aussi Directeur.Missions = 1. Libere par la
 #        levee de sa presence (`lever`), son echeance, sa mort, la deconnexion du joueur, stop, bus eteint.
-#        Ligne `coa directeur evenement_bots:` toutes les 60 s tant qu'un bot est inscrit.
+#        Ligne `coa directeur evenement_bots:` toutes les 60 s tant qu'un invoque est publie (`evaluations` :
+#        des choix de cible rendus, ni des attaques ni des bots).
 #        A 0 : la mission `evenement` est DEGRADEE en `chasse` (le bot reste au lieu, ne prend que ce que
 #        son IA prend d'ordinaire), et `a_vue` s'applique. Lue par PlayerbotAIConfig::Initialize() SEULEMENT :
 #        `reload config` PUIS `playerbots rndbot reload`.

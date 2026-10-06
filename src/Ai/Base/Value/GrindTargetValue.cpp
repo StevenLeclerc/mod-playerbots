@@ -56,8 +56,10 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
     // assaillants (il riposte d'abord), AVANT le trajet pacifique (en route, il
     // s'engage sur un invoque a portee). Sans inscription publiee : un chargement
     // atomique, puis le code d'origine. CoaDirecteur.h, « lot F des evenements ».
-    if (Unit* cible = CoaDirecteur::CibleDEvenement(bot))
-        return cible;
+    // Premier tour seulement (relecture) : Calculate rappelle cette fonction jusqu'a memberCount fois.
+    if (assistCount == 0)
+        if (Unit* cible = CoaDirecteur::CibleDEvenement(bot))
+            return cible;
 
     // CoA -- Directeur, lot D2b suite : TRAJET PACIFIQUE. En trajet d'une
     // affectation du Directeur (option Directeur.TrajetPacifique), le bot ne

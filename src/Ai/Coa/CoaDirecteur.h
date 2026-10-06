@@ -566,8 +566,9 @@ void Compter(CoaDirCompteur c);
 // registre : « ce bot sert l'evenement du joueur `missionParam`, au point (x, y), rayon `rayon` ». Elle
 // en garde tout le cycle de vie (trajet, sejour, laisse rayon + MISSION_LAISSE_MARGE_YD, levee par
 // `lever`, echeance, mort, joueur hors ligne, stop, bus eteint). Un bot DEJA proche du joueur peut etre
-// inscrit : l'inscription est exemptee du refus `a_vue` (option allumee seulement).
-// CIBLES (G2, G3) : le fil monde publie chaque seconde les invoques VIVANTS du lot D par joueur (copie
+// inscrit : l'inscription est exemptee du refus `a_vue` et de la borne basse du centre (40 yd du joueur :
+// son centre est le point de l'evenement), option allumee seulement.
+// CIBLES (G2, G3) : le fil monde publie chaque seconde les invoques VIVANTS et non retires du lot D par joueur (copie
 // sous un verrou propre). CibleDEvenement, appelee par GrindTargetValue::FindTargetForGrinding APRES les
 // assaillants et AVANT le trajet pacifique, rend le plus proche invoque de l'evenement servi : a
 // EVENEMENT_ENGAGEMENT_YD du bot au plus, dans la laisse (rayon + 30 yd du centre), attaquable et en

@@ -5929,7 +5929,8 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
 std::shared_mutex evfVerrou;                                      // le SEUL verrou du lot F
 std::unordered_map<uint32, std::vector<ObjectGuid>> evfCibles;    // cle : guid bas du joueur ; sous evfVerrou
 std::atomic<uint32> evfNbJoueurs{0};                              // evfCibles.size(), chemin chaud sans verrou
-std::atomic<uint32> evfChoix{0};                                  // cibles rendues a GrindTargetValue (bilan)
+std::atomic<uint32> evfEvaluations{0};                            // cibles rendues a GrindTargetValue (bilan) :
+                                                                  // des EVALUATIONS, ni des attaques ni des bots
 uint32 evfBilanS = 0;                                             // fil monde : derniere ligne de bilan
 constexpr uint32 EVF_BILAN_S = 60;
 
@@ -5939,7 +5940,7 @@ void PublierCiblesEvenement()
     std::unordered_map<uint32, std::vector<ObjectGuid>> neuf;
     if (sPlayerbotAIConfig.directeurEvenementBots)
         for (EvInvoque const& v : evInvoques)
-            if (!v.mort)
+            if (!v.mort && !v.retraitDepuisS)   // relecture : un invoque en cours de retrait n'est plus une cible
                 neuf[v.joueur].push_back(v.guid);
     if (neuf.empty() && evfNbJoueurs.load(std::memory_order_relaxed) == 0)
         return;   // rien publie, rien a publier : aucun verrou
@@ -5963,8 +5964,8 @@ void PublierCiblesEvenement()
             if (f.a.presence && f.a.mission == CoaDirecteur::CoaDirMission::Evenement && f.a.finS > maintenant)
                 ++inscrits;
     }
-    LOG_INFO("playerbots", "coa directeur evenement_bots: joueurs={} cibles={} inscrits={} choix={}", joueurs, cibles,
-             inscrits, evfChoix.exchange(0, std::memory_order_relaxed));
+    LOG_INFO("playerbots", "coa directeur evenement_bots: joueurs={} cibles={} inscrits={} evaluations={}", joueurs, cibles,
+             inscrits, evfEvaluations.exchange(0, std::memory_order_relaxed));
 }
 }  // namespace (lot F : la fonction publique, puis retour a l'espace anonyme)
 
@@ -6006,7 +6007,7 @@ Unit* CoaDirecteur::CibleDEvenement(Player* bot)
         meilleureD = d;
     }
     if (meilleure)
-        evfChoix.fetch_add(1, std::memory_order_relaxed);
+        evfEvaluations.fetch_add(1, std::memory_order_relaxed);
     return meilleure;
 }
 
@@ -7786,7 +7787,11 @@ void ExecuterAffectation(CoaDirCommande const& recue)
                               centreJoueur > SAUT_LOINTAIN_MAX_YD * SAUT_LOINTAIN_MAX_YD)
             : saut ? (centreJoueur < SAUT_JOUEUR_MIN_YD * SAUT_JOUEUR_MIN_YD ||
                       centreJoueur > SAUT_JOUEUR_MAX_YD * SAUT_JOUEUR_MAX_YD)
-                   : (centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD ||
+                   // Lot F, relecture (06/10) : une INSCRIPTION n'a pas de borne basse. Son centre EST
+                   // l'evenement (la faille), ou se tient le joueur : a 40 yd au moins, le disque de 40 yd
+                   // et la laisse de 70 yd tombaient a cote des invoques qui collent au joueur. Rien
+                   // n'apparait (finale a pied, `saut` exclu) : la borne basse n'a rien a proteger ici.
+                   : ((!inscriptionEvenement && centreJoueur < PRESENCE_CENTRE_MIN_YD * PRESENCE_CENTRE_MIN_YD) ||
                       centreJoueur > PRESENCE_CENTRE_MAX_YD * PRESENCE_CENTRE_MAX_YD);
         if (horsBornes)
         {
