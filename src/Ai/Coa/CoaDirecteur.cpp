@@ -3803,6 +3803,11 @@ bool EstApparition(std::string const& t);
 void ExecuterApparition(CoaDirCommande const& c);
 template <typename Predicat>
 size_t LeverInvoquesSi(Predicat lever, char const* raison);
+// Lot P des evenements (06/10/2026) : definis dans CoaDirecteurPortail.inc, inclus apres le lot D.
+bool EstPortail(std::string const& t);
+void ExecuterPortail(CoaDirCommande const& c);
+template <typename Predicat>
+size_t LeverPortailsSi(Predicat lever, char const* raison);
 
 void ExecuterEvenement(CoaDirCommande const& c)
 {
@@ -3810,6 +3815,11 @@ void ExecuterEvenement(CoaDirCommande const& c)
     if (EstApparition(c.texte))
     {
         ExecuterApparition(c);
+        return;
+    }
+    if (EstPortail(c.texte))   // lot P (06/10/2026) : le portail a refermer
+    {
+        ExecuterPortail(c);
         return;
     }
     EvLu lu;
@@ -4058,7 +4068,7 @@ template <typename Predicat>
 size_t LeverEvenementsSi(Predicat lever, char const* raison)
 {
     // Lot D : les invoques d'abord (retrait immediat, ligne `tues=` par lot).
-    size_t const invoques = LeverInvoquesSi(lever, raison);
+    size_t const invoques = LeverInvoquesSi(lever, raison) + LeverPortailsSi(lever, raison);   // + lot P
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
         return invoques;
     std::vector<EvAmbiance> ambiances;
@@ -5006,6 +5016,9 @@ void SuivreInvoques()
     }
 }
 
+// Lot P des evenements (06/10/2026) : le portail a refermer (fragment a part, meme espace de noms).
+#include "CoaDirecteurPortail.inc"
+
 // ------------------------------------------------------------------ lot D4c : prime et morts tracees
 //
 // SPEC-directeur-D4.md § 3.3, § 6.2. DEUX ETATS NEUFS :
@@ -5948,6 +5961,8 @@ void Entretien(uint32 diff)
     SuivreEvenements();
     // Lot D des evenements : invoques (morts, retraits hors de vue, joueur parti, fins de lot).
     SuivreInvoques();
+    // Lot P des evenements : portails a refermer (clics, echeances).
+    SuivrePortails();
     LivrerParoles();
     if (!aReconstruire.empty())
         Reconstruire();
@@ -9614,6 +9629,7 @@ public:
 void AddSC_coa_directeur()
 {
     new coa_directeur_niveau_creaturescript();
+    new coa_directeur_portail_goscript();   // lot P des evenements
     new coa_directeur_commandscript();
     new coa_directeur_worldscript();
     new coa_directeur_playerscript();
