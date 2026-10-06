@@ -587,10 +587,10 @@ Unit* CibleDEvenement(Player* bot);
 // que les assaillants du BOT et de son groupe : un invoque qui frappe le joueur (hors groupe) n'y est jamais.
 // AssaillantsDEvenement est appelee par AttackersValue::Calculate pour un bot INSCRIT (meme garde que
 // CibleDEvenement) et AJOUTE aux assaillants, avant le tri d'origine (RemoveNonThreating : vivant, attaquable,
-// en vue) : (b) DEFENSE d'abord -- les invoques de l'evenement dont la victime est le joueur servi ou un autre
-// inscrit du meme evenement, a EVENEMENT_DEFENSE_YD du bot et a EVENEMENT_DEFENSE_CENTRE_YD du centre ; s'il y
-// en a, eux SEULS (ils deviennent la cible du choix d'origine, DpsTargetValue / TankTargetValue) ; sinon (a)
-// tout invoque a EVENEMENT_ENGAGEMENT_YD du bot et dans la laisse (rayon + 30). Un combat legitime n'est pas
+// en vue) : (b) DEFENSE d'abord, a EVENEMENT_DEFENSE_YD du bot et a EVENEMENT_DEFENSE_CENTRE_YD du centre -- les
+// invoques dont la victime est le joueur servi : s'il y en a, eux SEULS parmi les invoques de l'evenement (les
+// autres, meme celui qui frappe le bot, sont retires des assaillants, `ecartes`) ; sinon ceux qui frappent un autre
+// inscrit du meme evenement, ajoutes sans rien retirer ; sinon (a) tout invoque a EVENEMENT_ENGAGEMENT_YD du bot et dans la laisse (rayon + 30). Un combat legitime n'est pas
 // interrompu : ses assaillants restent dans la liste, le choix d'origine les departage. Fil de carte du bot.
 // Sans inscription publiee : UN chargement atomique.
 constexpr float EVENEMENT_DEFENSE_YD = 80.0f;
@@ -600,7 +600,11 @@ constexpr float EVENEMENT_DEFENSE_CENTRE_YD = 100.0f;
 // est dans la laisse ; jamais de repos assis (NewRpgAction.cpp).
 constexpr float EVENEMENT_RALLIEMENT_YD = 15.0f;
 constexpr float EVENEMENT_RALLIEMENT_CIBLE_YD = 8.0f;
-void AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie);
+// `ecartes` (relecture du 07/10) : quand un invoque frappe le JOUEUR SERVI, les AUTRES invoques vivants de
+// l'evenement (y compris celui qui frappe le bot, et ceux qui frappent un autre inscrit), que l'appelant retire de ses
+// assaillants pour que la defense du joueur prime. Defense d'un autre inscrit seulement : rien n'est ecarte. Jamais
+// un adversaire hors evenement.
+void AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie, std::vector<Unit*>* ecartes = nullptr);
 // Le joueur servi par un inscrit en sejour, s'il est sur la carte du bot, vivant, et dans la laisse : sa position.
 // -> faux sinon (pas inscrit, pas en sejour, joueur absent, mort, hors laisse). Fil de carte du bot.
 bool JoueurDEvenement(Player* bot, float& x, float& y, float& z);

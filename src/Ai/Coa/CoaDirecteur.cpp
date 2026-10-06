@@ -4255,8 +4255,9 @@ void SuivreEvenements()
 //        OnPlayerBeforeTempSummonInitStats). Tout ou rien : un echec en cours retire ceux deja poses.
 //   ordre:attaquer | ordre:tenir | ordre:errer | ordre:charger_vers
 //        `valeur` = id de la commande `invoquer` visee, 0 = tous les invoques vivants du joueur.
-//        attaquer : AttackStart sur le joueur `cible` ; tenir : reste sur place (foyer = position,
-//        mouvement de repos) ; errer : erre dans `rayon` (3-30 yd) autour de sa position ;
+//        attaquer : AttackStart sur le joueur `cible` (sauf invoque deja aux prises avec un autre : il
+//        garde son combat, compte `occupes`) ; tenir : reste sur place (foyer = position, mouvement de
+//        repos, reaction DEFENSIVE jusqu'au prochain attaquer/errer/charger_vers) ; errer : erre dans `rayon` (3-30 yd) autour de sa position ;
 //        charger_vers : court au point carte/x/y/z (foyer = ce point). Hors combat seulement, sauf
 //        attaquer. Liste fermee : `tenir` et `charger_vers` sont ceux du grimoire (§ 2.6) ; `attaquer`
 //        et `errer` sont le minimum demande au lot ; fuir_*, etat et faction ne sont pas faits.
@@ -4797,7 +4798,7 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         RefuserApparition(c, lu, "mort");
         return;
     }
-    uint32 vises = 0, appliques = 0;
+    uint32 vises = 0, appliques = 0, occupes = 0;
     for (EvInvoque const& v : evInvoques)
     {
         if (v.joueur != c.cible || v.mort || (vise && v.id != vise))
@@ -4808,8 +4809,20 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
             continue;
         if (lu.ordre == EvOrdre::Attaquer)
         {
+            // Bots actifs, relecture du 07/10 : un invoque deja aux prises avec un AUTRE que le joueur (un bot inscrit
+            // qui le defendait, un autre humain) garde son combat. Sans cela, l'`attaquer` renvoye au retour d'un
+            // joueur absent (faille_orage.py, joueur_de_retour) jetait sur lui, d'un coup, tout ce que les bots
+            // tenaient occupe.
+            Unit* victime = cr->GetVictim();
+            if (cr->IsInCombat() && victime && victime != p)
+            {
+                cr->SetReactState(REACT_AGGRESSIVE);   // sans changer sa cible : il ne reste pas defensif apres
+                ++occupes;
+                continue;
+            }
             if (cr->AI() && cr->GetMapId() == p->GetMapId() && cr->IsValidAttackTarget(p))
             {
+                cr->SetReactState(REACT_AGGRESSIVE);   // leve la reaction defensive d'un `tenir`
                 cr->AI()->AttackStart(p);
                 ++appliques;
             }
@@ -4821,12 +4834,18 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         switch (lu.ordre)
         {
             case EvOrdre::Tenir:
+                // Relecture du 07/10 : les gabarits 9100001-9100004 sont faction 14 en SmartAI, donc AGRESSIFS par
+                // defaut (SmartAI::MoveInLineOfSight attaque sous REACT_AGGRESSIVE) : un invoque tenu a portee d'aggro
+                // d'un joueur absent l'engageait quand meme. DEFENSIF : il ne riposte qu'a qui le frappe (les bots
+                // inscrits peuvent toujours le tuer) ; `attaquer`, `errer`, `charger_vers` rendent l'agressivite.
+                cr->SetReactState(REACT_DEFENSIVE);
                 cr->SetHomePosition(cr->GetPosition());
                 cr->SetDefaultMovementType(IDLE_MOTION_TYPE);
                 mm->Clear();
                 mm->MoveIdle();
                 break;
             case EvOrdre::Errer:
+                cr->SetReactState(REACT_AGGRESSIVE);
                 cr->SetHomePosition(cr->GetPosition());
                 cr->SetWanderDistance(c.rayon);
                 cr->SetDefaultMovementType(RANDOM_MOTION_TYPE);
@@ -4834,6 +4853,7 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
                 mm->MoveRandom(c.rayon);
                 break;
             case EvOrdre::ChargerVers:
+                cr->SetReactState(REACT_AGGRESSIVE);
                 cr->SetHomePosition(c.x, c.y, sol, cr->GetOrientation());
                 cr->SetDefaultMovementType(IDLE_MOTION_TYPE);
                 mm->Clear();
@@ -4850,8 +4870,9 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         return;
     }
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    // Relecture du 07/10 : `occupes` EN FIN (invoques laisses a leur combat contre un autre que le joueur).
     LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=ordre ordre={} joueur={} valeur={} motif=pose"
-             " vises={} appliques={}", c.id, NomEvOrdre(lu.ordre), c.cible, vise, vises, appliques);
+             " vises={} appliques={} occupes={}", c.id, NomEvOrdre(lu.ordre), c.cible, vise, vises, appliques, occupes);
     Accuser(c, "execute", appliques ? nullptr : "aucun_applique");
 }
 
@@ -6032,7 +6053,7 @@ Unit* CoaDirecteur::CibleDEvenement(Player* bot)
 
 // Bots actifs (07/10/2026) : voir CoaDirecteur.h. Fil de carte du bot (AttackersValue::Calculate). Meme garde que
 // CibleDEvenement ; la copie des guids sous verrou partage ; chaque creature relue PAR LE BOT (P-137).
-void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie)
+void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie, std::vector<Unit*>* ecartes)
 {
     if (!bot || evfNbJoueurs.load(std::memory_order_relaxed) == 0)
         return;
@@ -6050,7 +6071,9 @@ void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie
         guids = it->second;
     }
     float const laisse = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
-    std::vector<Unit*> defense, aPortee;
+    // defense : frappent le joueur servi ; defenseInscrits : frappent un autre inscrit ; autres : le reste des
+    // invoques vivants de l'evenement (y compris celui qui frappe le bot lui-meme).
+    std::vector<Unit*> defense, defenseInscrits, aPortee, autres;
     for (ObjectGuid const& g : guids)
     {
         Creature* cr = ObjectAccessor::GetCreature(*bot, g);   // carte du bot : nul si l'invoque est ailleurs
@@ -6061,25 +6084,27 @@ void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie
         float const centre2 = cx * cx + cy * cy;
         float const d = bot->GetDistance(cr);
         // (b) DEFENSE : sa victime est le joueur servi, ou un autre inscrit du MEME evenement (meme joueur servi).
-        bool protege = false;
+        bool protegeJoueur = false, protegeInscrit = false;
         if (Unit* victime = cr->GetVictim())
         {
             if (victime->IsPlayer() && victime != bot)
             {
                 uint32 const v = victime->GetGUID().GetCounter();
                 CoaDirecteur::Affectation autre;
-                protege = v == aff.missionParam ||
-                          (CoaDirecteur::AffectationDe(v, &autre) && autre.presence &&
-                           autre.mission == CoaDirecteur::CoaDirMission::Evenement &&
-                           autre.missionParam == aff.missionParam);
+                protegeJoueur = v == aff.missionParam;
+                protegeInscrit = !protegeJoueur && CoaDirecteur::AffectationDe(v, &autre) && autre.presence &&
+                                 autre.mission == CoaDirecteur::CoaDirMission::Evenement &&
+                                 autre.missionParam == aff.missionParam;
             }
         }
-        if (protege && d <= CoaDirecteur::EVENEMENT_DEFENSE_YD &&
+        if ((protegeJoueur || protegeInscrit) && d <= CoaDirecteur::EVENEMENT_DEFENSE_YD &&
             centre2 <= CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD * CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD)
         {
-            defense.push_back(cr);
-            continue;
+            (protegeJoueur ? defense : defenseInscrits).push_back(cr);
+            if (protegeJoueur)
+                continue;
         }
+        autres.push_back(cr);   // un invoque qui frappe un autre inscrit est aussi `autres` : le joueur passe avant
         // (a) A PORTEE : dans la laisse, a la portee d'engagement (celle de CibleDEvenement).
         if (centre2 <= laisse * laisse && d <= CoaDirecteur::EVENEMENT_ENGAGEMENT_YD)
             aPortee.push_back(cr);
@@ -6087,6 +6112,19 @@ void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie
     if (!defense.empty())
     {
         sortie.insert(sortie.end(), defense.begin(), defense.end());
+        // Relecture du 07/10 : la defense DU JOUEUR PRIME sur les autres invoques de l'evenement, y compris celui
+        // qui frappe le bot (DpsTargetValue prefere sinon la cible a portee aux PV les plus bas : un bot de melee au
+        // contact ne quittait jamais son invoque pour celui qui tue le joueur). L'appelant les retire de ses
+        // assaillants ; un adversaire HORS evenement (combat legitime) n'est jamais dans cette liste.
+        if (ecartes)
+            ecartes->insert(ecartes->end(), autres.begin(), autres.end());
+        evfDefenses.fetch_add(1, std::memory_order_relaxed);
+    }
+    else if (!defenseInscrits.empty())
+    {
+        // Un autre inscrit est frappe (pas le joueur) : on l'ajoute SANS rien retirer -- deux bots attaques chacun
+        // par un invoque ne doivent pas echanger leurs cibles ; le choix d'origine les departage.
+        sortie.insert(sortie.end(), defenseInscrits.begin(), defenseInscrits.end());
         evfDefenses.fetch_add(1, std::memory_order_relaxed);
     }
     else if (!aPortee.empty())

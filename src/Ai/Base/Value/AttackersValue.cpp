@@ -33,9 +33,13 @@ GuidVector AttackersValue::Calculate()
     // sans cela, un invoque qui frappe le joueur (hors groupe) n'etait jamais la cible d'un bot en combat, et
     // hors combat seul « attack anything » (4,0, coupe des que le bot est en combat) le voyait. AVANT le tri
     // d'origine (vivant, attaquable, en vue). Sans inscription publiee : un chargement atomique.
+    // Relecture du 07/10 : en DEFENSE, les autres invoques de l'evenement (meme celui qui frappe le bot) sont retires,
+    // pour que la defense prime ; les adversaires hors evenement restent (un combat legitime n'est pas retire).
     {
-        std::vector<Unit*> evenement;
-        CoaDirecteur::AssaillantsDEvenement(bot, evenement);
+        std::vector<Unit*> evenement, ecartes;
+        CoaDirecteur::AssaillantsDEvenement(bot, evenement, &ecartes);
+        for (Unit* u : ecartes)
+            targets.erase(u);
         targets.insert(evenement.begin(), evenement.end());
     }
 
