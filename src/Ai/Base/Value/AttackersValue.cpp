@@ -6,6 +6,7 @@
 
 #include "AttackersValue.h"
 #include "CellImpl.h"
+#include "CoaDirecteur.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Playerbots.h"
@@ -24,6 +25,23 @@ GuidVector AttackersValue::Calculate()
 
     if (Group* group = bot->GetGroup())
         AddAttackersOf(group, targets);
+
+    // CoA -- Directeur, bots ACTIFS (07/10/2026, coa-project/docs/EVENEMENTS-bots-actifs.md) : un bot INSCRIT a
+    // un evenement (mission `evenement`, lot F) compte parmi ses assaillants les invoques de cet evenement qui
+    // frappent le joueur servi ou un autre inscrit (DEFENSE, eux seuls s'il y en a), sinon ceux a portee dans
+    // sa laisse. C'est la valeur que lisent « dps assist » et « tank assist », EN combat comme hors combat :
+    // sans cela, un invoque qui frappe le joueur (hors groupe) n'etait jamais la cible d'un bot en combat, et
+    // hors combat seul « attack anything » (4,0, coupe des que le bot est en combat) le voyait. AVANT le tri
+    // d'origine (vivant, attaquable, en vue). Sans inscription publiee : un chargement atomique.
+    // Relecture du 07/10 : en DEFENSE, les autres invoques de l'evenement (meme celui qui frappe le bot) sont retires,
+    // pour que la defense prime ; les adversaires hors evenement restent (un combat legitime n'est pas retire).
+    {
+        std::vector<Unit*> evenement, ecartes;
+        CoaDirecteur::AssaillantsDEvenement(bot, evenement, &ecartes);
+        for (Unit* u : ecartes)
+            targets.erase(u);
+        targets.insert(evenement.begin(), evenement.end());
+    }
 
     RemoveNonThreating(targets);
 
