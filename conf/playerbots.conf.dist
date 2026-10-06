@@ -3623,6 +3623,19 @@ AiPlayerbot.Directeur.RecompenseObjets = "1397885"
 #        Default: 200000 (20 po)
 AiPlayerbot.Directeur.RecompenseMaxCuivre = 200000
 
+#    AiPlayerbot.Directeur.EvenementPortail
+#        Lot P des evenements (06/10/2026, coa-project/docs/EVENEMENTS-lot-P.md) : sous-action `portail`
+#        du verbe `evenement` (texte `portail` ou `portail:<id:q[,id:q]>`, `valeur` = cuivres, `duree_s`
+#        = delai de clic 30-600 s, point carte/x/y/z). Pose le gameobject 9100023 (« Faille d'orage »,
+#        migration exploitation/directeur/sql/2026_10_06_01_evenement_portail_faille.sql, AVANT le
+#        demarrage). Le joueur, ou un membre humain de son groupe, clique dessus : le portail se
+#        referme et la recompense (bornee comme `recompenser` : RecompenseMaxCuivre, RecompenseObjets)
+#        part par courrier dans la meme transaction que l'accuse `leve` raison `referme`. Sans clic
+#        avant le delai : retire sans recompense (`leve` raison `echu`). 0 : `portail` refuse
+#        `portail_eteint`. Lue a chaque pose dans la conf chargee : `.reload config` suffit.
+#        Default: 0
+AiPlayerbot.Directeur.EvenementPortail = 0
+
 #    AiPlayerbot.Directeur.EvenementAmbiances, EvenementSons, EvenementSonsPoint, EvenementMusiques,
 #    AiPlayerbot.Directeur.EvenementKits, EvenementSorts, EvenementSortsHaut
 #        Lot C des evenements (04/10, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3, § 5.1) :
