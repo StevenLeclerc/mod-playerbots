@@ -2831,7 +2831,11 @@ void ExecuterRecompense(CoaDirCommande const& c)
         crees.push_back(objet);
     }
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-    MailDraft brouillon("Votre prime", "Le contrat sur votre tête est soldé. Le Directeur.");
+    // 06/10 : `intensite` = 1 marque une part de la Faille d'orage (service : recompenses.MARQUE_FAILLE).
+    bool const faille = c.intensite == 1.0f;
+    MailDraft brouillon(faille ? "La faille d'orage" : "Votre prime",
+                        faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
+                               : "Le contrat sur votre tête est soldé. Le Directeur.");
     if (cuivre)
         brouillon.AddMoney(cuivre);
     for (Item* objet : crees)
