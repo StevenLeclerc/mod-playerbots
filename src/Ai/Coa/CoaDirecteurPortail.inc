@@ -19,10 +19,10 @@
 //   exploitation/directeur/sql/2026_10_06_01_evenement_portail_faille.sql) par Map::SummonGameObject, vu de tous
 //   (aucune phase). Accuse `execute` a la pose.
 //   CLIC : le joueur, ou un membre HUMAIN de son groupe, a EV_PORTAIL_CLIC_YD au plus, vivant -> le portail est
-//   referme (retire, animation de disparition du coeur) et la recompense part par COURRIER au joueur de
-//   l'evenement, dans la MEME transaction que l'accuse final de la commande (statut `leve`, raison `referme`) :
-//   apres un plantage, soit les deux sont en base, soit aucun. Un clic n'est traite qu'une fois (le portail
-//   quitte le registre avant la transaction).
+//   referme (retire tout de suite : animation de disparition puis suppression, RetirerObjetPortail) et la
+//   recompense part par COURRIER au joueur de l'evenement, dans la MEME transaction que l'accuse final de la
+//   commande (statut `leve`, raison `referme`) : apres un plantage, soit les deux sont en base, soit aucun. Un
+//   clic n'est traite qu'une fois (le portail quitte le registre avant la transaction).
 //   SANS CLIC : a l'echeance, au depart du joueur (hors ligne, autre carte), a `lever` (id ou tout), a
 //   `.directeur stop` et au bus eteint (LeverEvenementsSi), le portail est retire SANS recompense, accuse `leve`
 //   avec la raison (`echu`, `hors_ligne`, `carte`, `disparu`, `lever`, `arret`, `bus_eteint`).
@@ -103,6 +103,21 @@ GameObject* ObjetPortail(EvPortail const& po)
 {
     Map* map = sMapMgr->FindBaseNonInstanceMap(po.carte);
     return map ? map->GetGameObject(po.guid) : nullptr;
+}
+
+// Retire VRAIMENT l'objet, tout de suite (lu dans le coeur, GameObject.cpp) : Map::SummonGameObject a pose
+// m_respawnTime = pose + delai + filet et SetSpellId(1). DespawnOrUnsummon() seul ne touche pas m_respawnTime
+// (aucun m_goData) ; au GO_JUST_DEACTIVATED suivant, isSummonedAndExpired est faux, et un GOOBER non
+// consommable prend la branche « Do not delete chests or goobers » : il redevient GO_READY, VISIBLE, jusqu'au
+// filet. SetRespawnTime(0) d'abord : la mise a jour suivante prend la branche GetSpellId() (SetRespawnTime(0),
+// Delete()), apres l'animation de disparition envoyee par DespawnOrUnsummon. Ne PAS passer consumable a 1 en
+// base : le chemin IsDespawnAtAction cache l'objet sans le supprimer.
+void RetirerObjetPortail(GameObject* go)
+{
+    if (!go)
+        return;
+    go->SetRespawnTime(0);
+    go->DespawnOrUnsummon();
 }
 
 void RefuserPortail(CoaDirCommande const& c, char const* raison)
@@ -217,8 +232,7 @@ void ExecuterPortail(CoaDirCommande const& c)
 // Fermeture SANS recompense (echeance, joueur parti, objet disparu, lever, stop, bus eteint).
 void FermerPortail(EvPortail const& po, char const* motif)
 {
-    if (GameObject* go = ObjetPortail(po))
-        go->DespawnOrUnsummon();
+    RetirerObjetPortail(ObjetPortail(po));
     LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=portail joueur={} valeur={} motif={}"
              " clics_refuses={}", po.id, po.joueur, po.cuivre, motif, po.clicsRefuses);
     CloreEvenement(po.id, po.joueur, "leve", motif);
@@ -297,8 +311,7 @@ void RefermerPortail(EvPortail const& po, Player* q, GameObject* go)
                 raison, po.id));
         CharacterDatabase.CommitTransaction(trans);
     }
-    if (go)
-        go->DespawnOrUnsummon();
+    RetirerObjetPortail(go);
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
     LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=evenement cible={} joueur={} statut=leve raison={}", po.id,
              po.joueur, po.joueur, raison);
