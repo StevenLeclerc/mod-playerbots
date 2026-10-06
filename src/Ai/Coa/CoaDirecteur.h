@@ -48,6 +48,7 @@
 
 class Map;
 class Player;
+class Unit;
 class WorldLocation;
 struct Position;
 
@@ -274,7 +275,9 @@ enum class CoaDirMission : uint8
     Chasse,     // un camp de creatures de son niveau au centre du disque
     Recolte,    // valeur : metier (182 herboristerie, 186 minage), noeuds au centre
     Passage,    // il traverse la scene, puis s'en va a l'echeance
-    Bande       // valeur : guid du CHEF (une presence du meme joueur) ; le centre suit le chef arrive
+    Bande,      // valeur : guid du CHEF (une presence du meme joueur) ; le centre suit le chef arrive
+    Evenement   // lot F des evenements (06/10) : valeur 0 ; missionParam = guid du JOUEUR dont il sert
+                // l'evenement (option Directeur.EvenementBots ; eteinte : degradee en Chasse)
 };
 
 // Missions : la laisse d'un bot en mission s'etend a rayon + MISSION_LAISSE_MARGE_YD ;
@@ -554,6 +557,25 @@ void Compter(CoaDirCompteur c);
 //   joueur,<guid> -> guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo,afk
 // (`afk`, 15e champ, 02/10 : 1 si PLAYER_FLAGS_AFK, EN FIN de ligne)
 // `absent` si le personnage n'est pas en jeu, `invalid` si mal formee OU bus eteint.
+
+// ------------------------------------------------------------------ lot F des evenements (06/10/2026)
+//
+// LES BOTS PARTICIPENT A L'EVENEMENT (coa-project/docs/EVENEMENTS-lot-F.md ; grimoire § 2.7, § 5.2).
+// INSCRIPTION (G1) : la FINALE `Q-` d'une presence `peupler` portant la mission `evenement` (texte
+// `evenement`, valeur 0), option Directeur.EvenementBots ET Directeur.Missions. L'affectation EST le
+// registre : « ce bot sert l'evenement du joueur `missionParam`, au point (x, y), rayon `rayon` ». Elle
+// en garde tout le cycle de vie (trajet, sejour, laisse rayon + MISSION_LAISSE_MARGE_YD, levee par
+// `lever`, echeance, mort, joueur hors ligne, stop, bus eteint). Un bot DEJA proche du joueur peut etre
+// inscrit : l'inscription est exemptee du refus `a_vue` (option allumee seulement).
+// CIBLES (G2, G3) : le fil monde publie chaque seconde les invoques VIVANTS du lot D par joueur (copie
+// sous un verrou propre). CibleDEvenement, appelee par GrindTargetValue::FindTargetForGrinding APRES les
+// assaillants et AVANT le trajet pacifique, rend le plus proche invoque de l'evenement servi : a
+// EVENEMENT_ENGAGEMENT_YD du bot au plus, dans la laisse (rayon + 30 yd du centre), attaquable et en
+// vue -- SANS les filtres de niveau (+4), de rang, de gris, de hauteur, d'assistance, ni la borne de
+// 30 yd des statuts RPG actifs. Fil de carte du bot (meme carte que l'invoque : GetCreature par le bot).
+// Sans inscription publiee : UN chargement atomique, puis le code d'origine.
+constexpr float EVENEMENT_ENGAGEMENT_YD = 50.0f;
+Unit* CibleDEvenement(Player* bot);
 }  // namespace CoaDirecteur
 
 void AddSC_coa_directeur();

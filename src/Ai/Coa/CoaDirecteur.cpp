@@ -498,6 +498,7 @@ char const* NomMission(CoaDirecteur::CoaDirMission m)
         case CoaDirecteur::CoaDirMission::Recolte: return "recolte";
         case CoaDirecteur::CoaDirMission::Passage: return "passage";
         case CoaDirecteur::CoaDirMission::Bande:   return "bande";
+        case CoaDirecteur::CoaDirMission::Evenement: return "evenement";   // lot F des evenements (06/10)
         default:                                   return "aucune";
     }
 }
@@ -5909,6 +5910,109 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
     fileMorts.push_back(e);
 }
 
+// ------------------------------------------------------------------ lot F des evenements (06/10/2026) : les bots inscrits
+//
+// coa-project/docs/EVENEMENTS-lot-F.md ; grimoire § 2.7 (`mission: evenement`), § 5.2 (lot F, reduit au
+// besoin de la Faille d'orage). Retour du commanditaire apres la Faille du 06/10 : « les bots, ils n'ont
+// strictement rien a faire de l'evenement ». MESURE ce soir-la (faille-orage.log, CoaBots.log) : le bot
+// appele est arrive, puis, presence SANS mission, a repris son RPG ordinaire (camp, grind lointain, quete)
+// sous la seule laisse de PresenceLaisseYd (110 yd) -- ligne `laisse ... sejour=1 mission=0` a 21:49:11
+// (Paris) -- et n'etait plus a 100 yd au recompte de la vague 2 ; `tues_bot=0` sur les 6 lots.
+// G1, l'INSCRIPTION, n'a pas de registre propre : c'est l'affectation de presence (finale `Q-`, mission
+// Evenement, missionParam = joueur) -- voir LireMission et CoaDirecteur.h. Ce bloc porte G2 : la LISTE DES
+// CIBLES. Le registre du lot D (evInvoques) est au fil monde seul (P-137) ; les fils de carte qui choisissent
+// une cible (GrindTargetValue) n'y touchent jamais : le fil monde en publie chaque seconde une COPIE (guids
+// des invoques vivants, par joueur) sous evfVerrou, le seul verrou du lot F. La creature elle-meme est relue
+// par le bot, depuis son fil de carte (meme carte : ObjectAccessor::GetCreature sur le bot).
+// Option Directeur.EvenementBots eteinte : rien n'est publie, CibleDEvenement rend nul au premier test.
+
+std::shared_mutex evfVerrou;                                      // le SEUL verrou du lot F
+std::unordered_map<uint32, std::vector<ObjectGuid>> evfCibles;    // cle : guid bas du joueur ; sous evfVerrou
+std::atomic<uint32> evfNbJoueurs{0};                              // evfCibles.size(), chemin chaud sans verrou
+std::atomic<uint32> evfChoix{0};                                  // cibles rendues a GrindTargetValue (bilan)
+uint32 evfBilanS = 0;                                             // fil monde : derniere ligne de bilan
+constexpr uint32 EVF_BILAN_S = 60;
+
+// Fil monde, chaque seconde (Entretien, apres SuivreInvoques).
+void PublierCiblesEvenement()
+{
+    std::unordered_map<uint32, std::vector<ObjectGuid>> neuf;
+    if (sPlayerbotAIConfig.directeurEvenementBots)
+        for (EvInvoque const& v : evInvoques)
+            if (!v.mort)
+                neuf[v.joueur].push_back(v.guid);
+    if (neuf.empty() && evfNbJoueurs.load(std::memory_order_relaxed) == 0)
+        return;   // rien publie, rien a publier : aucun verrou
+    uint32 cibles = 0;
+    for (auto const& [joueur, guids] : neuf)
+        cibles += static_cast<uint32>(guids.size());
+    uint32 const joueurs = static_cast<uint32>(neuf.size());
+    {
+        std::unique_lock<std::shared_mutex> garde(evfVerrou);
+        evfCibles.swap(neuf);
+        evfNbJoueurs.store(joueurs, std::memory_order_relaxed);
+    }
+    uint32 const maintenant = Maintenant();
+    if (!joueurs || maintenant < evfBilanS + EVF_BILAN_S)
+        return;
+    evfBilanS = maintenant;
+    uint32 inscrits = 0;
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+        for (auto const& [guid, f] : affectations)
+            if (f.a.presence && f.a.mission == CoaDirecteur::CoaDirMission::Evenement && f.a.finS > maintenant)
+                ++inscrits;
+    }
+    LOG_INFO("playerbots", "coa directeur evenement_bots: joueurs={} cibles={} inscrits={} choix={}", joueurs, cibles,
+             inscrits, evfChoix.exchange(0, std::memory_order_relaxed));
+}
+}  // namespace (lot F : la fonction publique, puis retour a l'espace anonyme)
+
+Unit* CoaDirecteur::CibleDEvenement(Player* bot)
+{
+    if (!bot || evfNbJoueurs.load(std::memory_order_relaxed) == 0)
+        return nullptr;
+    CoaDirecteur::Affectation aff;
+    if (!CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) || !aff.presence ||
+        aff.mission != CoaDirecteur::CoaDirMission::Evenement || !aff.missionParam || aff.carte != bot->GetMapId() ||
+        !bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive())
+        return nullptr;
+    std::vector<ObjectGuid> guids;
+    {
+        std::shared_lock<std::shared_mutex> garde(evfVerrou);
+        auto const it = evfCibles.find(aff.missionParam);
+        if (it == evfCibles.end())
+            return nullptr;
+        guids = it->second;
+    }
+    float const laisse = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+    Creature* meilleure = nullptr;
+    float meilleureD = 0.0f;
+    for (ObjectGuid const& g : guids)
+    {
+        Creature* cr = ObjectAccessor::GetCreature(*bot, g);   // carte du bot : nul si l'invoque est ailleurs
+        if (!cr || !cr->IsInWorld() || cr->IsDuringRemoveFromWorld() || !cr->IsAlive())
+            continue;
+        float const cx = cr->GetPositionX() - aff.x;
+        float const cy = cr->GetPositionY() - aff.y;
+        if (cx * cx + cy * cy > laisse * laisse)
+            continue;   // hors de la laisse : il ne s'y laisse pas entrainer
+        float const d = bot->GetDistance(cr);
+        if (d > CoaDirecteur::EVENEMENT_ENGAGEMENT_YD || (meilleure && d >= meilleureD))
+            continue;
+        if (!bot->IsValidAttackTarget(cr) || !bot->IsWithinLOSInMap(cr))
+            continue;
+        meilleure = cr;
+        meilleureD = d;
+    }
+    if (meilleure)
+        evfChoix.fetch_add(1, std::memory_order_relaxed);
+    return meilleure;
+}
+
+namespace
+{
+
 // Entretien de chaque seconde, bus allume OU eteint : la purge d'un bus
 // eteint met des mercenaires en file, et il faut bien les reconstruire.
 void Entretien(uint32 diff)
@@ -5948,6 +6052,8 @@ void Entretien(uint32 diff)
     SuivreEvenements();
     // Lot D des evenements : invoques (morts, retraits hors de vue, joueur parti, fins de lot).
     SuivreInvoques();
+    // Lot F des evenements : les invoques vivants par joueur, publies pour les bots inscrits.
+    PublierCiblesEvenement();
     LivrerParoles();
     if (!aReconstruire.empty())
         Reconstruire();
@@ -6223,6 +6329,8 @@ MissionLue LireMission(CoaDirCommande const& c, Player* bot, bool finale)
         type = M::Passage;
     else if (c.texte == "bande")
         type = M::Bande;
+    else if (c.texte == "evenement")
+        type = M::Evenement;   // lot F des evenements (06/10) : valeur 0, voir plus bas
     if (type == M::Aucune || c.valeur < 0)
     {
         m.raison = "type_inconnu";
@@ -6266,6 +6374,24 @@ MissionLue LireMission(CoaDirCommande const& c, Player* bot, bool finale)
         }
         if (!chef)
             degrader("sans_chef");
+    }
+    else if (type == M::Evenement)
+    {
+        // Lot F des evenements (06/10) : le parametre est le JOUEUR dont le bot sert l'evenement (le
+        // demandeur de la presence), jamais lu dans `valeur` (0 attendu, emetteur.py). Option eteinte :
+        // degradee en Chasse (le bot reste au lieu ; aucune cible imposee). Valeur non nulle : ignoree.
+        if (c.valeur != 0)
+        {
+            m = MissionLue();
+            m.etat = "ignoree";
+            m.raison = "valeur";
+        }
+        else if (!sPlayerbotAIConfig.directeurEvenementBots)
+            degrader("evenement_eteint");
+        else if (!c.joueur)
+            degrader("sans_joueur");
+        else
+            m.param = c.joueur;
     }
     else
         m.param = 0;   // chasse, passage : sans parametre
@@ -7634,7 +7760,14 @@ void ExecuterAffectation(CoaDirCommande const& recue)
         }
         float const bx = bot->GetPositionX() - joueur->GetPositionX();
         float const by = bot->GetPositionY() - joueur->GetPositionY();
-        if (!continuation && bx * bx + by * by <= PRESENCE_A_VUE_YD * PRESENCE_A_VUE_YD)
+        // Lot F des evenements (06/10) : une INSCRIPTION (finale `Q-`, mission `evenement`, options
+        // EvenementBots et Missions) vise aussi les bots DEJA presents : il n'apparait rien, il marche
+        // de quelques yards vers l'evenement. Exemptee du refus `a_vue` ; les autres controles restent.
+        bool const inscriptionEvenement = sPlayerbotAIConfig.directeurEvenementBots &&
+                                          sPlayerbotAIConfig.directeurMissions && !compagnon && !saut &&
+                                          c.texte == "evenement" && c.valeur == 0 && c.action.size() > 2 &&
+                                          c.action[0] == 'Q' && c.action[1] == '-';
+        if (!continuation && !inscriptionEvenement && bx * bx + by * by <= PRESENCE_A_VUE_YD * PRESENCE_A_VUE_YD)
         {
             Refuser(c, "a_vue");
             return;

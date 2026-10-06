@@ -3488,6 +3488,22 @@ AiPlayerbot.Directeur.ParoleAVue = 0
 #        Default: 0
 AiPlayerbot.Directeur.Missions = 0
 
+#    AiPlayerbot.Directeur.EvenementBots
+#        Lot F des evenements (06/10/2026, coa-project/docs/EVENEMENTS-lot-F.md) : la finale `Q-` d'une
+#        presence `peupler` peut porter la mission `evenement` (texte `evenement`, valeur 0) : le bot est
+#        INSCRIT a l'evenement du joueur demandeur. Il va au point, y reste (laisse rayon + 30 yd, comme
+#        toute mission) et prend pour cible, en priorite et sans les filtres de niveau, de rang, de gris
+#        ni de distance des statuts RPG, le plus proche monstre VIVANT invoque pour ce joueur (lot D,
+#        entrees 9100000-9109999) a 50 yd de lui au plus et dans sa laisse. Un bot deja proche du joueur
+#        peut etre inscrit (exempte du refus `a_vue`). Exige aussi Directeur.Missions = 1. Libere par la
+#        levee de sa presence (`lever`), son echeance, sa mort, la deconnexion du joueur, stop, bus eteint.
+#        Ligne `coa directeur evenement_bots:` toutes les 60 s tant qu'un bot est inscrit.
+#        A 0 : la mission `evenement` est DEGRADEE en `chasse` (le bot reste au lieu, ne prend que ce que
+#        son IA prend d'ordinaire), et `a_vue` s'applique. Lue par PlayerbotAIConfig::Initialize() SEULEMENT :
+#        `reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0
+AiPlayerbot.Directeur.EvenementBots = 0
+
 #
 #    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
 #

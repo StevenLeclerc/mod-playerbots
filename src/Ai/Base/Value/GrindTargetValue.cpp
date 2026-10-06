@@ -48,6 +48,17 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
         return unit;
     }
 
+    // CoA -- Directeur, lot F des evenements (06/10/2026) : un bot INSCRIT a un
+    // evenement (finale `Q-` de mission `evenement`, option Directeur.EvenementBots)
+    // prend pour cible, EN PRIORITE, le plus proche monstre invoque pour ce joueur
+    // (lot D) a portee et dans sa laisse -- sans les filtres ci-dessous (niveau + 4,
+    // rang, gris, hauteur, assistance, 30 yd des statuts RPG actifs). APRES les
+    // assaillants (il riposte d'abord), AVANT le trajet pacifique (en route, il
+    // s'engage sur un invoque a portee). Sans inscription publiee : un chargement
+    // atomique, puis le code d'origine. CoaDirecteur.h, « lot F des evenements ».
+    if (Unit* cible = CoaDirecteur::CibleDEvenement(bot))
+        return cible;
+
     // CoA -- Directeur, lot D2b suite : TRAJET PACIFIQUE. En trajet d'une
     // affectation du Directeur (option Directeur.TrajetPacifique), le bot ne
     // CHOISIT aucune cible : ni creature, ni joueur. Place APRES la boucle des

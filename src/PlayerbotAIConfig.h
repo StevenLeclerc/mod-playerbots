@@ -461,6 +461,10 @@ public:
     // qui le garde au lieu de sa mission, et sa laisse s'y centre. Eteint par
     // defaut : la mission est ignoree (journal `etat=ignoree`), rien ne change.
     bool directeurMissions;
+    // Lot F des evenements (06/10/2026) : la mission `evenement` d'une finale `Q-` inscrit le
+    // bot a l'evenement du joueur (cibles : les invoques du lot D ; CoaDirecteur::CibleDEvenement).
+    // Eteint par defaut : la mission est degradee en `chasse` (le bot reste au lieu, rien d'autre).
+    bool directeurEvenementBots;
     // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
     // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
     // eteint par defaut (les crochets de mort rendent la main au premier test).

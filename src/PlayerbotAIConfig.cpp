@@ -770,6 +770,8 @@ bool PlayerbotAIConfig::Initialize()
     directeurTeleportLointain = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.TeleportLointain", false);
     directeurParoleAVue = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ParoleAVue", false);
     directeurMissions = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Missions", false);
+    // Lot F des evenements (06/10/2026) : eteint par defaut.
+    directeurEvenementBots = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementBots", false);
     // Sous 5 s, un joueur recevrait un paquet meteo presque a chaque seconde.
     if (directeurMeteoReaffirmationSecondes < 5)
         directeurMeteoReaffirmationSecondes = 5;
