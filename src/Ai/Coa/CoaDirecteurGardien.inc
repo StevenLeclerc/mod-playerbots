@@ -20,14 +20,15 @@
 //      BASE_VALUE). DEGATS : CustomData de la creature (EvDose), lu par trois crochets UnitScript (melee, sort
 //      direct, tic periodique non positif) quand l'ATTAQUANT est de la plage 9100000-9109999. La forme a 4
 //      morceaux reste celle d'avant (aucune dose, aucun renfort). Etendue et option a 0 : refus
-//      `gardien_eteint`. `renfort` exige le Gardien (EV_GARDIEN_ENTREE) et nombre = 1, sinon
-//      `liste_blanche_ou_bornes`.
+//      `gardien_eteint`. `renfort` exige un chef de la table RegleRenfort (le Gardien EV_GARDIEN_ENTREE ; depuis
+//      la nuit des morts, aussi le Sonneur EV_SONNEUR_ENTREE) et nombre = 1, sinon `liste_blanche_ou_bornes`.
 //   2. RENFORT A MI-VIE (DeclencherRenforts, chaque seconde, fil monde, depuis SuivreInvoques) : un invoque
-//      arme (`renfort`) VIVANT sous EV_RENFORT_SEUIL_PCT % de ses PV fait sortir EV_RENFORT_NOMBRE Etincelles
-//      (EV_RENFORT_ENTREE) a ses cotes, UNE SEULE FOIS (renfortFait, meme si refuse), au NIVEAU du Gardien
-//      (evNiveauForce), a SA dose, inscrites sous SON lot (plafond par joueur et du royaume, levee, retrait,
-//      cibles des bots : evInvoques), lancees sur la cible du Gardien (ou le joueur). Map::SummonCreature SANS
-//      invocateur : le crochet OnCreatureAddWorld ne les prend pas pour des renforts SmartAI. Journal :
+//      arme (`renfort`) VIVANT sous EV_RENFORT_SEUIL_PCT % de ses PV fait sortir son renfort (RegleRenfort :
+//      EV_RENFORT_NOMBRE Etincelles EV_RENFORT_ENTREE pour le Gardien) a ses cotes, UNE SEULE FOIS
+//      (renfortFait, meme si refuse), au NIVEAU du Gardien (evNiveauForce), a SA dose, inscrites sous SON lot
+//      (plafond par joueur et du royaume, levee, retrait, cibles des bots : evInvoques), lancees sur la cible du
+//      Gardien (ou le joueur). Map::SummonCreature SANS invocateur : le crochet OnCreatureAddWorld ne les prend
+//      pas pour des renforts SmartAI. Journal :
 //      `coa directeur evenement: id= sous_action=invoquer joueur= valeur= motif=renfort mivie=1 poses= ...`
 //      (motif `renfort` : le service l'ignore comme fin de lot ; `poses=0 raison=` quand rien n'est sorti).
 //   3. COFFRE (sous-action `coffre`, texte exact `coffre`, valeur 0, duree_s = vie 60-600 s, point carte/x/y/z
@@ -48,11 +49,24 @@
 //      (LeverEvenementsSi). Un par joueur.
 // Les crochets de fil de carte (degats, butin) ne lisent que la creature, le coffre et le joueur en cause, et une
 // petite table sous evCoffresVerrou (le SEUL verrou du lot) ; le registre evCoffres est au FIL MONDE seul (P-137).
+//
+// NUIT DES MORTS (08/10/2026, docs/EVENEMENTS-nuit-des-morts.md) : le renfort a mi-vie n'est plus propre au Gardien.
+// Une TABLE FERMEE (RegleRenfort) dit, pour chaque chef d'evenement, quel renfort il appelle et combien :
+//   9100004 Gardien de la faille  -> 2 x 9100001 Etincelle d'orage (inchange)
+//   9100304 Sonneur de glas       -> 3 x 9100302 Squelette du glas (nuit des morts)
+// Une entree hors de la table refuse `renfort` (`liste_blanche_ou_bornes`), comme avant pour tout autre que le
+// Gardien. Le Sonneur et ses squelettes ne sortent que si EvenementCreatures les permet (absents par defaut : inerte).
+// Le COFFRE aussi a deux formes, fermees : `coffre` -> 9100024 « Coffre de la faille » (inchange) ; `coffre:9100026`
+// -> 9100026 « Coffre du Sonneur » (nuit des morts : meme modele, meme butin -- son lootId est 9100024 --, son nom).
+// Gabarit absent (migration 2026_10_08_02 non appliquee) : refus `gabarit`.
 
 constexpr char const EV_GARDIEN_OPTION[] = "AiPlayerbot.Directeur.EvenementGardien";
 constexpr uint32 EV_GARDIEN_ENTREE = 9100004;          // Gardien de la faille (migration 2026_10_05_01)
 constexpr uint32 EV_RENFORT_ENTREE = 9100001;          // Etincelle d'orage
 constexpr uint32 EV_RENFORT_NOMBRE = 2;
+constexpr uint32 EV_SONNEUR_ENTREE = 9100304;          // Sonneur de glas (nuit des morts, migration 2026_10_08_02)
+constexpr uint32 EV_SONNEUR_RENFORT_ENTREE = 9100302;  // Squelette du glas
+constexpr uint32 EV_SONNEUR_RENFORT_NOMBRE = 3;
 constexpr int32 EV_RENFORT_SEUIL_PCT = 50;
 constexpr uint32 EV_RENFORT_VIE_S = 300;               // TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, comme invoquer
 constexpr float EV_RENFORT_ECART_MIN_YD = 3.0f;
@@ -60,6 +74,7 @@ constexpr float EV_RENFORT_ECART_MAX_YD = 5.0f;
 constexpr uint32 EV_DOSE_MIN_PCT = 25;
 constexpr uint32 EV_DOSE_MAX_PCT = 100;
 constexpr uint32 EV_COFFRE_ENTREE = 9100024;           // gameobject_template (grimoire § 5.5 : 9100020-9100029)
+constexpr uint32 EV_COFFRE_NUIT_ENTREE = 9100026;      // nuit des morts : « Coffre du Sonneur » (meme plage)
 constexpr uint32 EV_COFFRE_VIE_MIN_S = 60;
 constexpr uint32 EV_COFFRE_VIE_MAX_S = 600;
 constexpr uint32 EV_COFFRE_FILET_S = 30;               // l'objet s'efface seul 30 s apres l'echeance (registre perdu)
@@ -105,6 +120,18 @@ bool LireMorceauxGardien(std::string const& pv, std::string const& degats, std::
     return true;
 }
 
+// Le renfort a mi-vie d'un chef d'evenement (table FERMEE, voir l'en-tete). -> vrai et (entree, nombre) si `chef`
+// en appelle un ; faux sinon.
+bool RegleRenfort(uint32 chef, uint32& entree, uint32& nombre)
+{
+    switch (chef)
+    {
+        case EV_GARDIEN_ENTREE: entree = EV_RENFORT_ENTREE; nombre = EV_RENFORT_NOMBRE; return true;
+        case EV_SONNEUR_ENTREE: entree = EV_SONNEUR_RENFORT_ENTREE; nombre = EV_SONNEUR_RENFORT_NOMBRE; return true;
+        default: return false;
+    }
+}
+
 // Gardes propres a la forme etendue, AVANT toute pose. -> raison du refus ou nullptr.
 char const* RefusGardien(EvAppLu const& lu, uint32 entree)
 {
@@ -112,7 +139,8 @@ char const* RefusGardien(EvAppLu const& lu, uint32 entree)
         return nullptr;
     if (!GardienAllume())
         return "gardien_eteint";
-    if (lu.renfort && (entree != EV_GARDIEN_ENTREE || lu.nombre != 1))
+    uint32 renfortEntree = 0, renfortNombre = 0;
+    if (lu.renfort && (!RegleRenfort(entree, renfortEntree, renfortNombre) || lu.nombre != 1))
         return "liste_blanche_ou_bornes";
     return nullptr;
 }
@@ -177,7 +205,11 @@ void DeclencherRenforts()
         Player* p = JoueurConnecte(parent.joueur);
         char const* raison = nullptr;
         uint32 n = 0;
-        if (lot == evLots.end() || lot->second.retraitDemande)
+        // Nuit des morts : le renfort du chef (table fermee) ; un arme hors table n'existe pas (RefusGardien).
+        uint32 renfortEntree = 0, renfortNombre = 0;
+        if (!RegleRenfort(parent.entree, renfortEntree, renfortNombre))
+            raison = "regle";
+        else if (lot == evLots.end() || lot->second.retraitDemande)
             raison = "lot_leve";
         else if (!p)
             raison = "hors_ligne";
@@ -187,7 +219,7 @@ void DeclencherRenforts()
             uint32 const cap = sPlayerbotAIConfig.directeurEvenementInvoquesParJoueur;
             size_t const placeRoyaume = evInvoques.size() < EV_INVOQUES_MAX ? EV_INVOQUES_MAX - evInvoques.size() : 0;
             uint32 const placeJoueur = vivants < cap ? cap - vivants : 0;
-            n = std::min<uint32>(EV_RENFORT_NOMBRE, std::min<uint32>(placeJoueur, uint32(placeRoyaume)));
+            n = std::min<uint32>(renfortNombre, std::min<uint32>(placeJoueur, uint32(placeRoyaume)));
             if (!n)
                 raison = "plein";
         }
@@ -216,7 +248,7 @@ void DeclencherRenforts()
                     y = gardien->GetPositionY();
                 }
                 evNiveauForce = parent.niveau;
-                TempSummon* s = map->SummonCreature(EV_RENFORT_ENTREE, Position(x, y, z, gardien->GetOrientation()),
+                TempSummon* s = map->SummonCreature(renfortEntree, Position(x, y, z, gardien->GetOrientation()),
                                                     nullptr, EV_RENFORT_VIE_S * IN_MILLISECONDS, nullptr);
                 evNiveauForce = 0;
                 if (!s)
@@ -238,7 +270,7 @@ void DeclencherRenforts()
                 r.joueur = parent.joueur;
                 r.guid = s->GetGUID();
                 r.carte = parent.carte;
-                r.entree = EV_RENFORT_ENTREE;
+                r.entree = renfortEntree;
                 r.niveau = parent.niveau;
                 r.renfort = true;
                 r.pv = parent.pv;
@@ -252,7 +284,7 @@ void DeclencherRenforts()
         }
         LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif=renfort"
                  " mivie=1 poses={} renfort_entree={} niveau={} pv_gardien={} pv={} degats={} raison={}", parent.id,
-                 parent.joueur, parent.entree, poses, EV_RENFORT_ENTREE, parent.niveau, pvGardien, parent.pv,
+                 parent.joueur, parent.entree, poses, renfortEntree, parent.niveau, pvGardien, parent.pv,
                  parent.degats, raison ? raison : "-");
     }
 }
@@ -262,6 +294,7 @@ void DeclencherRenforts()
 struct EvCoffre
 {
     uint32 id;               // commande `evenement` coffre
+    uint32 entree = EV_COFFRE_ENTREE;   // gameobject pose (la faille, ou la nuit des morts)
     uint32 joueur;           // le joueur de l'evenement
     ObjectGuid guid;
     uint32 carte;
@@ -300,7 +333,10 @@ GameObject* ObjetCoffre(EvCoffre const& co)
 
 void ExecuterCoffre(CoaDirCommande const& c)
 {
-    if (!TexteBusValide(c.texte) || c.texte != "coffre")
+    // Deux formes fermees (voir l'en-tete) : `coffre` (la faille), `coffre:9100026` (la nuit des morts).
+    uint32 const entree =
+        c.texte == "coffre" ? EV_COFFRE_ENTREE : c.texte == "coffre:9100026" ? EV_COFFRE_NUIT_ENTREE : 0;
+    if (!TexteBusValide(c.texte) || !entree)
     {
         RefuserCoffre(c, "texte");
         return;
@@ -331,7 +367,7 @@ void ExecuterCoffre(CoaDirCommande const& c)
         RefuserCoffre(c, "carte");
         return;
     }
-    GameObjectTemplate const* gabarit = sObjectMgr->GetGameObjectTemplate(EV_COFFRE_ENTREE);
+    GameObjectTemplate const* gabarit = sObjectMgr->GetGameObjectTemplate(entree);
     if (!gabarit || gabarit->type != GAMEOBJECT_TYPE_CHEST)
     {
         RefuserCoffre(c, "gabarit");   // migration du lot G absente (ou appliquee apres le demarrage)
@@ -355,7 +391,7 @@ void ExecuterCoffre(CoaDirCommande const& c)
         return;
     }
     float const face = std::atan2(p->GetPositionY() - c.y, p->GetPositionX() - c.x);
-    GameObject* go = p->GetMap()->SummonGameObject(EV_COFFRE_ENTREE, c.x, c.y, sol, face, 0.0f, 0.0f,
+    GameObject* go = p->GetMap()->SummonGameObject(entree, c.x, c.y, sol, face, 0.0f, 0.0f,
                                                    std::sin(face / 2.0f), std::cos(face / 2.0f),
                                                    c.dureeS + EV_COFFRE_FILET_S);
     if (!go)
@@ -365,6 +401,7 @@ void ExecuterCoffre(CoaDirCommande const& c)
     }
     EvCoffre co;
     co.id = c.id;
+    co.entree = entree;
     co.joueur = c.cible;
     co.guid = go->GetGUID();
     co.carte = p->GetMapId();
@@ -376,7 +413,7 @@ void ExecuterCoffre(CoaDirCommande const& c)
     }
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=coffre joueur={} valeur=0 motif=pose vie_s={}"
-             " x={:.1f} y={:.1f} z={:.1f}", c.id, c.cible, c.dureeS, c.x, c.y, sol);
+             " x={:.1f} y={:.1f} z={:.1f} objet={}", c.id, c.cible, c.dureeS, c.x, c.y, sol, entree);
     Accuser(c, "execute", nullptr);
 }
 
@@ -479,7 +516,7 @@ bool CoffrePermis(Player* q, ObjectGuid const& g)
 
 bool EstNotreCoffre(ObjectGuid const& g)
 {
-    return g.IsGameObject() && g.GetEntry() == EV_COFFRE_ENTREE;
+    return g.IsGameObject() && (g.GetEntry() == EV_COFFRE_ENTREE || g.GetEntry() == EV_COFFRE_NUIT_ENTREE);
 }
 
 // Degats doses (fils de carte). Seuls les attaquants de la plage portant une dose sont touches.

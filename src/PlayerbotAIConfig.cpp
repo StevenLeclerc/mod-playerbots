@@ -837,7 +837,9 @@ bool PlayerbotAIConfig::Initialize()
     directeurEvenementReaffirmationSecondes = std::clamp<uint32>(directeurEvenementReaffirmationSecondes, 5, 25);
     directeurEvenementHauteurYd = std::clamp<uint32>(directeurEvenementHauteurYd, 3, 40);
     directeurEvenementDistanceYd = std::clamp<uint32>(directeurEvenementDistanceYd, 10, 100);
-    directeurEvenementDeclencheursParJoueur = std::clamp<uint32>(directeurEvenementDeclencheursParJoueur, 1, 16);
+    // Nuit des morts (08/10/2026) : 16 -> 32, pour les effets au sol multiplies autour du joueur ; le plafond du
+    // royaume (EV_DECLENCHEURS_MAX, 64, CoaDirecteur.cpp) borne toujours la somme de tous les joueurs.
+    directeurEvenementDeclencheursParJoueur = std::clamp<uint32>(directeurEvenementDeclencheursParJoueur, 1, 32);
     // Lot D des evenements (05/10/2026) : eteint par defaut ; les 4 gabarits d'orage de la Faille
     // (9100001-9100004, lot E) ; « naissance » 7398 ; 12 invoques vivants par joueur ; 220 yd.
     directeurEvenementApparitions = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementApparitions", false);

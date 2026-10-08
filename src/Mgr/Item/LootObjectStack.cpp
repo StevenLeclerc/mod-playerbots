@@ -312,8 +312,9 @@ bool LootObject::IsLootPossible(Player* bot)
 
     // CoA, lot G des evenements (08/10/2026) : le coffre de la Faille d'orage (gameobject 9100024, EV_COFFRE_ENTREE
     // de CoaDirecteurGardien.inc) n'est ouvrable que par le joueur humain de l'evenement ; un bot serait refuse a
-    // chaque essai et le retenterait tant que le coffre existe.
-    if (go && go->GetEntry() == 9100024)
+    // chaque essai et le retenterait tant que le coffre existe. Nuit des morts (08/10/2026) : de meme le coffre du
+    // Sonneur (9100026, EV_COFFRE_NUIT_ENTREE).
+    if (go && (go->GetEntry() == 9100024 || go->GetEntry() == 9100026))
         return false;
 
     // Conditional objects (quest chests, goobers, ...) are gated client-side on quest state.

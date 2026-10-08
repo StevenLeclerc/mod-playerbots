@@ -3669,6 +3669,9 @@ AiPlayerbot.Directeur.RecompenseMaxCuivre = 200000
 #        part par courrier dans la meme transaction que l'accuse `leve` raison `referme`. Sans clic
 #        avant le delai : retire sans recompense (`leve` raison `echu`). 0 : `portail` refuse
 #        `portail_eteint`. Lue a chaque pose dans la conf chargee : `.reload config` suffit.
+#        Nuit des morts (08/10) : le texte `sceau` ou `sceau:<id:q[,id:q]>` pose a la place le gameobject
+#        9100025 (« Cercle du Sonneur », migration 2026_10_08_02_evenement_nuit_des_morts.sql), meme
+#        comportement, meme interrupteur ; sans la migration : refus `gabarit`.
 #        Default: 0
 AiPlayerbot.Directeur.EvenementPortail = 0
 
@@ -3677,13 +3680,15 @@ AiPlayerbot.Directeur.EvenementPortail = 0
 #        1. `invoquer` accepte une forme etendue `invoquer:<n>:<d>:<vue>:<arrivee>:<pv>:<degats>:<renfort>`
 #           (pv, degats : 25-100 % ; renfort : `renfort` | `sans`) : PV et degats de l'invoque multiplies
 #           par la dose (le service la calcule sur le public : Gardien affaibli en solo, plein en groupe).
-#        2. `renfort` (Gardien 9100004 seul, nombre 1) : sous 50 % de ses PV, 2 Etincelles (9100001)
-#           sortent a ses cotes, UNE fois, a son niveau et a sa dose, inscrites sous son lot.
+#        2. `renfort` (un chef de la table fermee, nombre 1) : sous 50 % de ses PV, son renfort sort a ses
+#           cotes, UNE fois, a son niveau et a sa dose, inscrit sous son lot. Gardien 9100004 : 2 Etincelles
+#           (9100001) ; nuit des morts (08/10), Sonneur de glas 9100304 : 3 Squelettes du glas (9100302).
 #        3. sous-action `coffre` (texte `coffre`, valeur 0, duree_s 60-600, point) : coffre 9100024
 #           (migration exploitation/directeur/sql/2026_10_08_01_evenement_coffre_faille.sql, AVANT le
 #           demarrage), pillable par le SEUL joueur humain de l'evenement (les bots ne le visent pas),
 #           un objet de sa tranche de niveau (tissu ou bijou) ; vide, il s'efface ; sinon retire a
-#           l'echeance. Les autres humains ont leur part au portail (lot P).
+#           l'echeance. Les autres humains ont leur part au portail (lot P). Nuit des morts (08/10) : le texte
+#           `coffre:9100026` pose a la place le « Coffre du Sonneur » (meme butin), migration 2026_10_08_02.
 #        0 : la forme etendue et `coffre` sont refusees `gardien_eteint` (la forme a 4 morceaux reste
 #        servie). Lue a chaque commande dans la conf chargee : `.reload config` suffit.
 #        Default: 0
@@ -3733,8 +3738,10 @@ AiPlayerbot.Directeur.EvenementHauteurYd = 12
 AiPlayerbot.Directeur.EvenementDistanceYd = 90
 
 #    AiPlayerbot.Directeur.EvenementDeclencheursParJoueur
-#        declencheurs vivants par joueur au plus (1-16), 64 pour tout le royaume ; au-dela, refus
-#        `plein`. Default: 8
+#        declencheurs vivants par joueur au plus (1-32 ; 1-16 avant la nuit des morts du 08/10), 64 pour
+#        tout le royaume ; au-dela, refus `plein`. Un declencheur de kit ou de son vit 10 s, un sort durable
+#        sa propre duree (42427 : 10 s, 43467 : 12 s, 61236 : 25 s). La nuit des morts multiplie les effets
+#        au sol autour du joueur : 24 conseilles pour elle (docs/EVENEMENTS-nuit-des-morts.md). Default: 8
 AiPlayerbot.Directeur.EvenementDeclencheursParJoueur = 8
 
 #    AiPlayerbot.Directeur.EvenementApparitions
