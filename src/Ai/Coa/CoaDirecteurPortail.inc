@@ -33,8 +33,15 @@
 // et le guid de l'objet et le guid du joueur, et ne touche que la file evClics sous evClicsVerrou ; tout le reste
 // (registre, joueur, groupe, courrier) se fait au FIL MONDE, chaque seconde (SuivrePortails, Entretien), P-137.
 // Journal : `coa directeur evenement: id= sous_action=portail joueur= valeur= motif=<pose|referme|refus|...>`.
+//
+// NUIT DES MORTS (08/10/2026, docs/EVENEMENTS-nuit-des-morts.md) : la meme sous-action pose aussi l'OBJET A SCELLER
+// de la nuit des morts, par une seconde forme du texte, au MEME comportement (clic, versement, levees) :
+//   sceau | sceau:<id:q[,id:q]>   -> gameobject EV_SCEAU_ENTREE (9100025 « Cercle du Sonneur », GOOBER, migration
+//   exploitation/directeur/sql/2026_10_08_02_evenement_nuit_des_morts.sql). Meme interrupteur (EvenementPortail),
+//   memes bornes, un seul portail OU sceau par joueur. Gabarit absent : refus `gabarit` (inerte sans la migration).
 
 constexpr uint32 EV_PORTAIL_ENTREE = 9100023;          // gameobject_template (grimoire § 5.5 : 9100020-9100029)
+constexpr uint32 EV_SCEAU_ENTREE = 9100025;            // nuit des morts : le cercle a sceller (meme plage)
 constexpr uint32 EV_PORTAIL_DELAI_MIN_S = 30;
 constexpr uint32 EV_PORTAIL_DELAI_MAX_S = 600;
 constexpr uint32 EV_PORTAIL_FILET_S = 30;              // l'objet s'efface seul 30 s apres l'echeance (registre perdu)
@@ -46,6 +53,7 @@ constexpr char const EV_PORTAIL_OPTION[] = "AiPlayerbot.Directeur.EvenementPorta
 struct EvPortail
 {
     uint32 id;               // commande `evenement` portail
+    uint32 entree = EV_PORTAIL_ENTREE;   // gameobject pose : le portail de la faille, ou le sceau de la nuit
     uint32 joueur;           // le joueur de l'evenement, beneficiaire du courrier
     ObjectGuid guid;         // l'objet pose
     uint32 carte;
@@ -75,21 +83,41 @@ bool PortailAllume()
 
 bool EstPortail(std::string const& t)
 {
-    return t == "portail" || t.rfind("portail:", 0) == 0;
+    return t == "portail" || t.rfind("portail:", 0) == 0 || t == "sceau" || t.rfind("sceau:", 0) == 0;
 }
 
 // `portail` -> aucun objet ; `portail:<id:q[,id:q]>` -> les objets (grammaire de `recompenser`, R3 : non vide,
-// 4 au plus, quantites 1-20). Tout le reste : faux (refus `texte`).
-bool LirePortail(std::string const& t, std::vector<std::pair<uint32, uint32>>& objets)
+// 4 au plus, quantites 1-20). Nuit des morts : `sceau` et `sceau:<id:q[,id:q]>`, memes objets, entree
+// EV_SCEAU_ENTREE. Tout le reste : faux (refus `texte`). `entree` : le gameobject a poser.
+bool LirePortail(std::string const& t, std::vector<std::pair<uint32, uint32>>& objets, uint32& entree)
 {
     objets.clear();
+    entree = EV_PORTAIL_ENTREE;
     if (t == "portail")
         return true;
+    if (t == "sceau")
+    {
+        entree = EV_SCEAU_ENTREE;
+        return true;
+    }
     static constexpr char const PREFIXE[] = "portail:";
+    static constexpr char const PREFIXE_SCEAU[] = "sceau:";
     size_t const n = sizeof(PREFIXE) - 1;
-    if (t.size() <= n || t.compare(0, n, PREFIXE) != 0)
-        return false;
-    return LireObjetsRecompense(t.substr(n), objets);
+    size_t const ns = sizeof(PREFIXE_SCEAU) - 1;
+    if (t.size() > n && t.compare(0, n, PREFIXE) == 0)
+        return LireObjetsRecompense(t.substr(n), objets);
+    if (t.size() > ns && t.compare(0, ns, PREFIXE_SCEAU) == 0)
+    {
+        entree = EV_SCEAU_ENTREE;
+        return LireObjetsRecompense(t.substr(ns), objets);
+    }
+    return false;
+}
+
+// Les mots du courrier et des messages, selon l'objet (la faille d'orage, ou le cercle de la nuit des morts).
+bool EstSceau(EvPortail const& po)
+{
+    return po.entree == EV_SCEAU_ENTREE;
 }
 
 std::string TexteObjets(std::vector<std::pair<uint32, uint32>> const& objets)
@@ -131,7 +159,8 @@ void RefuserPortail(CoaDirCommande const& c, char const* raison)
 void ExecuterPortail(CoaDirCommande const& c)
 {
     std::vector<std::pair<uint32, uint32>> objets;
-    if (!TexteBusValide(c.texte) || !LirePortail(c.texte, objets))
+    uint32 entree = EV_PORTAIL_ENTREE;
+    if (!TexteBusValide(c.texte) || !LirePortail(c.texte, objets, entree))
     {
         RefuserPortail(c, "texte");
         return;
@@ -162,10 +191,10 @@ void ExecuterPortail(CoaDirCommande const& c)
         RefuserPortail(c, "carte");
         return;
     }
-    GameObjectTemplate const* gabarit = sObjectMgr->GetGameObjectTemplate(EV_PORTAIL_ENTREE);
+    GameObjectTemplate const* gabarit = sObjectMgr->GetGameObjectTemplate(entree);
     if (!gabarit || gabarit->type != GAMEOBJECT_TYPE_GOOBER)
     {
-        RefuserPortail(c, "gabarit");   // migration du lot P absente (ou appliquee apres le demarrage)
+        RefuserPortail(c, "gabarit");   // migration du lot P (ou de la nuit) absente, ou appliquee apres le demarrage
         return;
     }
     // La recompense est bornee ICI, a la pose, comme `recompenser` (R3) : un portail pose ne peut plus rien
@@ -205,7 +234,7 @@ void ExecuterPortail(CoaDirCommande const& c)
     // Face au joueur. Rotation : le quaternion d'une rotation de `face` autour de z (comme le coeur pour un
     // objet pose sans rotation propre).
     float const face = std::atan2(p->GetPositionY() - c.y, p->GetPositionX() - c.x);
-    GameObject* go = p->GetMap()->SummonGameObject(EV_PORTAIL_ENTREE, c.x, c.y, sol, face, 0.0f, 0.0f,
+    GameObject* go = p->GetMap()->SummonGameObject(entree, c.x, c.y, sol, face, 0.0f, 0.0f,
                                                    std::sin(face / 2.0f), std::cos(face / 2.0f),
                                                    c.dureeS + EV_PORTAIL_FILET_S);
     if (!go)
@@ -215,6 +244,7 @@ void ExecuterPortail(CoaDirCommande const& c)
     }
     EvPortail po;
     po.id = c.id;
+    po.entree = entree;
     po.joueur = c.cible;
     po.guid = go->GetGUID();
     po.carte = p->GetMapId();
@@ -225,8 +255,8 @@ void ExecuterPortail(CoaDirCommande const& c)
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     LOG_INFO("playerbots",
              "coa directeur evenement: id={} sous_action=portail joueur={} valeur={} motif=pose objets={} delai_s={}"
-             " x={:.1f} y={:.1f} z={:.1f}",
-             c.id, c.cible, po.cuivre, TexteObjets(objets), c.dureeS, c.x, c.y, sol);
+             " x={:.1f} y={:.1f} z={:.1f} objet={}",
+             c.id, c.cible, po.cuivre, TexteObjets(objets), c.dureeS, c.x, c.y, sol, entree);
     Accuser(c, "execute", nullptr);
 }
 
@@ -294,8 +324,10 @@ void RefermerPortail(EvPortail const& po, Player* q, GameObject* go)
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
         // 08/10 : sacs et bourse s'il est dans le monde, le reste par courrier (VerserRecompense).
         if (paye)
-            r = VerserRecompense(trans, j, po.joueur, po.cuivre, po.objets, crees, "La faille d'orage",
-                                 "Vous avez refermé la faille. Voici votre part. Le Directeur.");
+            r = VerserRecompense(trans, j, po.joueur, po.cuivre, po.objets, crees,
+                                 EstSceau(po) ? "La nuit des morts" : "La faille d'orage",
+                                 EstSceau(po) ? "Vous avez scellé le cercle du Sonneur. Voici votre part. Le Directeur."
+                                              : "Vous avez refermé la faille. Voici votre part. Le Directeur.");
         // L'accuse final dans la MEME transaction ; meme garde de statut que CoaDirSourceMysql::Clore.
         if (source)
             trans->Append(Acore::StringFormat(
@@ -305,7 +337,8 @@ void RefermerPortail(EvPortail const& po, Player* q, GameObject* go)
         CharacterDatabase.CommitTransaction(trans);
     }
     if (paye)
-        DireRemise(j, r, "La faille est refermée, votre récompense");
+        DireRemise(j, r, EstSceau(po) ? "Le cercle est scellé, votre récompense"
+                                      : "La faille est refermée, votre récompense");
     RetirerObjetPortail(go);
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
     LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=evenement cible={} joueur={} statut=leve raison={}", po.id,
@@ -354,7 +387,8 @@ void SuivrePortails()
                          " motif=clic_refuse raison={} par={}", it->id, it->joueur, it->cuivre, refus, k.joueur);
                 if (q && std::string_view(refus) == "hors_groupe")
                     ChatHandler(q->GetSession()).SendSysMessage(std::string(PREFIXE_DIRECTEUR) +
-                                                                "Cette faille n'est pas la vôtre.");
+                                                                (EstSceau(*it) ? "Ce cercle n'est pas le vôtre."
+                                                                               : "Cette faille n'est pas la vôtre."));
             }
             continue;
         }
@@ -417,7 +451,7 @@ public:
 
     bool CanGameObjectGossipHello(Player* player, GameObject* go) override
     {
-        if (!player || !go || go->GetEntry() != EV_PORTAIL_ENTREE)
+        if (!player || !go || (go->GetEntry() != EV_PORTAIL_ENTREE && go->GetEntry() != EV_SCEAU_ENTREE))
             return false;
         std::lock_guard<std::mutex> garde(evClicsVerrou);
         if (evClics.size() >= EV_PORTAIL_CLICS_FILE_MAX)
