@@ -35,8 +35,9 @@ GuidVector AttackersValue::Calculate()
     // d'origine (vivant, attaquable, en vue). Sans inscription publiee : un chargement atomique.
     // Relecture du 07/10 : en DEFENSE, les autres invoques de l'evenement (meme celui qui frappe le bot) sont retires,
     // pour que la defense prime ; les adversaires hors evenement restent (un combat legitime n'est pas retire).
+    std::vector<Unit*> evenement;
     {
-        std::vector<Unit*> evenement, ecartes;
+        std::vector<Unit*> ecartes;
         CoaDirecteur::AssaillantsDEvenement(bot, evenement, &ecartes);
         for (Unit* u : ecartes)
             targets.erase(u);
@@ -44,6 +45,16 @@ GuidVector AttackersValue::Calculate()
     }
 
     RemoveNonThreating(targets);
+
+    // Bots reactifs (08/10, docs/EVENEMENTS-bots-reactifs.md) : combien des invoques ajoutes ci-dessus SURVIVENT au
+    // tri d'origine (bilan `retenus=` / `filtres=` de la ligne evenement_bots). Sans invoque ajoute : rien.
+    if (!evenement.empty())
+    {
+        size_t retenus = 0;
+        for (Unit* u : evenement)
+            retenus += targets.count(u);
+        CoaDirecteur::NoterAssaillantsRetenus(evenement.size(), retenus);
+    }
 
     // prioritized target
     GuidVector prioritizedTargets = AI_VALUE(GuidVector, "prioritized targets");
@@ -252,6 +263,15 @@ bool AttackersValue::IsPossibleTarget(Unit* attacker, Player* bot, float /*range
                 (bot->GetGroup() && bot->GetGroup() == victimOwner->GetGroup()))
                 return true;
         }
+
+        // CoA -- Directeur, bots REACTIFS (08/10/2026, coa-project/docs/EVENEMENTS-bots-reactifs.md). Un invoque
+        // d'evenement qui frappe le joueur servi (ordre `attaquer`) tombe toujours ici : marque par le joueur, ou
+        // sa victime n'est ni le bot, ni son maitre, ni son groupe. Sans cette clause, la DEFENSE ajoutee par
+        // AssaillantsDEvenement etait retiree par RemoveNonThreating, et « invalid target » lachait la cible avant
+        // le premier coup. Un bot INSCRIT a cet evenement l'admet. Dernier recours : le chemin d'origine est
+        // inchange pour tout le reste, et sans evenement publie c'est un chargement atomique.
+        if (CoaDirecteur::InvoqueDEvenementAdmis(bot, c))
+            return true;
 
         // (3) Last because it is applied automatically only in battlegrounds and arenas: the
         //     "attack tagged" strategy always allows for attacking of creatures.
