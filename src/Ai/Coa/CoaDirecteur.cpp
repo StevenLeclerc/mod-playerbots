@@ -2958,16 +2958,16 @@ void DireRemise(Player* p, RemiseRecompense const& r, char const* quoi)
     bool const direct = r.cuivreDirect || !r.objetsDirect.empty();
     bool const courrier = r.cuivreCourrier || !r.objetsCourrier.empty();
     if (direct && courrier)
-        ChatHandler(d->GetSession()).PSendSysMessage("{}{} : {}, remis directement ; par courrier (sacs pleins ou"
-                                                     " plafond d'or) : {}.", PREFIXE_DIRECTEUR, quoi,
+        ChatHandler(d->GetSession()).PSendSysMessage("{}{} : {}, remis directement ; par courrier (ce qui n'a pas"
+                                                     " pu vous etre remis) : {}.", PREFIXE_DIRECTEUR, quoi,
                                                      TexteRemise(r.cuivreDirect, r.objetsDirect),
                                                      TexteRemise(r.cuivreCourrier, r.objetsCourrier));
     else if (direct)
         ChatHandler(d->GetSession()).PSendSysMessage("{}{} : {}, remis directement.", PREFIXE_DIRECTEUR, quoi,
                                                      TexteRemise(r.cuivreDirect, r.objetsDirect));
     else if (courrier)
-        ChatHandler(d->GetSession()).PSendSysMessage("{}{} : rien n'a pu vous être remis directement (sacs pleins"
-                                                     " ou plafond d'or), tout part par courrier : {}.",
+        ChatHandler(d->GetSession()).PSendSysMessage("{}{} : rien n'a pu vous être remis directement, tout part"
+                                                     " par courrier : {}.",
                                                      PREFIXE_DIRECTEUR, quoi,
                                                      TexteRemise(r.cuivreCourrier, r.objetsCourrier));
 }
