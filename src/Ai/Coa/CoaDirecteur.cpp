@@ -6536,12 +6536,13 @@ void Entretien(uint32 diff)
     SuivreMeteos();
     // Lot C des evenements : ambiances reaffirmees, envois differes, echeances.
     SuivreEvenements();
+    // Lot S des evenements : inscrits, lieux (gardes des soins), reliquat. AVANT PublierCiblesEvenement, qui lit et
+    // remet a zero ses compteurs ; place loin de l'appel du lot P pour ne pas heurter le lot G a la fusion.
+    SuivreSoinsEvenement();
     // Lot D des evenements : invoques (morts, retraits hors de vue, joueur parti, fins de lot).
     SuivreInvoques();
     // Lot P des evenements : portails a refermer (clics, echeances).
     SuivrePortails();
-    // Lot S des evenements : le nombre d'inscrits (garde des soins), AVANT le bilan qui lit ses compteurs.
-    SuivreSoinsEvenement();
     // Lot F des evenements : les invoques vivants par joueur, publies pour les bots inscrits.
     PublierCiblesEvenement();
     LivrerParoles();
