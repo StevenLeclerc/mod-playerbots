@@ -6153,6 +6153,9 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
     fileMorts.push_back(e);
 }
 
+// Lot S des evenements (08/10/2026) : le soin des bots envers le joueur (fragment a part, meme espace de noms).
+#include "CoaDirecteurSoin.inc"
+
 // ------------------------------------------------------------------ lot F des evenements (06/10/2026) : les bots inscrits
 //
 // coa-project/docs/EVENEMENTS-lot-F.md ; grimoire § 2.7 (`mission: evenement`), § 5.2 (lot F, reduit au
@@ -6266,11 +6269,14 @@ void PublierCiblesEvenement()
     evfEngageS = 0;
     LOG_INFO("playerbots", "coa directeur evenement_bots: joueurs={} cibles={} inscrits={} evaluations={} assaillants={}"
              " defenses={}"
-             " retenus={} filtres={} admis={} engages={} engage_s={} fin={}",
+             " retenus={} filtres={} admis={} engages={} engage_s={} fin={}"
+             " soins={} soins_pv={} soin_choix={}",
              joueurs, cibles, inscrits, evfEvaluations.exchange(0, std::memory_order_relaxed),
              evfAssaillants.exchange(0, std::memory_order_relaxed), evfDefenses.exchange(0, std::memory_order_relaxed),
              evfRetenus.exchange(0, std::memory_order_relaxed), evfFiltres.exchange(0, std::memory_order_relaxed),
-             evfAdmis.exchange(0, std::memory_order_relaxed), engages, engageS, finPublication ? 1 : 0);
+             evfAdmis.exchange(0, std::memory_order_relaxed), engages, engageS, finPublication ? 1 : 0,
+             evsSoins.exchange(0, std::memory_order_relaxed), evsSoinsPv.exchange(0, std::memory_order_relaxed),
+             evsSoinChoix.exchange(0, std::memory_order_relaxed));
 }
 }  // namespace (lot F : la fonction publique, puis retour a l'espace anonyme)
 
@@ -6534,6 +6540,8 @@ void Entretien(uint32 diff)
     SuivreInvoques();
     // Lot P des evenements : portails a refermer (clics, echeances).
     SuivrePortails();
+    // Lot S des evenements : le nombre d'inscrits (garde des soins), AVANT le bilan qui lit ses compteurs.
+    SuivreSoinsEvenement();
     // Lot F des evenements : les invoques vivants par joueur, publies pour les bots inscrits.
     PublierCiblesEvenement();
     LivrerParoles();
@@ -10233,6 +10241,7 @@ public:
 void AddSC_coa_directeur()
 {
     new coa_directeur_niveau_creaturescript();
+    new coa_directeur_soin_unitscript();    // lot S des evenements (crochet OnHeal : compteur `soins`)
     new coa_directeur_portail_goscript();   // lot P des evenements
     new coa_directeur_commandscript();
     new coa_directeur_worldscript();

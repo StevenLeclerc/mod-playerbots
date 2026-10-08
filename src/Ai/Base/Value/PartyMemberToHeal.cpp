@@ -5,6 +5,7 @@
  */
 
 #include "PartyMemberToHeal.h"
+#include "CoaDirecteur.h"
 #include "Playerbots.h"
 #include "ServerFacade.h"
 
@@ -32,8 +33,29 @@ Unit* PartyMemberToHeal::Calculate()
     IsTargetOfHealingSpell predicate;
 
     Group* group = bot->GetGroup();
+    // CoA, lot S des evenements (08/10/2026, coa-project/docs/EVENEMENTS-lot-S.md) : un bot INSCRIT a l'evenement
+    // d'un joueur compte ce joueur parmi ses candidats, bien qu'il ne soit pas dans son groupe. Option
+    // Directeur.EvenementSoins eteinte, ou bot non inscrit : nul, et tout le reste est le code d'origine.
+    Player* const servi = CoaDirecteur::JoueurASoigner(bot);
     if (!group)
+    {
+        if (!servi)
+            return bot;
+        // Sans groupe, l'amont rend le bot sans condition. Le joueur ne le remplace que s'il est PLUS bas que le bot
+        // (meme sonde que le parcours du groupe : PV + distance / 10, ou + 30 au-dela de healDistance).
+        float const health = servi->GetHealthPct();
+        if (health < sPlayerbotAIConfig.mediumHealth || !IsTargetOfSpellCast(servi, predicate))
+        {
+            float const d = servi->GetDistance2d(bot);
+            float const probeValue = d > sPlayerbotAIConfig.healDistance ? health + 30.0f : health + d / 10.0f;
+            if (probeValue < bot->GetHealthPct() && Check(servi))
+            {
+                CoaDirecteur::NoterSoinChoisi();
+                return servi;
+            }
+        }
         return bot;
+    }
 
     bool isRaid = bot->GetGroup()->isRaidGroup();
     MinValueCalculator calc(100);
@@ -122,6 +144,20 @@ Unit* PartyMemberToHeal::Calculate()
                 calc.probe(probeValue, charm);
             }
         }
+    }
+    // CoA, lot S : le joueur servi, s'il n'est pas deja du groupe (il y a alors ete sonde), meme regle que les membres.
+    if (servi && !servi->IsInSameRaidWith(bot))
+    {
+        float const health = servi->GetHealthPct();
+        if (isRaid || health < sPlayerbotAIConfig.mediumHealth || !IsTargetOfSpellCast(servi, predicate))
+        {
+            float const d = servi->GetDistance2d(bot);
+            float const probeValue = d > sPlayerbotAIConfig.healDistance ? health + 30.0f : health + d / 10.0f;
+            if (probeValue < calc.minValue && Check(servi))
+                calc.probe(probeValue, servi);
+        }
+        if (calc.param == servi)
+            CoaDirecteur::NoterSoinChoisi();
     }
     return (Unit*)calc.param;
 }

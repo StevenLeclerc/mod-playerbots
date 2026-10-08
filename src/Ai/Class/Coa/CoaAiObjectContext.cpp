@@ -1346,6 +1346,13 @@ std::vector<Player*> NearbyGroup(Player* bot)
                 members.push_back(member);
         }
 
+    // CoA, lot S des evenements (08/10/2026, coa-project/docs/EVENEMENTS-lot-S.md) : le joueur servi par un bot
+    // INSCRIT a son evenement, hors du groupe, recoit aussi buffs et dissipations (CoaBuffAction, CoaDispelAction,
+    // CoaDispelTrigger), a la meme portee. Option Directeur.EvenementSoins eteinte : nul, rien ne change.
+    if (Player* servi = CoaDirecteur::JoueurASoigner(bot))
+        if (std::find(members.begin(), members.end(), servi) == members.end() && bot->IsWithinDistInMap(servi, 40.0f))
+            members.push_back(servi);
+
     return members;
 }
 
