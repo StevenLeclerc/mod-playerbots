@@ -616,9 +616,12 @@ bool JoueurDEvenement(Player* bot, float& x, float& y, float& z);
 // son groupe -- exactement un invoque qui frappe le joueur servi (ordre `attaquer`). Le tri RemoveNonThreating retirait
 // donc toute DEFENSE ajoutee par AssaillantsDEvenement, et « invalid target » -> « drop target » (99) lachait la cible
 // avant le premier coup (seul IsInCombatWith(bot) l'admet). InvoqueDEvenementAdmis dit si `cr` est un invoque VIVANT
-// publie de l'evenement que ce bot INSCRIT sert (meme garde que CibleDEvenement) : l'appelant l'admet alors comme
-// cible. Appelee en DERNIER recours seulement (la ou l'amont rendrait faux) : un chargement atomique et un test
-// d'entree avant tout verrou. Fil de carte du bot.
+// publie de l'evenement que ce bot INSCRIT (vivant, en monde, pas en teleportation) sert, et dans les bornes
+// d'AssaillantsDEvenement : il frappe le bot ; ou il frappe le joueur servi ou un autre inscrit et est a
+// EVENEMENT_DEFENSE_CENTRE_YD du centre au plus ; ou il est dans la laisse (rayon + MISSION_LAISSE_MARGE_YD).
+// L'appelant l'admet alors comme cible. Appelee en DERNIER recours seulement (la ou l'amont rendrait faux) : un
+// chargement atomique et un test d'entree avant tout verrou ; pendant un evenement, le verrou partage
+// d'AffectationDe est pris pour tout bot qui evalue un invoque marque (cout borne, accepte). Fil de carte du bot.
 bool InvoqueDEvenementAdmis(Player* bot, Creature* cr);
 // AttackersValue::Calculate, apres le tri d'origine : `ajoutes` invoques d'evenement proposes, `retenus` restes dans
 // la liste. Bilan seulement (compteurs `retenus=` de la ligne evenement_bots). Fil de carte du bot.

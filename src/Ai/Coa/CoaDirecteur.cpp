@@ -6426,7 +6426,10 @@ bool CoaDirecteur::JoueurDEvenement(Player* bot, float& x, float& y, float& z)
 }
 
 // Bots reactifs (08/10/2026) : voir CoaDirecteur.h. Fil de carte du bot (AttackersValue::IsPossibleTarget, dernier
-// recours). Le chemin chaud (aucun evenement, ou une creature hors de la plage des gabarits) ne prend aucun verrou.
+// recours). Sans evenement publie, ou pour une creature hors de la plage des gabarits : aucun verrou. Pendant un
+// evenement, TOUT bot (inscrit ou non) qui evalue un invoque deja marque ou en combat avec un autre prend le verrou
+// partage d'AffectationDe, puis (inscrit seulement) evfVerrou en lecture : deux verrous partages successifs, jamais
+// imbriques, cout borne a la duree d'une Faille (relecture du 08/10, accepte).
 bool CoaDirecteur::InvoqueDEvenementAdmis(Player* bot, Creature* cr)
 {
     if (!bot || !cr || evfNbJoueurs.load(std::memory_order_relaxed) == 0)
@@ -6434,11 +6437,38 @@ bool CoaDirecteur::InvoqueDEvenementAdmis(Player* bot, Creature* cr)
     uint32 const entree = cr->GetEntry();
     if (entree < EV_ENTREE_MIN || entree > EV_ENTREE_MAX)
         return false;
+    if (!bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive() || !cr->IsAlive() ||
+        cr->GetMapId() != bot->GetMapId())
+        return false;
     CoaDirecteur::Affectation aff;
     if (!CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) || !aff.presence ||
-        aff.mission != CoaDirecteur::CoaDirMission::Evenement || !aff.missionParam || aff.carte != bot->GetMapId() ||
-        cr->GetMapId() != bot->GetMapId() || !cr->IsAlive())
+        aff.mission != CoaDirecteur::CoaDirMission::Evenement || !aff.missionParam || aff.carte != bot->GetMapId())
         return false;
+    // Laisse (relecture du 08/10) : memes bornes que AssaillantsDEvenement. Un invoque qui frappe le bot lui-meme est
+    // toujours admis (il se defend) ; un invoque qui frappe le joueur servi ou un autre inscrit du MEME evenement
+    // l'est jusqu'a EVENEMENT_DEFENSE_CENTRE_YD du centre (la defense) ; tout autre jusqu'a la laisse
+    // (rayon + MISSION_LAISSE_MARGE_YD), comme CibleDEvenement : un inscrit ne se laisse pas entrainer au-dela.
+    float const laisse = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+    float const cx = cr->GetPositionX() - aff.x;
+    float const cy = cr->GetPositionY() - aff.y;
+    float const centre2 = cx * cx + cy * cy;
+    Unit* const victime = cr->GetVictim();
+    if (victime != bot && centre2 > laisse * laisse)
+    {
+        bool defense = false;
+        if (victime && victime->IsPlayer() &&
+            centre2 <= CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD * CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD)
+        {
+            uint32 const v = victime->GetGUID().GetCounter();
+            CoaDirecteur::Affectation autre;
+            defense = v == aff.missionParam ||
+                      (CoaDirecteur::AffectationDe(v, &autre) && autre.presence &&
+                       autre.mission == CoaDirecteur::CoaDirMission::Evenement &&
+                       autre.missionParam == aff.missionParam);
+        }
+        if (!defense)
+            return false;   // hors de la laisse, et pas une defense : regle d'origine
+    }
     ObjectGuid const g = cr->GetGUID();
     {
         std::shared_lock<std::shared_mutex> garde(evfVerrou);
