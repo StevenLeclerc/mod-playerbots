@@ -6178,8 +6178,39 @@ std::atomic<uint32> evfAssaillants{0};                            // bots actifs
                                                                   // ou un invoque A PORTEE a ete ajoute (bilan)
 std::atomic<uint32> evfDefenses{0};                               // ... ou un invoque qui frappe un humain de
                                                                   // l'evenement ou un inscrit a ete ajoute (bilan)
+// Bots reactifs (08/10, docs/EVENEMENTS-bots-reactifs.md) : ce que les deux compteurs ci-dessus ne disent pas.
+// `defenses`/`assaillants` comptent des invoques AJOUTES avant le tri d'origine, qui retirait toute DEFENSE (anti vol
+// de kill, AttackersValue::IsPossibleTarget : victime hors du groupe du bot). Ceux-ci disent ce qui en reste et ce
+// que les bots en font.
+std::atomic<uint32> evfAdmis{0};                                  // IsPossibleTarget : EVALUATIONS ou un invoque a ete
+                                                                  // admis malgre l'anti vol de kill (plusieurs par
+                                                                  // seconde et par bot : ni des bots ni des attaques)
+std::atomic<uint32> evfRetenus{0};                                // calculs de « attackers » ou un invoque ajoute a
+                                                                  // SURVECU au tri d'origine
+std::atomic<uint32> evfFiltres{0};                                // ... ou TOUS les invoques ajoutes ont ete retires
+// ENGAGEMENT REEL, fil monde seul (aucun verrou) : relu chaque seconde sur les invoques publies -- un bot INSCRIT a
+// l'evenement de l'invoque dont la cible de melee/combat (GetVictim) est cet invoque (Unit::getAttackers).
+std::unordered_set<uint32> evfEngages;                            // guids bas des inscrits engages sur la periode
+uint32 evfEngageS = 0;                                            // somme, par seconde, des inscrits engages
 uint32 evfBilanS = 0;                                             // fil monde : derniere ligne de bilan
 constexpr uint32 EVF_BILAN_S = 60;
+
+// Fil monde (PublierCiblesEvenement) : les inscrits engages sur l'invoque `cr` de l'evenement du joueur `joueur`.
+void CompterEngages(Creature* cr, uint32 joueur)
+{
+    for (Unit* u : cr->getAttackers())
+    {
+        Player* p = u ? u->ToPlayer() : nullptr;
+        if (!p || !p->IsAlive() || Humain(p))
+            continue;
+        CoaDirecteur::Affectation aff;
+        if (!CoaDirecteur::AffectationDe(p->GetGUID().GetCounter(), &aff) || !aff.presence ||
+            aff.mission != CoaDirecteur::CoaDirMission::Evenement || aff.missionParam != joueur)
+            continue;
+        evfEngages.insert(p->GetGUID().GetCounter());
+        ++evfEngageS;
+    }
+}
 
 // Fil monde, chaque seconde (Entretien, apres SuivreInvoques).
 void PublierCiblesEvenement()
@@ -6188,8 +6219,15 @@ void PublierCiblesEvenement()
     if (sPlayerbotAIConfig.directeurEvenementBots)
         for (EvInvoque const& v : evInvoques)
             if (!v.mort && !v.retraitDepuisS)   // relecture : un invoque en cours de retrait n'est plus une cible
+            {
                 neuf[v.joueur].push_back(v.guid);
-    if (neuf.empty() && evfNbJoueurs.load(std::memory_order_relaxed) == 0)
+                // Bots reactifs (08/10) : engagement reel, lu ici (fil monde, cartes a l'arret, P-137).
+                if (Creature* cr = CreatureInvoquee(v))
+                    if (cr->IsInWorld() && cr->IsAlive())
+                        CompterEngages(cr, v.joueur);
+            }
+    uint32 const avant = evfNbJoueurs.load(std::memory_order_relaxed);
+    if (neuf.empty() && avant == 0)
         return;   // rien publie, rien a publier : aucun verrou
     uint32 cibles = 0;
     for (auto const& [joueur, guids] : neuf)
@@ -6201,7 +6239,11 @@ void PublierCiblesEvenement()
         evfNbJoueurs.store(joueurs, std::memory_order_relaxed);
     }
     uint32 const maintenant = Maintenant();
-    if (!joueurs || maintenant < evfBilanS + EVF_BILAN_S)
+    // Bots reactifs (08/10) : une ligne AUSSI a la fin de la publication (dernier invoque mort ou retire), pour que
+    // chaque vague ait son bilan -- avant, ce qui suivait la derniere ligne de 60 s etait reporte a l'evenement
+    // suivant (doc bots actifs, § 1 : « aucune ligne ne couvre la vague 2 »).
+    bool const finPublication = !joueurs && avant;
+    if (!finPublication && (!joueurs || maintenant < evfBilanS + EVF_BILAN_S))
         return;
     evfBilanS = maintenant;
     uint32 inscrits = 0;
@@ -6212,9 +6254,23 @@ void PublierCiblesEvenement()
                 ++inscrits;
     }
     // Bots actifs (07/10) : deux champs EN FIN de ligne (un lecteur de l'ancienne forme s'arrete a evaluations).
+    // Bots reactifs (08/10) : cinq champs de plus, EN FIN de ligne (l'ancienne forme reste un prefixe).
+    //   retenus  : calculs de « attackers » ou un invoque ajoute a survecu au tri d'origine ;
+    //   filtres  : calculs ou tous les invoques ajoutes ont ete retires par ce tri ;
+    //   admis    : invoques admis par IsPossibleTarget malgre l'anti vol de kill ;
+    //   engages  : inscrits DISTINCTS vus en combat sur un invoque (GetVictim, relu chaque seconde) ;
+    //   engage_s : inscrits-secondes de ce combat. C'est la preuve d'engagement ; les autres sont des evaluations.
+    uint32 const engages = static_cast<uint32>(evfEngages.size());
+    uint32 const engageS = evfEngageS;
+    evfEngages.clear();
+    evfEngageS = 0;
     LOG_INFO("playerbots", "coa directeur evenement_bots: joueurs={} cibles={} inscrits={} evaluations={} assaillants={}"
-             " defenses={}", joueurs, cibles, inscrits, evfEvaluations.exchange(0, std::memory_order_relaxed),
-             evfAssaillants.exchange(0, std::memory_order_relaxed), evfDefenses.exchange(0, std::memory_order_relaxed));
+             " defenses={}"
+             " retenus={} filtres={} admis={} engages={} engage_s={} fin={}",
+             joueurs, cibles, inscrits, evfEvaluations.exchange(0, std::memory_order_relaxed),
+             evfAssaillants.exchange(0, std::memory_order_relaxed), evfDefenses.exchange(0, std::memory_order_relaxed),
+             evfRetenus.exchange(0, std::memory_order_relaxed), evfFiltres.exchange(0, std::memory_order_relaxed),
+             evfAdmis.exchange(0, std::memory_order_relaxed), engages, engageS, finPublication ? 1 : 0);
 }
 }  // namespace (lot F : la fonction publique, puis retour a l'espace anonyme)
 
@@ -6367,6 +6423,71 @@ bool CoaDirecteur::JoueurDEvenement(Player* bot, float& x, float& y, float& z)
     y = j->GetPositionY();
     z = j->GetPositionZ();
     return true;
+}
+
+// Bots reactifs (08/10/2026) : voir CoaDirecteur.h. Fil de carte du bot (AttackersValue::IsPossibleTarget, dernier
+// recours). Sans evenement publie, ou pour une creature hors de la plage des gabarits : aucun verrou. Pendant un
+// evenement, TOUT bot (inscrit ou non) qui evalue un invoque deja marque ou en combat avec un autre prend le verrou
+// partage d'AffectationDe, puis (inscrit seulement) evfVerrou en lecture : deux verrous partages successifs, jamais
+// imbriques, cout borne a la duree d'une Faille (relecture du 08/10, accepte).
+bool CoaDirecteur::InvoqueDEvenementAdmis(Player* bot, Creature* cr)
+{
+    if (!bot || !cr || evfNbJoueurs.load(std::memory_order_relaxed) == 0)
+        return false;
+    uint32 const entree = cr->GetEntry();
+    if (entree < EV_ENTREE_MIN || entree > EV_ENTREE_MAX)
+        return false;
+    if (!bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive() || !cr->IsAlive() ||
+        cr->GetMapId() != bot->GetMapId())
+        return false;
+    CoaDirecteur::Affectation aff;
+    if (!CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) || !aff.presence ||
+        aff.mission != CoaDirecteur::CoaDirMission::Evenement || !aff.missionParam || aff.carte != bot->GetMapId())
+        return false;
+    // Laisse (relecture du 08/10) : memes bornes que AssaillantsDEvenement. Un invoque qui frappe le bot lui-meme est
+    // toujours admis (il se defend) ; un invoque qui frappe le joueur servi ou un autre inscrit du MEME evenement
+    // l'est jusqu'a EVENEMENT_DEFENSE_CENTRE_YD du centre (la defense) ; tout autre jusqu'a la laisse
+    // (rayon + MISSION_LAISSE_MARGE_YD), comme CibleDEvenement : un inscrit ne se laisse pas entrainer au-dela.
+    float const laisse = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+    float const cx = cr->GetPositionX() - aff.x;
+    float const cy = cr->GetPositionY() - aff.y;
+    float const centre2 = cx * cx + cy * cy;
+    Unit* const victime = cr->GetVictim();
+    if (victime != bot && centre2 > laisse * laisse)
+    {
+        bool defense = false;
+        if (victime && victime->IsPlayer() &&
+            centre2 <= CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD * CoaDirecteur::EVENEMENT_DEFENSE_CENTRE_YD)
+        {
+            uint32 const v = victime->GetGUID().GetCounter();
+            CoaDirecteur::Affectation autre;
+            defense = v == aff.missionParam ||
+                      (CoaDirecteur::AffectationDe(v, &autre) && autre.presence &&
+                       autre.mission == CoaDirecteur::CoaDirMission::Evenement &&
+                       autre.missionParam == aff.missionParam);
+        }
+        if (!defense)
+            return false;   // hors de la laisse, et pas une defense : regle d'origine
+    }
+    ObjectGuid const g = cr->GetGUID();
+    {
+        std::shared_lock<std::shared_mutex> garde(evfVerrou);
+        auto const it = evfCibles.find(aff.missionParam);
+        if (it == evfCibles.end() || std::find(it->second.begin(), it->second.end(), g) == it->second.end())
+            return false;   // pas un invoque PUBLIE de CET evenement (autre joueur, retrait, mort) : regle d'origine
+    }
+    evfAdmis.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+void CoaDirecteur::NoterAssaillantsRetenus(size_t ajoutes, size_t retenus)
+{
+    if (!ajoutes)
+        return;
+    if (retenus)
+        evfRetenus.fetch_add(1, std::memory_order_relaxed);
+    else
+        evfFiltres.fetch_add(1, std::memory_order_relaxed);
 }
 
 namespace
