@@ -53,7 +53,8 @@
 // NUIT DES MORTS (08/10/2026, docs/EVENEMENTS-nuit-des-morts.md) : le renfort a mi-vie n'est plus propre au Gardien.
 // Une TABLE FERMEE (RegleRenfort) dit, pour chaque chef d'evenement, quel renfort il appelle et combien :
 //   9100004 Gardien de la faille  -> 2 x 9100001 Etincelle d'orage (inchange)
-//   9100304 Sonneur de glas       -> 3 x 9100302 Squelette du glas (nuit des morts)
+//   9100304 Sonneur de glas       -> 2 x 9100302 Squelette du glas (nuit des morts ; 2 et non 3 depuis la relecture
+//                                    du 08/10 : 2 x 0,8 PV reste sous les 2 Etincelles a 1 du Gardien)
 // Une entree hors de la table refuse `renfort` (`liste_blanche_ou_bornes`), comme avant pour tout autre que le
 // Gardien. Le Sonneur et ses squelettes ne sortent que si EvenementCreatures les permet (absents par defaut : inerte).
 // Le COFFRE aussi a deux formes, fermees : `coffre` -> 9100024 « Coffre de la faille » (inchange) ; `coffre:9100026`
@@ -66,7 +67,7 @@ constexpr uint32 EV_RENFORT_ENTREE = 9100001;          // Etincelle d'orage
 constexpr uint32 EV_RENFORT_NOMBRE = 2;
 constexpr uint32 EV_SONNEUR_ENTREE = 9100304;          // Sonneur de glas (nuit des morts, migration 2026_10_08_02)
 constexpr uint32 EV_SONNEUR_RENFORT_ENTREE = 9100302;  // Squelette du glas
-constexpr uint32 EV_SONNEUR_RENFORT_NOMBRE = 3;
+constexpr uint32 EV_SONNEUR_RENFORT_NOMBRE = 2;
 constexpr int32 EV_RENFORT_SEUIL_PCT = 50;
 constexpr uint32 EV_RENFORT_VIE_S = 300;               // TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, comme invoquer
 constexpr float EV_RENFORT_ECART_MIN_YD = 3.0f;
