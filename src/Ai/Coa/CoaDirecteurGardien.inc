@@ -33,12 +33,19 @@
 //   3. COFFRE (sous-action `coffre`, texte exact `coffre`, valeur 0, duree_s = vie 60-600 s, point carte/x/y/z
 //      controle comme `invoquer`) : pose le gameobject EV_COFFRE_ENTREE (9100024, type 3 CHEST, consommable,
 //      gameobject_loot_template 9100024 par tranche de niveau du pilleur ; migration
-//      exploitation/directeur/sql/2026_10_08_01_evenement_coffre_faille.sql). Seuls le joueur de l'evenement et
-//      les membres HUMAINS de son groupe l'ouvrent (GlobalScript::OnAllowedToLootContainerCheck : un bot ou un
-//      autre joueur recoit « LOOT_ERROR_DIDNT_KILL ») ; chacun voit les objets de SA tranche (PlayerScript::
-//      OnPlayerBeforeSendLoot remplit son butin conditionnel). Vide, il s'efface seul (coeur : coffre consommable
-//      invoque -> Delete) : accuse `leve` raison `pille`. Sinon retire a l'echeance (`echu`), au depart du joueur
-//      (`hors_ligne`, `carte`), a `lever`, `.directeur stop` et bus eteint (LeverEvenementsSi). Un par joueur.
+//      exploitation/directeur/sql/2026_10_08_01_evenement_coffre_faille.sql). SEUL le joueur de l'evenement
+//      l'ouvre (GlobalScript::OnAllowedToLootContainerCheck : un bot, un membre du groupe ou un autre joueur
+//      recoit « LOOT_ERROR_DIDNT_KILL ») et il voit l'objet de SA tranche. Relecture du 08/10 : le coeur remplit
+//      le butin AVANT ce refus (Player::SendLoot, FillLoot puis le crochet) ; si un autre l'a ouvert d'abord, le
+//      butin a ete tire et COMPTE pour lui -- PlayerScript::OnPlayerBeforeSendLoot le retire alors pour le joueur
+//      de l'evenement (clear + FillLoot personnel), sans quoi le coffre ne se viderait jamais. Le groupe est
+//      ecarte : un butin non « pour tous » ne se partage pas entre deux pilleurs de la meme tranche (le premier
+//      prend l'objet), et un coffre consommable s'efface des que le premier a tout pris (LootHandler.cpp,
+//      DoLootRelease -> GO_JUST_DEACTIVATED). La part des autres humains reste celle du portail (lot P). Les
+//      bots ne le visent plus (LootObject::IsLootPossible, LootObjectStack.cpp). Vide, il s'efface seul (coeur :
+//      coffre consommable invoque -> Delete) : accuse `leve` raison `pille`. Sinon retire a l'echeance (`echu`),
+//      au depart du joueur (`hors_ligne`, `carte`), a `lever`, `.directeur stop` et bus eteint
+//      (LeverEvenementsSi). Un par joueur.
 // Les crochets de fil de carte (degats, butin) ne lisent que la creature, le coffre et le joueur en cause, et une
 // petite table sous evCoffresVerrou (le SEUL verrou du lot) ; le registre evCoffres est au FIL MONDE seul (P-137).
 
@@ -454,36 +461,20 @@ size_t LeverCoffresSi(Predicat lever, char const* raison)
     return partis.size();
 }
 
-// Le joueur `q` peut-il piller le coffre `g` ? Fil de carte (SendLoot). Le joueur de l'evenement, ou un membre
-// HUMAIN de son groupe ; un coffre de l'entree absent de la table (registre perdu) : personne. Marque `ouvert`.
+// Le joueur `q` peut-il piller le coffre `g` ? Fil de carte (SendLoot). Le joueur HUMAIN de l'evenement, lui seul
+// (relecture du 08/10 : le groupe est ecarte, voir l'en-tete) ; un coffre de l'entree absent de la table (registre
+// perdu) : personne. Marque `ouvert`.
 bool CoffrePermis(Player* q, ObjectGuid const& g)
 {
     if (!q || !Humain(q))
         return false;
-    uint32 joueur = 0;
-    {
-        std::lock_guard<std::mutex> garde(evCoffresVerrou);
-        auto it = std::find_if(evCoffresAcces.begin(), evCoffresAcces.end(),
-                               [&g](EvCoffreAcces const& a) { return a.guid == g; });
-        if (it == evCoffresAcces.end())
-            return false;
-        joueur = it->joueur;
-    }
-    bool permis = q->GetGUID().GetCounter() == joueur;
-    if (!permis)
-    {
-        Group* groupe = q->GetGroup();
-        permis = groupe && groupe->IsMember(ObjectGuid::Create<HighGuid::Player>(joueur));
-    }
-    if (permis)
-    {
-        std::lock_guard<std::mutex> garde(evCoffresVerrou);
-        auto it = std::find_if(evCoffresAcces.begin(), evCoffresAcces.end(),
-                               [&g](EvCoffreAcces const& a) { return a.guid == g; });
-        if (it != evCoffresAcces.end())
-            it->ouvert = true;
-    }
-    return permis;
+    std::lock_guard<std::mutex> garde(evCoffresVerrou);
+    auto it = std::find_if(evCoffresAcces.begin(), evCoffresAcces.end(),
+                           [&g](EvCoffreAcces const& a) { return a.guid == g; });
+    if (it == evCoffresAcces.end() || q->GetGUID().GetCounter() != it->joueur)
+        return false;
+    it->ouvert = true;
+    return true;
 }
 
 bool EstNotreCoffre(ObjectGuid const& g)
@@ -546,9 +537,14 @@ public:
     }
 };
 
-// Chacun voit les objets de SA tranche : le coeur ne remplit le butin conditionnel que pour le premier pilleur
-// (Loot::FillLoot, butin personnel) ; les suivants permis le recoivent ici (FillNotNormalLootFor ne refait rien
-// pour un joueur deja servi). Fil de carte, sur le butin du coffre que SendLoot va montrer.
+// Le butin du coffre est celui du joueur de l'evenement (fil de carte, juste avant que SendLoot le montre ; le
+// crochet n'est atteint que par un pilleur PERMIS, le refus du GlobalScript tombe avant). Player::SendLoot tire le
+// butin a la PREMIERE ouverture, quel que soit l'ouvreur, et le compte pour lui (FillLoot personnel ->
+// FillNotNormalLootFor(ouvreur) : unlootedCount compte l'objet de SA tranche) ; le refus n'arrive qu'apres. Si le
+// butin n'a pas ete tire pour ce joueur (un bot ou un autre l'a ouvert avant), on le retire pour lui : rien n'a
+// pu en etre pris (l'autre a ete refuse), et sans cela l'objet de l'autre tranche resterait compte, le coffre ne
+// se viderait jamais (`echu ouvert=1` au lieu de `pille`). Apres ce tirage, lootOwnerGUID est le joueur : ses
+// reouvertures ne retirent rien (l'objet reste en GO_ACTIVATED, DoLootRelease).
 class coa_directeur_coffre_playerscript : public PlayerScript
 {
 public:
@@ -559,7 +555,18 @@ public:
 
     void OnPlayerBeforeSendLoot(Player* player, ObjectGuid lootGuid, Loot* loot) override
     {
-        if (player && loot && EstNotreCoffre(lootGuid))
-            loot->FillNotNormalLootFor(player);
+        if (!player || !loot || !EstNotreCoffre(lootGuid) || loot->lootOwnerGUID == player->GetGUID())
+            return;
+        GameObject* go = player->GetMap() ? player->GetMap()->GetGameObject(lootGuid) : nullptr;
+        if (!go || &go->loot != loot)
+            return;
+        uint32 const lootId = go->GetGOInfo()->GetLootId();
+        LootType const type = loot->loot_type;   // clear() le remet a LOOT_NONE ; SendLoot l'a deja pose
+        loot->clear();
+        if (lootId)
+            loot->FillLoot(lootId, LootTemplates_Gameobject, player, true, false, go->GetLootMode(), go);
+        loot->loot_type = type;
+        LOG_INFO("playerbots", "coa directeur evenement: sous_action=coffre joueur={} valeur=0 motif=retire_pour_joueur",
+                 player->GetGUID().GetCounter());
     }
 };

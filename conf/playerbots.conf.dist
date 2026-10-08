@@ -3665,8 +3665,9 @@ AiPlayerbot.Directeur.EvenementPortail = 0
 #           sortent a ses cotes, UNE fois, a son niveau et a sa dose, inscrites sous son lot.
 #        3. sous-action `coffre` (texte `coffre`, valeur 0, duree_s 60-600, point) : coffre 9100024
 #           (migration exploitation/directeur/sql/2026_10_08_01_evenement_coffre_faille.sql, AVANT le
-#           demarrage), pillable par le joueur et les membres humains de son groupe, butin par tranche
-#           de niveau du pilleur ; vide, il s'efface ; sinon retire a l'echeance.
+#           demarrage), pillable par le SEUL joueur humain de l'evenement (les bots ne le visent pas),
+#           un objet de sa tranche de niveau (tissu ou bijou) ; vide, il s'efface ; sinon retire a
+#           l'echeance. Les autres humains ont leur part au portail (lot P).
 #        0 : la forme etendue et `coffre` sont refusees `gardien_eteint` (la forme a 4 morceaux reste
 #        servie). Lue a chaque commande dans la conf chargee : `.reload config` suffit.
 #        Default: 0
