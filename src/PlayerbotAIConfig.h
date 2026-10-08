@@ -465,6 +465,10 @@ public:
     // bot a l'evenement du joueur (cibles : les invoques du lot D ; CoaDirecteur::CibleDEvenement).
     // Eteint par defaut : la mission est degradee en `chasse` (le bot reste au lieu, rien d'autre).
     bool directeurEvenementBots;
+    // Lot S (08/10/2026) : un bot INSCRIT a l'evenement d'un joueur compte ce joueur parmi ses cibles de soin
+    // (« party member to heal ») et de buff/dissipation des classes CoA (NearbyGroup), bien qu'il ne soit pas
+    // dans son groupe. Eteint par defaut : rien ne change (CoaDirecteur::JoueurASoigner rend nul).
+    bool directeurEvenementSoins;
     // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
     // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
     // eteint par defaut (les crochets de mort rendent la main au premier test).

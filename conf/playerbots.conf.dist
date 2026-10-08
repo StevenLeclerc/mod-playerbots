@@ -3508,6 +3508,22 @@ AiPlayerbot.Directeur.Missions = 0
 #        Default: 0
 AiPlayerbot.Directeur.EvenementBots = 0
 
+#    AiPlayerbot.Directeur.EvenementSoins
+#        Lot S des evenements (08/10/2026, coa-project/docs/EVENEMENTS-lot-S.md) : un bot INSCRIT a l'evenement
+#        d'un joueur (mission `evenement`, ci-dessus), arrive au lieu (sejour), compte ce joueur parmi ses cibles
+#        de SOIN (valeur « party member to heal » : toutes les classes, de base et CoA) et, pour les classes CoA,
+#        de buff et de dissipation, bien qu'il ne soit pas dans son groupe. Le joueur doit etre vivant, sur la
+#        meme carte, dans la laisse (rayon + 30 yd du point) et assistable par le bot (pas MJ, pas hostile ; un
+#        joueur High Risk FFA ne l'est pas pour un bot non FFA hors de son groupe, P-168). Le joueur n'est choisi
+#        que s'il est plus blesse que le bot (sans groupe) ou que les membres du groupe du bot (avec groupe).
+#        Ligne `coa directeur evenement_bots:` : `soins` (soins portes par un inscrit sur son joueur, comptes au
+#        crochet OnHeal, option allumee ou non tant que EvenementBots l'est), `soins_pv` (PV rendus, surplus
+#        exclu), `soin_choix` (evaluations ou le joueur a ete retenu comme cible de soin).
+#        Exige EvenementBots = 1 (sans inscrit, rien). A 0 : la cible de soin reste le groupe du bot.
+#        Lue par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0
+AiPlayerbot.Directeur.EvenementSoins = 0
+
 #
 #    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
 #

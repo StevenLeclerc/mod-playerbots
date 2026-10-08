@@ -626,6 +626,20 @@ bool InvoqueDEvenementAdmis(Player* bot, Creature* cr);
 // AttackersValue::Calculate, apres le tri d'origine : `ajoutes` invoques d'evenement proposes, `retenus` restes dans
 // la liste. Bilan seulement (compteurs `retenus=` de la ligne evenement_bots). Fil de carte du bot.
 void NoterAssaillantsRetenus(size_t ajoutes, size_t retenus);
+
+// Lot S, le soin des bots envers le joueur (08/10/2026, coa-project/docs/EVENEMENTS-lot-S.md ; code dans
+// CoaDirecteurSoin.inc). LU : PartyMemberToHeal::Calculate (« party member to heal », la cible de TOUS les soins
+// de playerbots, classes de base et classes CoA) ne parcourt que le GROUPE du bot et rend le bot lui-meme quand il
+// n'en a pas ; NearbyGroup (buffs, dissipations des classes CoA) de meme. Un inscrit, hors du groupe du joueur
+// servi, ne le soigne donc jamais.
+// JoueurASoigner : le joueur HUMAIN servi par ce bot INSCRIT (affectation presence + mission Evenement, en SEJOUR,
+// meme carte), s'il est en monde, vivant, dans la laisse (rayon + MISSION_LAISSE_MARGE_YD du centre), et assistable
+// par le bot (Unit::IsValidAssistTarget : pas MJ, pas hostile, pas FFA si le bot ne l'est pas...) ; nul sinon.
+// Option AiPlayerbot.Directeur.EvenementSoins ETEINTE (defaut) : nul au premier chargement atomique, toujours.
+// Fil de carte du bot.
+Player* JoueurASoigner(Player* bot);
+// PartyMemberToHeal::Calculate a retenu le joueur servi comme cible de soin (bilan `soin_choix=`). Fil de carte.
+void NoterSoinChoisi();
 }  // namespace CoaDirecteur
 
 void AddSC_coa_directeur();

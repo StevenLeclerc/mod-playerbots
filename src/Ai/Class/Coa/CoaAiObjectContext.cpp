@@ -1346,6 +1346,13 @@ std::vector<Player*> NearbyGroup(Player* bot)
                 members.push_back(member);
         }
 
+    // CoA, lot S des evenements (08/10/2026, coa-project/docs/EVENEMENTS-lot-S.md) : le joueur servi par un bot
+    // INSCRIT a son evenement, hors du groupe, recoit aussi buffs et dissipations (CoaBuffAction, CoaDispelAction,
+    // CoaDispelTrigger), a la meme portee. Option Directeur.EvenementSoins eteinte : nul, rien ne change.
+    if (Player* servi = CoaDirecteur::JoueurASoigner(bot))
+        if (std::find(members.begin(), members.end(), servi) == members.end() && bot->IsWithinDistInMap(servi, 40.0f))
+            members.push_back(servi);
+
     return members;
 }
 
@@ -1755,6 +1762,14 @@ public:
             spells.erase(std::remove_if(spells.begin(), spells.end(),
                 [](Usable const& spell) { return !CanHealOther(spell.kind); }), spells.end());
 
+        // CoA, lot S des evenements (08/10/2026) : la cible peut etre le joueur SERVI par un bot inscrit
+        // (CoaDirecteur::JoueurASoigner), hors du groupe du bot. Un soin de zone y est refuse (explicite PARTY/RAID :
+        // SPELL_FAILED_BAD_TARGETS, SpellInfo::CheckExplicitTarget) ou soigne le groupe du bot au lieu du joueur (zone
+        // PARTY autour du lanceur) : il serait mis au banc pour tout le monde. Hors groupe, soins de zone retires.
+        if (HorsGroupe(bot, target))
+            spells.erase(std::remove_if(spells.begin(), spells.end(),
+                [](Usable const& spell) { return (spell.kind & KIND_GROUP_HEAL) != 0; }), spells.end());
+
         if (SavingManaForHeals(botAI, bot))
             CheapestFirst(bot, spells);
 
@@ -1772,14 +1787,21 @@ public:
         // Same rule as Execute: a caster-only heal makes this action useful for the bot itself,
         // never for another member, or the action would run every tick and cast nothing.
         bool const onSelf = target == bot;
+        // Lot S : meme regle qu'Execute, sinon l'action se dirait utile a chaque tick pour un joueur servi hors groupe
+        // et ne lancerait rien (FAILURE_NOTHING).
+        bool const horsGroupe = target && HorsGroupe(bot, target);
         return target && target->IsAlive() && target->GetHealthPct() < sPlayerbotAIConfig.almostFullHealth &&
                ClassHas(bot, wanted) &&
-               HasReadyAbility(botAI, bot,[wanted, onSelf](uint16 kind)
-                   { return (kind & wanted) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) && (onSelf || CanHealOther(kind)); });
+               HasReadyAbility(botAI, bot,[wanted, onSelf, horsGroupe](uint16 kind)
+                   { return (kind & wanted) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) && (onSelf || CanHealOther(kind)) &&
+                            !(horsGroupe && (kind & KIND_GROUP_HEAL)); });
     }
 
 private:
     Mode mode;
+
+    // Lot S : une cible autre que le bot et hors de son groupe ou raid (le joueur servi d'un evenement).
+    static bool HorsGroupe(Player* bot, Unit* target) { return target != bot && !bot->IsInRaidWith(target); }
 };
 
 // Takes the current target back when it attacks someone else.
