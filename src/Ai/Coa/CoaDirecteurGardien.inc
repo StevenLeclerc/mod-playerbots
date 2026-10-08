@@ -1,0 +1,565 @@
+// ------------------------------------------------------------------ lot G des evenements (08/10/2026) : finir la faille
+//
+// FRAGMENT de CoaDirecteur.cpp : inclus par lui, DANS son espace de noms anonyme, juste apres le lot P
+// (CoaDirecteurPortail.inc, dont il reprend RetirerObjetPortail) et donc apres le lot D (PointApparition, SolSec,
+// PointSansPvp, registre evInvoques / evLots, InvoquesVivantsDe, evNiveauForce). Il n'est pas une unite de
+// compilation. Fichier a part pour que la fusion avec les lots paralleles ne touche que quelques lignes de
+// CoaDirecteur.cpp (docs/EVENEMENTS-lot-G.md § 3, liste des points d'accroche).
+//
+// Demande du commanditaire (08/10) : « Finir la faille : le Gardien de la faille, aujourd'hui jamais sorti en
+// solo ; son renfort a mi-vie ; un vrai butin au coffre ». MESURE avant le lot (faille-orage.log, 05-08/10) : en
+// solo (budget 4 a 10), le Gardien n'est jamais sorti (« Gardien : budget 10 < 18 »).
+//
+// TOUT EST ETEINT tant que AiPlayerbot.Directeur.EvenementGardien = 0 (lue a chaque commande dans la conf
+// CHARGEE, sConfigMgr, comme EvenementPortail : `.reload config` suffit ; absente : 0) :
+//   1. DOSE (sous-action `invoquer` etendue, grammaire FERMEE, LireApparition) :
+//        invoquer:<n>:<d>:<vue>:<arrivee>:<pv>:<degats>:<renfort>
+//      pv, degats : pourcentages ENTIERS 25-100 (decimal, sans zero de tete) ; renfort : `renfort` | `sans`.
+//      PV : la valeur de base UNIT_MOD_HEALTH (posee par Creature::SelectLevel) multipliee par pv/100, puis
+//      SetCreateHealth et vie pleine (DoserInvoque) : le modele de stats la garde (UpdateMaxHealth relit
+//      BASE_VALUE). DEGATS : CustomData de la creature (EvDose), lu par trois crochets UnitScript (melee, sort
+//      direct, tic periodique non positif) quand l'ATTAQUANT est de la plage 9100000-9109999. La forme a 4
+//      morceaux reste celle d'avant (aucune dose, aucun renfort). Etendue et option a 0 : refus
+//      `gardien_eteint`. `renfort` exige le Gardien (EV_GARDIEN_ENTREE) et nombre = 1, sinon
+//      `liste_blanche_ou_bornes`.
+//   2. RENFORT A MI-VIE (DeclencherRenforts, chaque seconde, fil monde, depuis SuivreInvoques) : un invoque
+//      arme (`renfort`) VIVANT sous EV_RENFORT_SEUIL_PCT % de ses PV fait sortir EV_RENFORT_NOMBRE Etincelles
+//      (EV_RENFORT_ENTREE) a ses cotes, UNE SEULE FOIS (renfortFait, meme si refuse), au NIVEAU du Gardien
+//      (evNiveauForce), a SA dose, inscrites sous SON lot (plafond par joueur et du royaume, levee, retrait,
+//      cibles des bots : evInvoques), lancees sur la cible du Gardien (ou le joueur). Map::SummonCreature SANS
+//      invocateur : le crochet OnCreatureAddWorld ne les prend pas pour des renforts SmartAI. Journal :
+//      `coa directeur evenement: id= sous_action=invoquer joueur= valeur= motif=renfort mivie=1 poses= ...`
+//      (motif `renfort` : le service l'ignore comme fin de lot ; `poses=0 raison=` quand rien n'est sorti).
+//   3. COFFRE (sous-action `coffre`, texte exact `coffre`, valeur 0, duree_s = vie 60-600 s, point carte/x/y/z
+//      controle comme `invoquer`) : pose le gameobject EV_COFFRE_ENTREE (9100024, type 3 CHEST, consommable,
+//      gameobject_loot_template 9100024 par tranche de niveau du pilleur ; migration
+//      exploitation/directeur/sql/2026_10_08_01_evenement_coffre_faille.sql). Seuls le joueur de l'evenement et
+//      les membres HUMAINS de son groupe l'ouvrent (GlobalScript::OnAllowedToLootContainerCheck : un bot ou un
+//      autre joueur recoit « LOOT_ERROR_DIDNT_KILL ») ; chacun voit les objets de SA tranche (PlayerScript::
+//      OnPlayerBeforeSendLoot remplit son butin conditionnel). Vide, il s'efface seul (coeur : coffre consommable
+//      invoque -> Delete) : accuse `leve` raison `pille`. Sinon retire a l'echeance (`echu`), au depart du joueur
+//      (`hors_ligne`, `carte`), a `lever`, `.directeur stop` et bus eteint (LeverEvenementsSi). Un par joueur.
+// Les crochets de fil de carte (degats, butin) ne lisent que la creature, le coffre et le joueur en cause, et une
+// petite table sous evCoffresVerrou (le SEUL verrou du lot) ; le registre evCoffres est au FIL MONDE seul (P-137).
+
+constexpr char const EV_GARDIEN_OPTION[] = "AiPlayerbot.Directeur.EvenementGardien";
+constexpr uint32 EV_GARDIEN_ENTREE = 9100004;          // Gardien de la faille (migration 2026_10_05_01)
+constexpr uint32 EV_RENFORT_ENTREE = 9100001;          // Etincelle d'orage
+constexpr uint32 EV_RENFORT_NOMBRE = 2;
+constexpr int32 EV_RENFORT_SEUIL_PCT = 50;
+constexpr uint32 EV_RENFORT_VIE_S = 300;               // TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, comme invoquer
+constexpr float EV_RENFORT_ECART_MIN_YD = 3.0f;
+constexpr float EV_RENFORT_ECART_MAX_YD = 5.0f;
+constexpr uint32 EV_DOSE_MIN_PCT = 25;
+constexpr uint32 EV_DOSE_MAX_PCT = 100;
+constexpr uint32 EV_COFFRE_ENTREE = 9100024;           // gameobject_template (grimoire § 5.5 : 9100020-9100029)
+constexpr uint32 EV_COFFRE_VIE_MIN_S = 60;
+constexpr uint32 EV_COFFRE_VIE_MAX_S = 600;
+constexpr uint32 EV_COFFRE_FILET_S = 30;               // l'objet s'efface seul 30 s apres l'echeance (registre perdu)
+constexpr size_t EV_COFFRE_MAX = 16;                   // tout le royaume ; un seul par joueur
+
+// Clef de la dose de degats dans Object::CustomData. Une std::string (DataMap::Get prend std::string const&) :
+// un litteral serait converti a chaque coup porte.
+std::string const EV_DOSE_CLE("coa_directeur.dose");
+
+struct EvDose : DataMap::Base
+{
+    uint32 degats = 100;     // pourcentage des degats infliges, 25-99 (100 : aucune entree n'est posee)
+};
+
+bool GardienAllume()
+{
+    return sConfigMgr->GetOption<bool>(EV_GARDIEN_OPTION, false, false);
+}
+
+// Un pourcentage de dose : 2 ou 3 chiffres decimaux, sans zero de tete, EV_DOSE_MIN_PCT a EV_DOSE_MAX_PCT.
+bool LireDose(std::string const& m, uint8& pct)
+{
+    if (m.size() < 2 || m.size() > 3 || m[0] == '0' ||
+        !std::all_of(m.begin(), m.end(), [](char x) { return x >= '0' && x <= '9'; }))
+        return false;
+    uint32 const v = uint32(std::stoul(m));
+    if (v < EV_DOSE_MIN_PCT || v > EV_DOSE_MAX_PCT)
+        return false;
+    pct = uint8(v);
+    return true;
+}
+
+// Les trois morceaux de la forme etendue (5e a 7e). Faux : refus `texte`.
+bool LireMorceauxGardien(std::string const& pv, std::string const& degats, std::string const& renfort, EvAppLu& lu)
+{
+    if (!LireDose(pv, lu.pv) || !LireDose(degats, lu.degats))
+        return false;
+    if (renfort == "renfort")
+        lu.renfort = true;
+    else if (renfort != "sans")
+        return false;
+    lu.etendue = true;
+    return true;
+}
+
+// Gardes propres a la forme etendue, AVANT toute pose. -> raison du refus ou nullptr.
+char const* RefusGardien(EvAppLu const& lu, uint32 entree)
+{
+    if (!lu.etendue)
+        return nullptr;
+    if (!GardienAllume())
+        return "gardien_eteint";
+    if (lu.renfort && (entree != EV_GARDIEN_ENTREE || lu.nombre != 1))
+        return "liste_blanche_ou_bornes";
+    return nullptr;
+}
+
+// La dose sur une creature d'evenement fraichement posee (fil monde, cartes a l'arret : P-137). pv, degats :
+// 25-100 ; 0 ou 100 : rien. Les PV gardent le modele de stats (BASE_VALUE de UNIT_MOD_HEALTH, que
+// Creature::UpdateMaxHealth relit) ; la creature repart pleine.
+void DoserInvoque(Creature* cr, uint8 pv, uint8 degats)
+{
+    if (!cr)
+        return;
+    if (pv >= EV_DOSE_MIN_PCT && pv < EV_DOSE_MAX_PCT)
+    {
+        float const base = cr->GetFlatModifierValue(UNIT_MOD_HEALTH, BASE_VALUE);
+        float const dosee = std::max(1.0f, std::round(base * float(pv) / 100.0f));
+        cr->SetCreateHealth(uint32(dosee));
+        cr->SetStatFlatModifier(UNIT_MOD_HEALTH, BASE_VALUE, dosee);   // UpdateUnitMod -> UpdateMaxHealth
+        cr->SetHealth(cr->GetMaxHealth());
+    }
+    if (degats >= EV_DOSE_MIN_PCT && degats < EV_DOSE_MAX_PCT)
+    {
+        EvDose* d = new EvDose();
+        d->degats = degats;
+        cr->CustomData.Set(EV_DOSE_CLE, d);
+    }
+}
+
+// Pourcentage des degats de l'attaquant (crochets de fil de carte) : 100 hors plage ou sans dose. Ne lit que
+// l'attaquant : son CustomData n'est ecrit qu'une fois, a la pose, au fil monde (cartes a l'arret).
+uint32 DegatsDoses(Unit const* attaquant)
+{
+    if (!attaquant || attaquant->GetTypeId() != TYPEID_UNIT)
+        return 100;
+    uint32 const entree = attaquant->GetEntry();
+    if (entree < EV_ENTREE_MIN || entree > EV_ENTREE_MAX)
+        return 100;
+    EvDose const* d = attaquant->CustomData.Get<EvDose>(EV_DOSE_CLE);
+    return d ? d->degats : 100;
+}
+
+// Les renforts a mi-vie (fil monde, chaque seconde, depuis SuivreInvoques APRES le releve des morts et des
+// retraits, AVANT les fins de lot : un lot dont le Gardien vient de faire sortir ses Etincelles reste ouvert).
+// Les invoques a renforcer sont releves d'abord (par guid) : poser pousse dans evInvoques.
+void DeclencherRenforts()
+{
+    std::vector<ObjectGuid> aRenforcer;
+    for (EvInvoque const& v : evInvoques)
+        if (v.renfortArme && !v.renfortFait && !v.mort && !v.retraitDepuisS)
+            aRenforcer.push_back(v.guid);
+    for (ObjectGuid const& g : aRenforcer)
+    {
+        auto it = std::find_if(evInvoques.begin(), evInvoques.end(), [&g](EvInvoque const& v) { return v.guid == g; });
+        if (it == evInvoques.end())
+            continue;
+        Creature* gardien = CreatureInvoquee(*it);
+        if (!gardien || !gardien->IsAlive() || !gardien->IsInWorld() || !gardien->HealthBelowPct(EV_RENFORT_SEUIL_PCT))
+            continue;
+        EvInvoque const parent = *it;     // copie : evInvoques grandit plus bas
+        it->renfortFait = true;           // UNE seule fois, meme refuse
+        uint32 const pvGardien = uint32(gardien->GetHealthPct());
+        auto lot = evLots.find(parent.id);
+        Player* p = JoueurConnecte(parent.joueur);
+        char const* raison = nullptr;
+        uint32 n = 0;
+        if (lot == evLots.end() || lot->second.retraitDemande)
+            raison = "lot_leve";
+        else if (!p)
+            raison = "hors_ligne";
+        else
+        {
+            uint32 const vivants = InvoquesVivantsDe(parent.joueur);
+            uint32 const cap = sPlayerbotAIConfig.directeurEvenementInvoquesParJoueur;
+            size_t const placeRoyaume = evInvoques.size() < EV_INVOQUES_MAX ? EV_INVOQUES_MAX - evInvoques.size() : 0;
+            uint32 const placeJoueur = vivants < cap ? cap - vivants : 0;
+            n = std::min<uint32>(EV_RENFORT_NOMBRE, std::min<uint32>(placeJoueur, uint32(placeRoyaume)));
+            if (!n)
+                raison = "plein";
+        }
+        uint32 poses = 0;
+        if (n)
+        {
+            Map* map = gardien->GetMap();
+            Unit* cible = gardien->GetVictim();
+            if (!cible || !cible->IsAlive() || !gardien->IsValidAttackTarget(cible))
+                cible = (p->IsAlive() && p->GetMapId() == gardien->GetMapId() && gardien->IsValidAttackTarget(p)) ? p
+                                                                                                                 : nullptr;
+            for (uint32 i = 0; i < n; ++i)
+            {
+                float const angle = frand(0.0f, 2.0f * float(M_PI));
+                float const ecart = frand(EV_RENFORT_ECART_MIN_YD, EV_RENFORT_ECART_MAX_YD);
+                float x = gardien->GetPositionX() + ecart * std::cos(angle);
+                float y = gardien->GetPositionY() + ecart * std::sin(angle);
+                float z = gardien->GetPositionZ();
+                float sol = 0.0f;
+                // Comme un point disperse d'invoquer : sol sec proche, hors lieu sans JcJ ; sinon au pied du Gardien.
+                if (SolSec(map, x, y, z, sol) && std::fabs(sol - z) <= EV_SOL_ECART_MAX_YD && !PointSansPvp(map, x, y, sol))
+                    z = sol;
+                else
+                {
+                    x = gardien->GetPositionX();
+                    y = gardien->GetPositionY();
+                }
+                evNiveauForce = parent.niveau;
+                TempSummon* s = map->SummonCreature(EV_RENFORT_ENTREE, Position(x, y, z, gardien->GetOrientation()),
+                                                    nullptr, EV_RENFORT_VIE_S * IN_MILLISECONDS, nullptr);
+                evNiveauForce = 0;
+                if (!s)
+                {
+                    raison = "invocation";
+                    break;
+                }
+                s->SetTempSummonType(TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT);
+                if (s->GetLevel() != parent.niveau)
+                {
+                    // Comme ExecuterInvoquer : jamais laisse a un autre niveau que celui du Gardien.
+                    s->DespawnOrUnsummon();
+                    raison = "echelle";
+                    break;
+                }
+                DoserInvoque(s, parent.pv, parent.degats);
+                EvInvoque r;
+                r.id = parent.id;
+                r.joueur = parent.joueur;
+                r.guid = s->GetGUID();
+                r.carte = parent.carte;
+                r.entree = EV_RENFORT_ENTREE;
+                r.niveau = parent.niveau;
+                r.renfort = true;
+                r.pv = parent.pv;
+                r.degats = parent.degats;
+                evInvoques.push_back(r);
+                ++lot->second.renforts;
+                ++poses;
+                if (cible && s->AI() && s->IsValidAttackTarget(cible))
+                    s->AI()->AttackStart(cible);
+            }
+        }
+        LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif=renfort"
+                 " mivie=1 poses={} renfort_entree={} niveau={} pv_gardien={} pv={} degats={} raison={}", parent.id,
+                 parent.joueur, parent.entree, poses, EV_RENFORT_ENTREE, parent.niveau, pvGardien, parent.pv,
+                 parent.degats, raison ? raison : "-");
+    }
+}
+
+// ------------------------------------------------------------------ le coffre
+
+struct EvCoffre
+{
+    uint32 id;               // commande `evenement` coffre
+    uint32 joueur;           // le joueur de l'evenement
+    ObjectGuid guid;
+    uint32 carte;
+    uint32 finS;             // Maintenant() de l'echeance
+};
+std::vector<EvCoffre> evCoffres;                       // fil monde seul
+
+// Ce que les crochets de butin (fils de carte) ont le droit de lire : le coffre et son joueur, et s'il a ete
+// ouvert (pour dire `pille` plutot que `disparu`). Ecrit au fil monde (pose, fin), lu et marque par les crochets.
+struct EvCoffreAcces
+{
+    ObjectGuid guid;
+    uint32 joueur;
+    bool ouvert = false;
+};
+std::mutex evCoffresVerrou;                            // le SEUL verrou du lot G : la table ci-dessous
+std::vector<EvCoffreAcces> evCoffresAcces;             // sous evCoffresVerrou
+
+bool EstCoffre(std::string const& t)
+{
+    return t == "coffre" || t.rfind("coffre:", 0) == 0;
+}
+
+void RefuserCoffre(CoaDirCommande const& c, char const* raison)
+{
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=coffre joueur={} valeur={} motif={}", c.id,
+             c.cible, c.valeur, raison);
+    Refuser(c, raison);
+}
+
+GameObject* ObjetCoffre(EvCoffre const& co)
+{
+    Map* map = sMapMgr->FindBaseNonInstanceMap(co.carte);
+    return map ? map->GetGameObject(co.guid) : nullptr;
+}
+
+void ExecuterCoffre(CoaDirCommande const& c)
+{
+    if (!TexteBusValide(c.texte) || c.texte != "coffre")
+    {
+        RefuserCoffre(c, "texte");
+        return;
+    }
+    if (!CibleJoueurValide(c) || c.valeur != 0 || c.dureeS < EV_COFFRE_VIE_MIN_S || c.dureeS > EV_COFFRE_VIE_MAX_S)
+    {
+        RefuserCoffre(c, "bornes");
+        return;
+    }
+    if (!GardienAllume())
+    {
+        RefuserCoffre(c, "gardien_eteint");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        RefuserCoffre(c, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        RefuserCoffre(c, "pas_humain");
+        return;
+    }
+    if (!p->IsInWorld() || p->IsBeingTeleported() || !CarteDeSuspension(p->GetMapId()))
+    {
+        RefuserCoffre(c, "carte");
+        return;
+    }
+    GameObjectTemplate const* gabarit = sObjectMgr->GetGameObjectTemplate(EV_COFFRE_ENTREE);
+    if (!gabarit || gabarit->type != GAMEOBJECT_TYPE_CHEST)
+    {
+        RefuserCoffre(c, "gabarit");   // migration du lot G absente (ou appliquee apres le demarrage)
+        return;
+    }
+    float sol = 0.0f;
+    char const* raison = nullptr;
+    if (!PointApparition(c, p, sol, raison))
+    {
+        RefuserCoffre(c, raison);
+        return;
+    }
+    if (std::any_of(evCoffres.begin(), evCoffres.end(), [&c](EvCoffre const& x) { return x.joueur == c.cible; }))
+    {
+        RefuserCoffre(c, "deja_ouvert");
+        return;
+    }
+    if (evCoffres.size() >= EV_COFFRE_MAX)
+    {
+        RefuserCoffre(c, "plein");
+        return;
+    }
+    float const face = std::atan2(p->GetPositionY() - c.y, p->GetPositionX() - c.x);
+    GameObject* go = p->GetMap()->SummonGameObject(EV_COFFRE_ENTREE, c.x, c.y, sol, face, 0.0f, 0.0f,
+                                                   std::sin(face / 2.0f), std::cos(face / 2.0f),
+                                                   c.dureeS + EV_COFFRE_FILET_S);
+    if (!go)
+    {
+        RefuserCoffre(c, "invocation");
+        return;
+    }
+    EvCoffre co;
+    co.id = c.id;
+    co.joueur = c.cible;
+    co.guid = go->GetGUID();
+    co.carte = p->GetMapId();
+    co.finS = Maintenant() + c.dureeS;
+    evCoffres.push_back(co);
+    {
+        std::lock_guard<std::mutex> garde(evCoffresVerrou);
+        evCoffresAcces.push_back(EvCoffreAcces{co.guid, co.joueur, false});
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=coffre joueur={} valeur=0 motif=pose vie_s={}"
+             " x={:.1f} y={:.1f} z={:.1f}", c.id, c.cible, c.dureeS, c.x, c.y, sol);
+    Accuser(c, "execute", nullptr);
+}
+
+// Fin d'un coffre (le registre l'a deja quitte) : objet retire s'il existe encore, table d'acces videe, accuse.
+void FermerCoffre(EvCoffre const& co, char const* motif)
+{
+    bool ouvert = false;
+    {
+        std::lock_guard<std::mutex> garde(evCoffresVerrou);
+        auto it = std::find_if(evCoffresAcces.begin(), evCoffresAcces.end(),
+                               [&co](EvCoffreAcces const& a) { return a.guid == co.guid; });
+        if (it != evCoffresAcces.end())
+        {
+            ouvert = it->ouvert;
+            evCoffresAcces.erase(it);
+        }
+    }
+    RetirerObjetPortail(ObjetCoffre(co));   // meme retrait vrai que le portail (SetRespawnTime(0) puis Despawn)
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=coffre joueur={} valeur=0 motif={} ouvert={}",
+             co.id, co.joueur, motif, ouvert ? 1 : 0);
+    CloreEvenement(co.id, co.joueur, "leve", motif);
+}
+
+bool CoffreOuvert(ObjectGuid const& g)
+{
+    std::lock_guard<std::mutex> garde(evCoffresVerrou);
+    auto it = std::find_if(evCoffresAcces.begin(), evCoffresAcces.end(),
+                           [&g](EvCoffreAcces const& a) { return a.guid == g; });
+    return it != evCoffresAcces.end() && it->ouvert;
+}
+
+// Chaque seconde (Entretien, bus allume ou eteint) : objet disparu (vide : le coeur l'efface), echeance, joueur
+// parti.
+void SuivreCoffres()
+{
+    if (evCoffres.empty())
+        return;
+    uint32 const maintenant = Maintenant();
+    std::vector<std::pair<EvCoffre, char const*>> fins;
+    for (auto it = evCoffres.begin(); it != evCoffres.end();)
+    {
+        Player* p = JoueurConnecte(it->joueur);
+        char const* motif = !ObjetCoffre(*it)                                                        ? nullptr
+                            : !p                                                                     ? "hors_ligne"
+                            : (p->IsInWorld() && !p->IsBeingTeleported() && p->GetMapId() != it->carte) ? "carte"
+                            : it->finS <= maintenant                                                 ? "echu"
+                                                                                                     : "";
+        if (!motif)
+            motif = CoffreOuvert(it->guid) ? "pille" : "disparu";
+        if (*motif)
+        {
+            fins.emplace_back(*it, motif);
+            it = evCoffres.erase(it);
+        }
+        else
+            ++it;
+    }
+    for (auto const& [co, motif] : fins)
+        FermerCoffre(co, motif);
+}
+
+// Leve les coffres pour lesquels `lever(id, joueur)` est vrai : lever, stop, bus eteint.
+template <typename Predicat>
+size_t LeverCoffresSi(Predicat lever, char const* raison)
+{
+    std::vector<EvCoffre> partis;
+    for (auto it = evCoffres.begin(); it != evCoffres.end();)
+    {
+        if (lever(it->id, it->joueur))
+        {
+            partis.push_back(*it);
+            it = evCoffres.erase(it);
+        }
+        else
+            ++it;
+    }
+    for (EvCoffre const& co : partis)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        FermerCoffre(co, raison);
+    }
+    return partis.size();
+}
+
+// Le joueur `q` peut-il piller le coffre `g` ? Fil de carte (SendLoot). Le joueur de l'evenement, ou un membre
+// HUMAIN de son groupe ; un coffre de l'entree absent de la table (registre perdu) : personne. Marque `ouvert`.
+bool CoffrePermis(Player* q, ObjectGuid const& g)
+{
+    if (!q || !Humain(q))
+        return false;
+    uint32 joueur = 0;
+    {
+        std::lock_guard<std::mutex> garde(evCoffresVerrou);
+        auto it = std::find_if(evCoffresAcces.begin(), evCoffresAcces.end(),
+                               [&g](EvCoffreAcces const& a) { return a.guid == g; });
+        if (it == evCoffresAcces.end())
+            return false;
+        joueur = it->joueur;
+    }
+    bool permis = q->GetGUID().GetCounter() == joueur;
+    if (!permis)
+    {
+        Group* groupe = q->GetGroup();
+        permis = groupe && groupe->IsMember(ObjectGuid::Create<HighGuid::Player>(joueur));
+    }
+    if (permis)
+    {
+        std::lock_guard<std::mutex> garde(evCoffresVerrou);
+        auto it = std::find_if(evCoffresAcces.begin(), evCoffresAcces.end(),
+                               [&g](EvCoffreAcces const& a) { return a.guid == g; });
+        if (it != evCoffresAcces.end())
+            it->ouvert = true;
+    }
+    return permis;
+}
+
+bool EstNotreCoffre(ObjectGuid const& g)
+{
+    return g.IsGameObject() && g.GetEntry() == EV_COFFRE_ENTREE;
+}
+
+// Degats doses (fils de carte). Seuls les attaquants de la plage portant une dose sont touches.
+class coa_directeur_dose_unitscript : public UnitScript
+{
+public:
+    coa_directeur_dose_unitscript()
+        : UnitScript("coa_directeur_dose_unitscript", true,
+                     {UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
+                      UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK})
+    {
+    }
+
+    void ModifyMeleeDamage(Unit* /*target*/, Unit* attacker, uint32& damage) override
+    {
+        uint32 const pct = DegatsDoses(attacker);
+        if (pct < 100)
+            damage = uint32(uint64(damage) * pct / 100);
+    }
+
+    void ModifySpellDamageTaken(Unit* /*target*/, Unit* attacker, int32& damage, SpellInfo const* /*spellInfo*/) override
+    {
+        uint32 const pct = DegatsDoses(attacker);
+        if (pct < 100 && damage > 0)
+            damage = int32(int64(damage) * pct / 100);
+    }
+
+    // Ce crochet voit aussi les tics de SOIN (SpellAuraEffects.cpp, HandlePeriodicHealAurasTick) : un sort
+    // positif n'est jamais touche.
+    void ModifyPeriodicDamageAurasTick(Unit* /*target*/, Unit* attacker, uint32& damage, SpellInfo const* spellInfo) override
+    {
+        if (spellInfo && spellInfo->IsPositive())
+            return;
+        uint32 const pct = DegatsDoses(attacker);
+        if (pct < 100)
+            damage = uint32(uint64(damage) * pct / 100);
+    }
+};
+
+// Le droit d'ouvrir le coffre (fil de carte, Player::SendLoot). Vrai = REFUS (CALL_ENABLED_BOOLEAN_HOOKS : un
+// script qui rend vrai fait rendre faux a ScriptMgr, et SendLoot repond LOOT_ERROR_DIDNT_KILL).
+class coa_directeur_coffre_globalscript : public GlobalScript
+{
+public:
+    coa_directeur_coffre_globalscript()
+        : GlobalScript("coa_directeur_coffre_globalscript", {GLOBALHOOK_ON_ALLOWED_TO_LOOT_CONTAINER_CHECK})
+    {
+    }
+
+    bool OnAllowedToLootContainerCheck(Player const* player, ObjectGuid source) override
+    {
+        if (!EstNotreCoffre(source))
+            return false;
+        return !CoffrePermis(const_cast<Player*>(player), source);
+    }
+};
+
+// Chacun voit les objets de SA tranche : le coeur ne remplit le butin conditionnel que pour le premier pilleur
+// (Loot::FillLoot, butin personnel) ; les suivants permis le recoivent ici (FillNotNormalLootFor ne refait rien
+// pour un joueur deja servi). Fil de carte, sur le butin du coffre que SendLoot va montrer.
+class coa_directeur_coffre_playerscript : public PlayerScript
+{
+public:
+    coa_directeur_coffre_playerscript()
+        : PlayerScript("coa_directeur_coffre_playerscript", {PLAYERHOOK_ON_BEFORE_SEND_LOOT})
+    {
+    }
+
+    void OnPlayerBeforeSendLoot(Player* player, ObjectGuid lootGuid, Loot* loot) override
+    {
+        if (player && loot && EstNotreCoffre(lootGuid))
+            loot->FillNotNormalLootFor(player);
+    }
+};
