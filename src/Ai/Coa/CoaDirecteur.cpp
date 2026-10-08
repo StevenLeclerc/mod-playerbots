@@ -5021,14 +5021,20 @@ void SuivreInvoques()
         ++it;
     }
 
-    // 3. Lots vides : fin (morts et corps effaces, echus, ou retires hors de vue).
+    // 3. Lots finis : plus aucun invoque VIVANT (08/10, commanditaire : « on attend betement entre les vagues ») :
+    // la fin part des la derniere mort, sans attendre l'effacement des corps (~60 s). Les entrees mortes du
+    // lot quittent le registre (morts deja comptes par NoterMort ; le corps disparait seul, TempSummon).
     std::vector<EvLot> finis;
     for (auto it = evLots.begin(); it != evLots.end();)
     {
         uint32 const id = it->first;
-        if (std::none_of(evInvoques.begin(), evInvoques.end(), [id](EvInvoque const& v) { return v.id == id; }))
+        if (std::none_of(evInvoques.begin(), evInvoques.end(),
+                         [id](EvInvoque const& v) { return v.id == id && !v.mort; }))
         {
             finis.push_back(it->second);
+            evInvoques.erase(std::remove_if(evInvoques.begin(), evInvoques.end(),
+                                            [id](EvInvoque const& v) { return v.id == id; }),
+                             evInvoques.end());
             it = evLots.erase(it);
         }
         else
