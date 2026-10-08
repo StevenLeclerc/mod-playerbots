@@ -20,9 +20,10 @@
 //   (aucune phase). Accuse `execute` a la pose.
 //   CLIC : le joueur, ou un membre HUMAIN de son groupe, a EV_PORTAIL_CLIC_YD au plus, vivant -> le portail est
 //   referme (retire tout de suite : animation de disparition puis suppression, RetirerObjetPortail) et la
-//   recompense part par COURRIER au joueur de l'evenement, dans la MEME transaction que l'accuse final de la
-//   commande (statut `leve`, raison `referme`) : apres un plantage, soit les deux sont en base, soit aucun. Un
-//   clic n'est traite qu'une fois (le portail quitte le registre avant la transaction).
+//   recompense est versee au joueur de l'evenement (08/10 : dans ses sacs et sa bourse s'il est dans le monde, le
+//   reste et tout hors du monde par COURRIER ; VerserRecompense de CoaDirecteur.cpp), dans la MEME transaction que
+//   l'accuse final de la commande (statut `leve`, raison `referme`) : apres un plantage, soit tout est en base, soit
+//   rien. Un clic n'est traite qu'une fois (le portail quitte le registre avant la transaction).
 //   SANS CLIC : a l'echeance, au depart du joueur (hors ligne, autre carte), a `lever` (id ou tout), a
 //   `.directeur stop` et au bus eteint (LeverEvenementsSi), le portail est retire SANS recompense, accuse `leve`
 //   avec la raison (`echu`, `hors_ligne`, `carte`, `disparu`, `lever`, `arret`, `bus_eteint`).
@@ -260,9 +261,9 @@ char const* RefusClic(EvPortail const& po, Player* q, GameObject* go)
     return nullptr;
 }
 
-// Le portail REFERME par un clic recevable : la recompense par courrier au joueur de l'evenement, et l'accuse
-// final de la commande, dans UNE transaction (forme d'ExecuterRecompense, R3). Le portail a deja quitte le
-// registre : ce clic ne peut pas etre traite deux fois.
+// Le portail REFERME par un clic recevable : la recompense au joueur de l'evenement (sacs et bourse s'il est dans
+// le monde, courrier pour le reste : VerserRecompense), et l'accuse final de la commande, dans UNE transaction
+// (forme d'ExecuterRecompense, R3). Le portail a deja quitte le registre : ce clic ne peut pas etre traite deux fois.
 void RefermerPortail(EvPortail const& po, Player* q, GameObject* go)
 {
     char const* raison = "referme";
@@ -286,23 +287,15 @@ void RefermerPortail(EvPortail const& po, Player* q, GameObject* go)
             crees.push_back(objet);
         }
     bool const paye = aPayer && raison == std::string_view("referme");
-    // Rien a ecrire (aucun courrier, bus inerte) : aucune transaction vide.
+    RemiseRecompense r;
+    // Rien a ecrire (rien a verser, bus inerte) : aucune transaction vide.
     if (paye || source)
     {
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        // 08/10 : sacs et bourse s'il est dans le monde, le reste par courrier (VerserRecompense).
         if (paye)
-        {
-            MailDraft brouillon("La faille d'orage", "Vous avez refermé la faille. Voici votre part. Le Directeur.");
-            if (po.cuivre)
-                brouillon.AddMoney(po.cuivre);
-            for (Item* objet : crees)
-            {
-                objet->SaveToDB(trans);
-                brouillon.AddItem(objet);
-            }
-            brouillon.SendMailTo(trans, j ? MailReceiver(j, po.joueur) : MailReceiver(po.joueur),
-                                 MailSender(MAIL_NORMAL, po.joueur, MAIL_STATIONERY_GM));
-        }
+            r = VerserRecompense(trans, j, po.joueur, po.cuivre, po.objets, crees, "La faille d'orage",
+                                 "Vous avez refermé la faille. Voici votre part. Le Directeur.");
         // L'accuse final dans la MEME transaction ; meme garde de statut que CoaDirSourceMysql::Clore.
         if (source)
             trans->Append(Acore::StringFormat(
@@ -311,15 +304,20 @@ void RefermerPortail(EvPortail const& po, Player* q, GameObject* go)
                 raison, po.id));
         CharacterDatabase.CommitTransaction(trans);
     }
+    if (paye)
+        DireRemise(j, r, "La faille est refermée, votre récompense");
     RetirerObjetPortail(go);
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
     LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=evenement cible={} joueur={} statut=leve raison={}", po.id,
              po.joueur, po.joueur, raison);
     LOG_INFO("playerbots",
              "coa directeur evenement: id={} sous_action=portail joueur={} valeur={} motif={} par={} cuivre={}"
-             " objets={} paye={} en_ligne={} clics_refuses={}",
+             " objets={} paye={} en_ligne={} clics_refuses={} direct={} direct_cuivre={} direct_objets={} courrier={}"
+             " courrier_cuivre={} courrier_objets={}",
              po.id, po.joueur, po.cuivre, raison, q ? q->GetGUID().GetCounter() : 0, paye ? po.cuivre : 0,
-             paye ? TexteObjets(po.objets) : std::string("-"), paye ? 1 : 0, j ? 1 : 0, po.clicsRefuses);
+             paye ? TexteObjets(po.objets) : std::string("-"), paye ? 1 : 0, j ? 1 : 0, po.clicsRefuses,
+             r.direct ? 1 : 0, r.cuivreDirect, TexteObjetsRemise(r.objetsDirect), r.courrier ? 1 : 0,
+             r.cuivreCourrier, TexteObjetsRemise(r.objetsCourrier));
 }
 
 // Chaque seconde (Entretien, bus allume ou eteint) : les clics de la file, puis echeances, joueur parti et

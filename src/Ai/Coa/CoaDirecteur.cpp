@@ -2679,7 +2679,7 @@ void ExecuterRepondre(CoaDirCommande const& c)
 // ---- recompense (lot R3, 03/10/2026)
 //
 // Verbe `recompenser` (coa-project/docs/CONCEPTION-recompenses-primes.md § 1.5, § 5) :
-// UN courrier au joueur `cible` (`joueur` 0 ou le meme), en ligne OU NON, portant
+// verse au joueur `cible` (`joueur` 0 ou le meme), en ligne OU NON,
 // `valeur` cuivres et les objets de `texte` (« id:quantite[,id:quantite] », 4 au plus),
 // chacun de la liste blanche AiPlayerbot.Directeur.RecompenseObjets. `valeur` au plus
 // AiPlayerbot.Directeur.RecompenseMaxCuivre. Le montant est CALCULE par le service
@@ -2687,10 +2687,14 @@ void ExecuterRepondre(CoaDirCommande const& c)
 // Refus (accuse `refuse`, ligne `coa directeur recompense: … statut=refuse`) :
 //   bornes (cible, `valeur` negative, rien a verser), plafond, objet (forme, liste
 //   blanche, gabarit, quantite), inconnu (personnage absent du cache), pas_humain.
-// IDEMPOTENCE. Le courrier (mail, mail_items, item_instance) ET l'accuse `execute` de la
-// commande partent dans la MEME transaction : apres un plantage, soit les deux sont
-// en base, soit aucun, et une commande encore `en_attente` n'a rien verse. Dans la vie
-// du processus, une commande n'est livree qu'une fois (dernierId de la source).
+// 08/10 : joueur dans le monde -> argent et objets DIRECTEMENT dans la bourse et les sacs,
+// seul ce qui ne tient pas part par courrier ; hors du monde -> UN courrier, comme avant
+// (VerserRecompense, « remise directe » plus haut).
+// IDEMPOTENCE. La remise directe (SaveInventoryAndGoldToDB), le courrier (mail, mail_items,
+// item_instance) ET l'accuse `execute` de la commande partent dans la MEME transaction :
+// apres un plantage, soit tout est en base, soit rien, et une commande encore `en_attente`
+// n'a rien verse. Dans la vie du processus, une commande n'est livree qu'une fois
+// (dernierId de la source).
 // Joueur connecte (JoueurConnecte : en chargement compris) : MailDraft l'ajoute aussi a
 // sa liste en memoire (Mail.cpp, SendMailTo), sinon le courrier n'existerait qu'en base
 // et le serveur pourrait l'ecraser (conception § 1.5).
@@ -2771,6 +2775,203 @@ void RefuserRecompense(CoaDirCommande const& c, char const* raison)
     Refuser(c, raison);
 }
 
+// ---- remise directe (08/10/2026)
+//
+// Demande du commanditaire (08/10) : « il faut donner les objets en direct et envoyer par courrier que ce qui ne
+// rentre pas dans les sacs ». Partage par `recompenser` (ExecuterRecompense) et la fermeture du portail
+// (RefermerPortail, CoaDirecteurPortail.inc).
+//
+// Joueur DANS LE MONDE (JoueurPourRemise : en jeu, ni en chargement, ni en teleportation, ni en deconnexion) :
+//   - l'argent est credite par Player::ModifyMoney, au plus jusqu'au plafond : ModifyMoney refuse TOUT montant qui
+//     ne laisse pas GetMoney() + montant < MAX_MONEY_AMOUNT (Player.cpp), donc on ne lui propose que la marge ; le
+//     credit retenu est l'ecart MESURE de GetMoney() (un compte d'essai plafonne, CONFIG_TRIAL_MONEY_CAP, est
+//     refuse en bloc : tout part par courrier) ;
+//   - chaque objet est pose dans les sacs (CanStoreNewItem + StoreNewItem + SendNewItem, forme de Player::AddItem
+//     et de .additem) : la quantite qui tient (sacs pleins, objet unique deja possede, categorie limitee :
+//     no_space_count de CanStoreItem) est posee, le reste part par courrier ;
+//   - ce qui ne tient pas part par COURRIER, comme avant.
+// Hors ligne, ou connecte mais pas dans le monde : tout par courrier, comme avant.
+//
+// ORDRE ET IDEMPOTENCE. Les objets du courrier sont crees pour la quantite ENTIERE AVANT toute ecriture (un echec
+// de creation refuse sans rien verser, comme avant) ; la remise directe ne fait ensuite plus rien qui puisse
+// echouer : un objet pose en entier est detruit (jamais sauve), un objet pose en partie voit sa quantite reduite
+// (Item::SetCount). La remise directe touche la MEMOIRE du joueur, puis Player::SaveInventoryAndGoldToDB(trans)
+// l'ecrit DANS LA TRANSACTION DU COURRIER ET DE L'ACCUSE de la commande (forme de la prise d'un courrier et de
+// l'echange, cote coeur). CharacterDatabase n'a qu'UN fil asynchrone (CharacterDatabase.WorkerThreads = 1,
+// worldserver.conf en service) : les transactions passent dans l'ordre ou elles sont remises, et toute sauvegarde
+// du joueur posterieure (periodique, deconnexion) l'est APRES celle-ci. Donc :
+//   - plantage avant la validation : ni le credit, ni le courrier, ni l'accuse ne sont en base (la memoire meurt
+//     avec le processus) ; la commande, encore `en_attente`, sera rejouee et versera UNE fois ;
+//   - apres la validation : les trois sont en base, la commande n'est plus `en_attente` et n'est pas rejouee ;
+//   - dans la vie du processus, une commande n'est livree qu'une fois (dernierId de la source ; le portail quitte
+//     le registre avant la transaction) : un credit direct reussi n'est jamais refait.
+// Risque residuel, le meme que celui du coeur pour la prise d'un courrier : une transaction qui ECHOUE (erreur SQL
+// autre qu'un interblocage, que TransactionTask rejoue) laisse le credit en memoire sans l'accuse ; l'argent serait
+// ecrit par la sauvegarde suivante du joueur et la commande rejouee apres un redemarrage. Aucune ecriture ne peut
+// le prevenir sans attendre le resultat de la transaction, ce que le fil monde ne fait pas.
+// FIL MONDE SEUL : la deconnexion d'un joueur (World::UpdateSessions) et les mises a jour de cartes
+// (MapMgr::Update, attendu) ne tournent pas pendant cette fonction ; le joueur ne peut pas partir entre deux etapes.
+struct RemiseRecompense
+{
+    bool direct = false;                                      // joueur dans le monde : remise directe tentee
+    uint32 cuivreDirect = 0;
+    uint32 cuivreCourrier = 0;
+    std::vector<std::pair<uint32, uint32>> objetsDirect;      // (objet, quantite posee dans les sacs)
+    std::vector<std::pair<uint32, uint32>> objetsCourrier;    // (objet, quantite partie par courrier)
+    bool courrier = false;                                    // un courrier est parti
+};
+
+// Le joueur peut-il recevoir dans ses sacs ? -> lui-meme, ou nullptr (tout par courrier).
+Player* JoueurPourRemise(Player* p)
+{
+    if (!p || !p->IsInWorld() || p->IsBeingTeleported())
+        return nullptr;
+    WorldSession* s = p->GetSession();
+    if (!s || s->PlayerLoading() || s->PlayerLogout())
+        return nullptr;
+    return p;
+}
+
+std::string TexteObjetsRemise(std::vector<std::pair<uint32, uint32>> const& objets)
+{
+    std::string s;
+    for (auto const& [id, n] : objets)
+        s += (s.empty() ? "" : ",") + std::to_string(id) + ":" + std::to_string(n);
+    return s.empty() ? std::string("-") : s;
+}
+
+// Remise directe puis courrier du reste, dans `trans` (l'appelant y ajoute l'accuse et la valide). `p` : le joueur
+// connecte (JoueurConnecte, nullptr hors ligne) ; `crees` : un objet par entree de `objets`, quantite entiere, cree
+// avant l'appel ; la fonction en prend possession (detruit, reduit, ou confie au courrier). `directPermis` faux : tout
+// par courrier (cible de banc : outils/banc-prime.py prouve le paiement par le courrier recu).
+RemiseRecompense VerserRecompense(CharacterDatabaseTransaction trans, Player* p, uint32 guidLow, uint32 cuivre,
+                                  std::vector<std::pair<uint32, uint32>> const& objets, std::vector<Item*>& crees,
+                                  char const* sujet, char const* corps, bool directPermis = true)
+{
+    RemiseRecompense r;
+    Player* d = directPermis ? JoueurPourRemise(p) : nullptr;
+    r.direct = d != nullptr;
+    for (size_t i = 0; i < objets.size() && i < crees.size(); ++i)
+    {
+        uint32 const id = objets[i].first, n = objets[i].second;
+        uint32 pose = 0;
+        if (d)
+        {
+            uint32 manque = 0;
+            ItemPosCountVec dest;
+            InventoryResult const res = d->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, id, n, &manque);
+            uint32 place = 0;
+            for (ItemPosCount const& x : dest)
+                place += x.count;
+            // Seules deux formes sont prises : tout tient (OK), ou une partie tient et `manque` dit exactement le
+            // reste (sacs pleins, unique, categorie limitee). Toute autre forme : rien dans les sacs, tout au courrier.
+            bool const coherent = res == EQUIP_ERR_OK ? place == n : (manque < n && place == n - manque);
+            if (place && coherent)
+                if (Item* pose_ = d->StoreNewItem(dest, id, true))
+                {
+                    d->SendNewItem(pose_, place, true, false);
+                    pose = place;
+                }
+        }
+        if (pose)
+            r.objetsDirect.emplace_back(id, pose);
+        if (pose >= n)
+        {
+            delete crees[i];   // jamais sauve ni ajoute a quoi que ce soit
+            crees[i] = nullptr;
+            continue;
+        }
+        if (pose)
+            crees[i]->SetCount(n - pose);
+        r.objetsCourrier.emplace_back(id, n - pose);
+    }
+    if (cuivre && d)
+    {
+        uint32 const avant = d->GetMoney();
+        // ModifyMoney n'accepte `m` que si avant < MAX_MONEY_AMOUNT - m : la marge est MAX - avant - 1.
+        uint32 const marge = avant < MAX_MONEY_AMOUNT ? uint32(MAX_MONEY_AMOUNT) - avant - 1 : 0;
+        uint32 const tente = std::min(cuivre, marge);   // <= MAX_MONEY_AMOUNT < 2^31 : tient dans un int32
+        if (tente)
+            d->ModifyMoney(static_cast<int32>(tente), false);
+        uint32 const apres = d->GetMoney();
+        r.cuivreDirect = apres > avant ? std::min(apres - avant, cuivre) : 0;
+    }
+    r.cuivreCourrier = cuivre - r.cuivreDirect;
+    if (d && (r.cuivreDirect || !r.objetsDirect.empty()))
+        d->SaveInventoryAndGoldToDB(trans);
+    bool resteObjet = false;
+    for (Item* objet : crees)
+        resteObjet = resteObjet || objet;
+    if (r.cuivreCourrier || resteObjet)
+    {
+        MailDraft brouillon(sujet, corps);
+        if (r.cuivreCourrier)
+            brouillon.AddMoney(r.cuivreCourrier);
+        for (Item* objet : crees)
+            if (objet)
+            {
+                objet->SaveToDB(trans);
+                brouillon.AddItem(objet);
+            }
+        brouillon.SendMailTo(trans, p ? MailReceiver(p, guidLow) : MailReceiver(guidLow),
+                             MailSender(MAIL_NORMAL, guidLow, MAIL_STATIONERY_GM));
+        r.courrier = true;
+    }
+    crees.clear();   // tout est detruit ou confie au courrier
+    return r;
+}
+
+std::string TexteCuivre(uint32 cuivre)
+{
+    uint32 const po = cuivre / 10000, pa = (cuivre / 100) % 100, pc = cuivre % 100;
+    std::string s;
+    if (po)
+        s += std::to_string(po) + " po";
+    if (pa)
+        s += (s.empty() ? "" : " ") + std::to_string(pa) + " pa";
+    if (pc || s.empty())
+        s += (s.empty() ? "" : " ") + std::to_string(pc) + " pc";
+    return s;
+}
+
+std::string TexteRemise(uint32 cuivre, std::vector<std::pair<uint32, uint32>> const& objets)
+{
+    std::string s = cuivre ? TexteCuivre(cuivre) : std::string();
+    for (auto const& [id, n] : objets)
+    {
+        ItemTemplate const* gabarit = sObjectMgr->GetItemTemplate(id);
+        std::string nom = "[" + (gabarit ? gabarit->Name1 : std::to_string(id)) + "]";
+        if (n > 1)
+            nom += " x" + std::to_string(n);
+        s += (s.empty() ? "" : ", ") + nom;
+    }
+    return s;
+}
+
+// Message au joueur (apres la remise de la transaction ; `quoi` = « Votre prime », …). Rien hors du monde : le
+// courrier s'annonce seul a la connexion.
+void DireRemise(Player* p, RemiseRecompense const& r, char const* quoi)
+{
+    Player* d = r.direct ? JoueurPourRemise(p) : nullptr;
+    if (!d)
+        return;
+    bool const direct = r.cuivreDirect || !r.objetsDirect.empty();
+    bool const courrier = r.cuivreCourrier || !r.objetsCourrier.empty();
+    if (direct && courrier)
+        ChatHandler(d->GetSession()).PSendSysMessage("{}{} : {}, remis directement ; par courrier (sacs pleins ou"
+                                                     " plafond d'or) : {}.", PREFIXE_DIRECTEUR, quoi,
+                                                     TexteRemise(r.cuivreDirect, r.objetsDirect),
+                                                     TexteRemise(r.cuivreCourrier, r.objetsCourrier));
+    else if (direct)
+        ChatHandler(d->GetSession()).PSendSysMessage("{}{} : {}, remis directement.", PREFIXE_DIRECTEUR, quoi,
+                                                     TexteRemise(r.cuivreDirect, r.objetsDirect));
+    else if (courrier)
+        ChatHandler(d->GetSession()).PSendSysMessage("{}{} : rien n'a pu vous être remis directement (sacs pleins"
+                                                     " ou plafond d'or), tout part par courrier : {}.",
+                                                     PREFIXE_DIRECTEUR, quoi,
+                                                     TexteRemise(r.cuivreCourrier, r.objetsCourrier));
+}
+
 void ExecuterRecompense(CoaDirCommande const& c)
 {
     if (!CibleJoueurValide(c) || c.valeur < 0 || (c.valeur == 0 && c.texte.empty()))
@@ -2833,18 +3034,12 @@ void ExecuterRecompense(CoaDirCommande const& c)
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
     // 06/10 : `intensite` = 1 marque une part de la Faille d'orage (service : recompenses.MARQUE_FAILLE).
     bool const faille = c.intensite == 1.0f;
-    MailDraft brouillon(faille ? "La faille d'orage" : "Votre prime",
-                        faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
-                               : "Le contrat sur votre tête est soldé. Le Directeur.");
-    if (cuivre)
-        brouillon.AddMoney(cuivre);
-    for (Item* objet : crees)
-    {
-        objet->SaveToDB(trans);
-        brouillon.AddItem(objet);
-    }
-    brouillon.SendMailTo(trans, p ? MailReceiver(p, c.cible) : MailReceiver(c.cible),
-                         MailSender(MAIL_NORMAL, c.cible, MAIL_STATIONERY_GM));
+    // 08/10 : en jeu, dans les sacs et la bourse ; le reste (et tout, hors ligne) par courrier (VerserRecompense).
+    RemiseRecompense const r =
+        VerserRecompense(trans, p, c.cible, cuivre, objets, crees, faille ? "La faille d'orage" : "Votre prime",
+                         faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
+                                : "Le contrat sur votre tête est soldé. Le Directeur.",
+                         !banc);   // cible de banc (un bot) : tout par courrier, comme avant
     // L'accuse dans la MEME transaction (voir plus haut). Meme garde de statut que
     // CoaDirSourceMysql::Acquitter ; c'est la seule source en service.
     if (source)
@@ -2853,12 +3048,16 @@ void ExecuterRecompense(CoaDirCommande const& c)
             " AND statut = 'en_attente'",
             c.id));
     CharacterDatabase.CommitTransaction(trans);
+    DireRemise(p, r, faille ? "Votre part de la faille d'orage" : "Votre prime");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Journaliser(c, "execute", nullptr);
     LOG_INFO("playerbots",
-             "coa directeur recompense: id={} joueur={} cuivre={} objets={} action={} statut=execute en_ligne={}{}",
+             "coa directeur recompense: id={} joueur={} cuivre={} objets={} action={} statut=execute en_ligne={}"
+             " direct={} direct_cuivre={} direct_objets={} courrier={} courrier_cuivre={} courrier_objets={}{}",
              c.id, c.cible, cuivre, c.texte.empty() ? std::string("-") : c.texte,
-             c.action.empty() ? std::string("-") : c.action, p ? 1 : 0, banc ? " banc=1" : "");
+             c.action.empty() ? std::string("-") : c.action, p ? 1 : 0, r.direct ? 1 : 0, r.cuivreDirect,
+             TexteObjetsRemise(r.objetsDirect), r.courrier ? 1 : 0, r.cuivreCourrier,
+             TexteObjetsRemise(r.objetsCourrier), banc ? " banc=1" : "");
 }
 
 // ---- paroles (§ 5.2)
