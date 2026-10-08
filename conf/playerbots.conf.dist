@@ -3656,6 +3656,23 @@ AiPlayerbot.Directeur.RecompenseMaxCuivre = 200000
 #        Default: 0
 AiPlayerbot.Directeur.EvenementPortail = 0
 
+#    AiPlayerbot.Directeur.EvenementGardien
+#        Lot G des evenements (08/10/2026, coa-project/docs/EVENEMENTS-lot-G.md) : finir la Faille d'orage.
+#        1. `invoquer` accepte une forme etendue `invoquer:<n>:<d>:<vue>:<arrivee>:<pv>:<degats>:<renfort>`
+#           (pv, degats : 25-100 % ; renfort : `renfort` | `sans`) : PV et degats de l'invoque multiplies
+#           par la dose (le service la calcule sur le public : Gardien affaibli en solo, plein en groupe).
+#        2. `renfort` (Gardien 9100004 seul, nombre 1) : sous 50 % de ses PV, 2 Etincelles (9100001)
+#           sortent a ses cotes, UNE fois, a son niveau et a sa dose, inscrites sous son lot.
+#        3. sous-action `coffre` (texte `coffre`, valeur 0, duree_s 60-600, point) : coffre 9100024
+#           (migration exploitation/directeur/sql/2026_10_08_01_evenement_coffre_faille.sql, AVANT le
+#           demarrage), pillable par le SEUL joueur humain de l'evenement (les bots ne le visent pas),
+#           un objet de sa tranche de niveau (tissu ou bijou) ; vide, il s'efface ; sinon retire a
+#           l'echeance. Les autres humains ont leur part au portail (lot P).
+#        0 : la forme etendue et `coffre` sont refusees `gardien_eteint` (la forme a 4 morceaux reste
+#        servie). Lue a chaque commande dans la conf chargee : `.reload config` suffit.
+#        Default: 0
+AiPlayerbot.Directeur.EvenementGardien = 0
+
 #    AiPlayerbot.Directeur.EvenementAmbiances, EvenementSons, EvenementSonsPoint, EvenementMusiques,
 #    AiPlayerbot.Directeur.EvenementKits, EvenementSorts, EvenementSortsHaut
 #        Lot C des evenements (04/10, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3, § 5.1) :

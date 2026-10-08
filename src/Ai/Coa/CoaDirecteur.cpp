@@ -4012,6 +4012,11 @@ bool EstPortail(std::string const& t);
 void ExecuterPortail(CoaDirCommande const& c);
 template <typename Predicat>
 size_t LeverPortailsSi(Predicat lever, char const* raison);
+// Lot G des evenements (08/10/2026) : definis dans CoaDirecteurGardien.inc, inclus apres le lot P.
+bool EstCoffre(std::string const& t);
+void ExecuterCoffre(CoaDirCommande const& c);
+template <typename Predicat>
+size_t LeverCoffresSi(Predicat lever, char const* raison);
 
 void ExecuterEvenement(CoaDirCommande const& c)
 {
@@ -4024,6 +4029,11 @@ void ExecuterEvenement(CoaDirCommande const& c)
     if (EstPortail(c.texte))   // lot P (06/10/2026) : le portail a refermer
     {
         ExecuterPortail(c);
+        return;
+    }
+    if (EstCoffre(c.texte))    // lot G (08/10/2026) : le coffre de la faille
+    {
+        ExecuterCoffre(c);
         return;
     }
     EvLu lu;
@@ -4272,7 +4282,8 @@ template <typename Predicat>
 size_t LeverEvenementsSi(Predicat lever, char const* raison)
 {
     // Lot D : les invoques d'abord (retrait immediat, ligne `tues=` par lot).
-    size_t const invoques = LeverInvoquesSi(lever, raison) + LeverPortailsSi(lever, raison);   // + lot P
+    size_t const invoques = LeverInvoquesSi(lever, raison) + LeverPortailsSi(lever, raison) +   // + lot P
+                            LeverCoffresSi(lever, raison);                                       // + lot G
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
         return invoques;
     std::vector<EvAmbiance> ambiances;
@@ -4528,7 +4539,15 @@ struct EvAppLu
     bool naissance = false;
     EvOrdre ordre = EvOrdre::Aucun;
     bool immediat = false;
+    // Lot G (08/10/2026, CoaDirecteurGardien.inc) : forme etendue d'invoquer, 7 morceaux. 0 : absent.
+    bool etendue = false;
+    uint8 pv = 0;
+    uint8 degats = 0;
+    bool renfort = false;
 };
+
+// Lot G des evenements (08/10/2026) : definis dans CoaDirecteurGardien.inc, inclus apres le lot P.
+bool LireMorceauxGardien(std::string const& pv, std::string const& degats, std::string const& renfort, EvAppLu& lu);
 
 char const* NomEvOrdre(EvOrdre o)
 {
@@ -4578,7 +4597,9 @@ bool LireApparition(std::string const& t, EvAppLu& lu)
             break;
         debut = fin + 1;
     }
-    if (morceaux.size() != 4)
+    if (morceaux.size() != 4 && morceaux.size() != 7)   // 7 : forme etendue du lot G
+        return false;
+    if (morceaux.size() == 7 && !LireMorceauxGardien(morceaux[4], morceaux[5], morceaux[6], lu))
         return false;
     // n : un seul chiffre, 1 a 6.
     if (morceaux[0].size() != 1 || morceaux[0][0] < '1' || morceaux[0][0] > char('0' + EV_INVOQUER_NOMBRE_MAX))
@@ -4615,6 +4636,10 @@ struct EvInvoque
     bool mort = false;
     bool renfort = false;    // invoque par un invoque inscrit (SmartAI), pas par ExecuterInvoquer
     uint32 retraitDepuisS = 0;   // Maintenant() de la demande de retrait hors de vue ; 0 : aucune
+    uint8 pv = 100;              // lot G : dose (%) de ses PV et de ses degats, 100 : pleine
+    uint8 degats = 100;
+    bool renfortArme = false;    // lot G : fera sortir ses Etincelles sous 50 % PV...
+    bool renfortFait = false;    // ... une seule fois
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
 
@@ -4848,6 +4873,11 @@ bool PointApparition(CoaDirCommande const& c, Player* p, float& sol, char const*
     return true;
 }
 
+// Lot G (CoaDirecteurGardien.inc) : gardes de la forme etendue, dose, renfort a mi-vie.
+char const* RefusGardien(EvAppLu const& lu, uint32 entree);
+void DoserInvoque(Creature* cr, uint8 pv, uint8 degats);
+void DeclencherRenforts();
+
 void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 {
     uint32 const entree = static_cast<uint32>(c.valeur);
@@ -4863,6 +4893,11 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
     if (!sObjectMgr->GetCreatureTemplate(entree))
     {
         RefuserApparition(c, lu, "gabarit");   // lot E (donnees) absent
+        return;
+    }
+    if (char const* refusG = RefusGardien(lu, entree))   // lot G : forme etendue (option, renfort du Gardien)
+    {
+        RefuserApparition(c, lu, refusG);
         return;
     }
     float sol = 0.0f;
@@ -4937,6 +4972,9 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         v.carte = p->GetMapId();
         v.entree = entree;
         v.niveau = niveau;
+        v.pv = lu.pv ? lu.pv : 100;          // lot G
+        v.degats = lu.degats ? lu.degats : 100;
+        v.renfortArme = lu.renfort;
         poses.push_back(v);
         // Niveau relu a chaque pose : un autre niveau veut dire qu'un crochet de creation passe APRES le
         // notre l'a reecrit. Ce n'est PAS la garde de l'echelle d'Ascension : ses scripts s'enregistrent
@@ -4950,6 +4988,7 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
             echec = "echelle";
             break;
         }
+        DoserInvoque(s, lu.pv, lu.degats);   // lot G : rien sans la forme etendue
         if (lu.naissance)
             s->CastSpell(s, EV_SORT_NAISSANCE, true);   // rendu SUPPOSE (banc du 04/10 : « on voit rien » par .aura)
     }
@@ -5220,6 +5259,9 @@ void SuivreInvoques()
         ++it;
     }
 
+    // 2 bis. Lot G : renforts a mi-vie (avant les fins de lot : le lot du Gardien reste ouvert).
+    DeclencherRenforts();
+
     // 3. Lots finis : plus aucun invoque VIVANT (08/10, commanditaire : « on attend betement entre les vagues ») :
     // la fin part des la derniere mort, sans attendre l'effacement des corps (~60 s). Les entrees mortes du
     // lot quittent le registre (morts deja comptes par NoterMort ; le corps disparait seul, TempSummon).
@@ -5249,6 +5291,8 @@ void SuivreInvoques()
 
 // Lot P des evenements (06/10/2026) : le portail a refermer (fragment a part, meme espace de noms).
 #include "CoaDirecteurPortail.inc"
+// Lot G des evenements (08/10/2026) : Gardien dose, renfort a mi-vie, coffre (fragment a part, meme espace).
+#include "CoaDirecteurGardien.inc"
 
 // ------------------------------------------------------------------ lot D4c : prime et morts tracees
 //
@@ -6534,6 +6578,8 @@ void Entretien(uint32 diff)
     SuivreInvoques();
     // Lot P des evenements : portails a refermer (clics, echeances).
     SuivrePortails();
+    // Lot G des evenements : coffres de la faille (pilles, echeances).
+    SuivreCoffres();
     // Lot F des evenements : les invoques vivants par joueur, publies pour les bots inscrits.
     PublierCiblesEvenement();
     LivrerParoles();
@@ -10234,6 +10280,9 @@ void AddSC_coa_directeur()
 {
     new coa_directeur_niveau_creaturescript();
     new coa_directeur_portail_goscript();   // lot P des evenements
+    new coa_directeur_dose_unitscript();       // lot G : degats doses
+    new coa_directeur_coffre_globalscript();   // lot G : qui ouvre le coffre
+    new coa_directeur_coffre_playerscript();   // lot G : chacun sa tranche au coffre
     new coa_directeur_commandscript();
     new coa_directeur_worldscript();
     new coa_directeur_playerscript();
