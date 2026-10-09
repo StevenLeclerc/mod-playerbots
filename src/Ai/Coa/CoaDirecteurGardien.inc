@@ -628,12 +628,33 @@ public:
         if (&store != &LootTemplates_Gameobject || !player ||
             std::none_of(entries.begin(), entries.end(), [](LootStoreItem const* e) { return EstButinCoffre(e); }))
             return true;
+        // Relecture du 09/10 : le tirage direct saute ce que LootGroup::Roll fait apres ce crochet. On en refait ici
+        // ce qui est lisible : les DOUBLONS (LootGroupInvalidSelector : un objet equipable deja pose pour ce groupe
+        // ne l'est pas deux fois) et le MODE DE BUTIN, rapporte au mode par defaut -- le crochet ne recoit pas le mode
+        // du coffre ; nos coffres ne le changent jamais (GameObject::m_LootMode reste LOOT_MODE_DEFAULT, aucun
+        // SetLootMode/AddLootMode dans le module) et la migration ecrit LootMode = 1 partout. Rend faux : Roll rend
+        // nullptr, donc ni OnBeforeDropAddItem ni la repetition Rate.Drop.Item.GroupAmount (1 en service) -- ce
+        // butin pose UN objet par tranche, quel que soit ce reglage.
         std::vector<LootStoreItem*> permis;
         for (LootStoreItem* e : entries)
-            if (EstButinCoffre(e) && ButinPermis(player, e))
-                permis.push_back(e);
+        {
+            if (!EstButinCoffre(e) || !(e->lootmode & LOOT_MODE_DEFAULT) || !ButinPermis(player, e))
+                continue;
+            if (std::any_of(loot.items.begin(), loot.items.end(), [e](LootItem const& li)
+                            { return li.itemid == e->itemid && li.groupid == e->groupid; }))
+                continue;
+            permis.push_back(e);
+        }
         if (!permis.empty())
-            loot.AddItem(*permis[urand(0, uint32(permis.size() - 1))]);
+        {
+            LootStoreItem const* elu = permis[urand(0, uint32(permis.size() - 1))];
+            loot.AddItem(*elu);
+            // Trace propre a ce correctif (preuve d'installation lisible par strings, puis en jeu au premier coffre) :
+            // une ligne par objet pose, donc une par coffre (seule la tranche du pilleur a des permis).
+            LOG_INFO("playerbots", "coa directeur evenement: sous_action=coffre joueur={} valeur={} "
+                     "motif=tirage_classe classe={} permis={}", player->GetGUID().GetCounter(), elu->itemid,
+                     uint32(player->getClass()), uint32(permis.size()));
+        }
         return false;
     }
 };
