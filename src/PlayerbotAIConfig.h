@@ -540,6 +540,7 @@ public:
     bool directeurEvenementApparitions;               // interrupteur d'invoquer et d'ordre (defaut faux)
     std::string directeurEvenementCreatures;          // entrees permises (plage 9100000-9109999 imposee)
     std::string directeurEvenementSortsArrivee;       // sorts d'arrivee permis (7398 « naissance »)
+    bool directeurEvenementArriveeCiel;               // arrivee `ciel` (pose en hauteur, descente) ; faux : au sol
     uint32 directeurEvenementInvoquesParJoueur;       // invoques vivants par joueur (1-24)
     uint32 directeurEvenementInvocationDistanceYd;    // point d'apparition a au plus N yd du joueur (20-250)
     // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas

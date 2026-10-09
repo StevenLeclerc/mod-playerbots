@@ -24,6 +24,7 @@
 #include "MapMgr.h"
 #include "MercenaryRewards.h"
 #include "MiscPackets.h"
+#include "MoveSpline.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Opcodes.h"
@@ -4487,7 +4488,9 @@ void SuivreEvenements()
 //        `scene` (mise en scene) ou `hors_vue` (refus `vue` si un humain est a moins de 110 yd + la
 //        dispersion du point, regle V6) ; point (et chaque point disperse) hors sanctuaire, capitale et
 //        lieu sans JcJ (CoaLieuSansPvp, refus `lieu`) ; arrivee `aucune` ou `naissance` (7398 lance par l'invoque sur lui-meme, si
-//        EvenementSortsArrivee le permet). Jamais visibleBySummonerOnly ni phase : les bots le voient.
+//        EvenementSortsArrivee le permet) ou `ciel` (10/10 : pose a EV_CIEL_HAUTEUR_YD au-dessus de son sol,
+//        DESCEND au sol par la spline de MoveLand, point de retour remis au sol ; le coeur rend la gravite seul ; option
+//        EvenementArriveeCiel, eteinte : pose au sol comme `aucune`, journal `arrivee=ciel_eteint`). Jamais visibleBySummonerOnly ni phase : les bots le voient.
 //        Map::SummonCreature SANS invocateur : aucun lien au joueur (ni m_CreatedByPlayer, ni crochet
 //        OnPlayerBeforeTempSummonInitStats). Tout ou rien : un echec en cours retire ceux deja poses.
 //   ordre:attaquer | ordre:tenir | ordre:errer | ordre:charger_vers
@@ -4495,7 +4498,8 @@ void SuivreEvenements()
 //        attaquer : AttackStart sur le joueur `cible` (sauf invoque deja aux prises avec un autre : il
 //        garde son combat, compte `occupes`) ; tenir : reste sur place (foyer = position, mouvement de
 //        repos, reaction DEFENSIVE jusqu'au prochain attaquer/errer/charger_vers) ; errer : erre dans `rayon` (3-30 yd) autour de sa position ;
-//        charger_vers : court au point carte/x/y/z (foyer = ce point). Hors combat seulement, sauf
+//        charger_vers : COURT au point carte/x/y/z (foyer = ce point ; FORCED_MOVEMENT_RUN depuis le 10/10 :
+//        « les geants c'est mou », la spline prenait le pas de marche). Hors combat seulement, sauf
 //        attaquer. Liste fermee : `tenir` et `charger_vers` sont ceux du grimoire (§ 2.6) ; `attaquer`
 //        et `errer` sont le minimum demande au lot ; fuir_*, etat et faction ne sont pas faits.
 //   retirer | retirer:immediat
@@ -4528,6 +4532,28 @@ constexpr uint32 EV_RETRAIT_HORS_VUE_MAX_S = 300;    // au-dela, retire meme vu
 constexpr float EV_VU_MARGE_YD = 10.0f;
 constexpr size_t EV_INVOQUES_MAX = 64;               // tout le royaume
 constexpr uint32 EV_SORT_NAISSANCE = 7398;           // « Birth », effet 46, le monstre sur lui-meme
+// Arrivee `ciel` (10/10/2026, retours du 09/10 : « je pensais les voir surgir d'en haut ») : hauteur de pose au-dessus
+// du sol du point, et duree au bout de laquelle la gravite revient meme si la descente n'est pas finie.
+constexpr float EV_CIEL_HAUTEUR_YD = 18.0f;
+constexpr uint32 EV_CIEL_MAX_S = 6;
+constexpr uint32 EV_POINT_CIEL = 0xC1E1;             // id du mouvement MoveLand (EffectMovementGenerator)
+// Egares (10/10/2026, retours du 09/10 : « certains etaient vraiment partis, ils stagnaient loin de la zone » --
+// MESURE : deux nagas aux prises avec les Braves de Bloodhoof, 4 min loin du joueur). Un invoque qui a recu
+// `attaquer` et qui reste plus de EV_EGARE_S secondes aux prises avec un PNJ (cible non controlee par un joueur), ou HORS
+// COMBAT a plus de EV_EGARE_YD du joueur, est RELANCE sur le joueur (combat rompu, AttackStart), EV_EGARE_RELANCES fois,
+// puis RETIRE (compte au lot : `retires` et `egares`). Un invoque en combat contre un joueur ou un bot (cible controlee
+// par un joueur) n'est JAMAIS egare, meme loin : il chasse, ou un bot inscrit le tient (relecture : sans cela, un chef
+// qui poursuit un joueur qui recule aurait ete retire, et la victoire avec lui). Jamais pendant un `tenir`, un `errer`, un `charger_vers` (seul
+// `attaquer` arme la garde), ni joueur mort, ni retrait hors de vue demande.
+// Relecture du 10/10 : un invoque FORT (chef, Mere-wyrm, Seigneur, elite : rang non nul, PV du gabarit >= EV_EGARE_FORT_PV,
+// forme etendue du lot G ou renfort a mi-vie arme) n'est JAMAIS retire par cette garde : il est relance a chaque
+// EV_EGARE_S, sans limite. Sans cela, un chef sorti de combat (joueur recule de plus de 60 yd pour se soigner, laisse)
+// etait retire avec tues = 0, et la Faille finissait sans victoire ni coffre (faille_orage.py : la victoire exige un
+// gardien tue, la retentative exige qu'aucun gardien ne soit pose).
+constexpr float EV_EGARE_YD = 60.0f;
+constexpr uint32 EV_EGARE_S = 20;
+constexpr uint8 EV_EGARE_RELANCES = 1;
+constexpr float EV_EGARE_FORT_PV = 3.0f;             // CreatureTemplate::ModHealth ; les chefs sont a 6-8, les elites a 3-3,5
 
 // Niveau impose au monstre en cours de creation (Map::SummonCreature -> Creature::Create ->
 // UpdateEntry -> SelectLevel -> OnBeforeCreatureSelectLevel). Pose par le fil monde autour de l'appel
@@ -4560,6 +4586,7 @@ struct EvAppLu
     int32 delta = 0;
     bool horsVue = false;
     bool naissance = false;
+    bool ciel = false;          // 10/10 : arrivee `ciel`
     EvOrdre ordre = EvOrdre::Aucun;
     bool immediat = false;
     // Lot G (08/10/2026, CoaDirecteurGardien.inc) : forme etendue d'invoquer, 7 morceaux. 0 : absent.
@@ -4642,6 +4669,8 @@ bool LireApparition(std::string const& t, EvAppLu& lu)
         return false;
     if (morceaux[3] == "naissance")
         lu.naissance = true;
+    else if (morceaux[3] == "ciel")
+        lu.ciel = true;
     else if (morceaux[3] != "aucune")
         return false;
     lu.sous = EvApp::Invoquer;
@@ -4663,6 +4692,11 @@ struct EvInvoque
     uint8 degats = 100;
     bool renfortArme = false;    // lot G : fera sortir ses Etincelles sous 50 % PV...
     bool renfortFait = false;    // ... une seule fois
+    uint32 cielDepuisS = 0;      // 10/10 : Maintenant() de la pose en hauteur (arrivee `ciel`) ; 0 : au sol
+    uint32 attaqueS = 0;         // 10/10 : Maintenant() du dernier `attaquer` ; 0 : garde des egares desarmee
+    uint32 egareDepuisS = 0;     // 10/10 : debut de l'egarement en cours ; 0 : aucun
+    uint8 relances = 0;          // 10/10 : relances faites sur cet invoque
+    bool fort = false;           // 10/10 (relecture) : chef ou elite -- la garde des egares le relance, ne le retire jamais
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
 
@@ -4678,6 +4712,7 @@ struct EvLot
     uint32 disparus = 0;     // disparus sans qu'on les ait vus morts ni retires (echeance, grille dechargee)
     uint32 retires = 0;
     uint32 renforts = 0;     // creatures de la plage invoquees par un invoque du lot, inscrites au lot
+    uint32 egares = 0;       // 10/10 : invoques retires par la garde des egares (comptes aussi dans `retires`)
     bool retraitDemande = false;
 };
 std::unordered_map<uint32, EvLot> evLots;            // cle : id de la commande `invoquer` ; fil monde seul
@@ -4726,9 +4761,9 @@ void JournaliserLot(EvLot const& l, char const* motif)
 {
     LOG_INFO("playerbots",
              "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif={} posees={} tues={}"
-             " tues_humain={} tues_bot={} disparus={} retires={} renforts={}",
+             " tues_humain={} tues_bot={} disparus={} retires={} renforts={} egares={}",
              l.id, l.joueur, l.entree, motif, l.posees, l.tues, l.tuesHumain, l.tuesBot, l.disparus, l.retires,
-             l.renforts);
+             l.renforts, l.egares);
 }
 
 // Premiere lecture d'un invoque mort : compte au lot, avec le joueur qui l'avait marque.
@@ -4953,6 +4988,7 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
     uint32 const niveauMax = std::min<uint32>(sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL), 80u);
     uint8 const niveau = static_cast<uint8>(std::clamp<int32>(int32(p->GetLevel()) + lu.delta, 1, int32(niveauMax)));
     uint32 const vieMs = c.dureeS * IN_MILLISECONDS;
+    bool const ciel = lu.ciel && sPlayerbotAIConfig.directeurEvenementArriveeCiel;
 
     std::vector<EvInvoque> poses;
     char const* echec = nullptr;
@@ -4978,8 +5014,10 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
             }
         }
         float const face = std::atan2(p->GetPositionY() - y, p->GetPositionX() - x);
+        // Arrivee `ciel` (10/10) : posee en hauteur au-dessus du sol lu du point ; elle descend ensuite (plus bas).
+        float const zPose = ciel ? z + EV_CIEL_HAUTEUR_YD : z;
         evNiveauForce = niveau;
-        TempSummon* s = map->SummonCreature(entree, Position(x, y, z, face), nullptr, vieMs, nullptr);
+        TempSummon* s = map->SummonCreature(entree, Position(x, y, zPose, face), nullptr, vieMs, nullptr);
         evNiveauForce = 0;
         if (!s)
         {
@@ -4998,6 +5036,22 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         v.pv = lu.pv ? lu.pv : 100;          // lot G
         v.degats = lu.degats ? lu.degats : 100;
         v.renfortArme = lu.renfort;
+        if (CreatureTemplate const* gabarit = s->GetCreatureTemplate())
+            v.fort = lu.etendue || lu.renfort || gabarit->rank != 0 || gabarit->ModHealth >= EV_EGARE_FORT_PV;
+        if (ciel)
+        {
+            // La DESCENTE tient a la spline de MoveLand, pas au drapeau de gravite : Creature::UpdateMovementFlags
+            // (appelee a chaque mise a jour de position, Unit::ProcessTerrainStatusUpdate) rend la gravite d'elle-meme
+            // a toute creature dont le gabarit interdit le vol (creature_template_movement absent : Flight None, cas
+            // des 37 gabarits). SetDisableGravity ici ne vaut que pour l'envoi de la pose ; rendu de la descente
+            // SUPPOSE, a verifier au banc avant EvenementArriveeCiel = 1.
+            s->SetDisableGravity(true);
+            s->GetMotionMaster()->MoveLand(EV_POINT_CIEL, x, y, z);
+            // Relecture du 10/10 : Map::SummonCreature a pose le point de retour au point de POSE (sol + 18 yd) ;
+            // sans cela, toute laisse ou tout retour (MoveTargetedHome) la renverrait en l'air, hors de portee.
+            s->SetHomePosition(x, y, z, face);
+            v.cielDepuisS = std::max<uint32>(Maintenant(), 1);
+        }
         poses.push_back(v);
         // Niveau relu a chaque pose : un autre niveau veut dire qu'un crochet de creation passe APRES le
         // notre l'a reecrit. Ce n'est PAS la garde de l'echelle d'Ascension : ses scripts s'enregistrent
@@ -5035,7 +5089,7 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
              "coa directeur evenement: id={} sous_action=invoquer joueur={} valeur={} motif=pose posees={} niveau={}"
              " duree_s={} dispersion={:.1f} vue={} arrivee={} x={:.1f} y={:.1f} z={:.1f}",
              c.id, c.cible, entree, poses.size(), niveau, c.dureeS, dispersion, lu.horsVue ? "hors_vue" : "scene",
-             lu.naissance ? "naissance" : "aucune", c.x, c.y, sol);
+             lu.naissance ? "naissance" : ciel ? "ciel" : lu.ciel ? "ciel_eteint" : "aucune", c.x, c.y, sol);
     Accuser(c, "execute", nullptr);
 }
 
@@ -5064,7 +5118,8 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         return;
     }
     uint32 vises = 0, appliques = 0, occupes = 0;
-    for (EvInvoque const& v : evInvoques)
+    uint32 const maintenant = std::max<uint32>(Maintenant(), 1);
+    for (EvInvoque& v : evInvoques)
     {
         if (v.joueur != c.cible || v.mort || (vise && v.id != vise))
             continue;
@@ -5078,6 +5133,9 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
             // qui le defendait, un autre humain) garde son combat. Sans cela, l'`attaquer` renvoye au retour d'un
             // joueur absent (faille_orage.py, joueur_de_retour) jetait sur lui, d'un coup, tout ce que les bots
             // tenaient occupe.
+            // 10/10 : `attaquer` arme la garde des egares (SuivreInvoques), occupe ou non.
+            v.attaqueS = maintenant;
+            v.egareDepuisS = 0;
             Unit* victime = cr->GetVictim();
             if (cr->IsInCombat() && victime && victime != p)
             {
@@ -5095,6 +5153,9 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         }
         if (cr->IsInCombat())
             continue;   // un combat en cours n'est jamais interrompu
+        // 10/10 : tenir, errer, charger_vers desarment la garde des egares (le monstre doit rester ou aller ailleurs).
+        v.attaqueS = 0;
+        v.egareDepuisS = 0;
         MotionMaster* mm = cr->GetMotionMaster();
         switch (lu.ordre)
         {
@@ -5122,7 +5183,7 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
                 cr->SetHomePosition(c.x, c.y, sol, cr->GetOrientation());
                 cr->SetDefaultMovementType(IDLE_MOTION_TYPE);
                 mm->Clear();
-                mm->MovePoint(0, c.x, c.y, sol);
+                mm->MovePoint(0, c.x, c.y, sol, FORCED_MOVEMENT_RUN);   // 10/10 : en COURSE, jamais au pas
                 break;
             default:
                 break;
@@ -5217,6 +5278,59 @@ void ExecuterApparition(CoaDirCommande const& c)
         ExecuterOrdre(c, lu, p);
 }
 
+// 10/10/2026 : la garde des egares, chaque seconde, pour un invoque VIVANT qui a recu `attaquer` (v.attaqueS).
+// Egare : aux prises avec un PNJ (victime non controlee par un joueur : un bot inscrit qui le tient n'en est pas un),
+// ou hors combat a plus de EV_EGARE_YD du joueur ; en combat contre un joueur ou un bot : jamais. Egare EV_EGARE_S secondes d'affilee : RELANCE (combat rompu s'il se bat
+// contre un PNJ, AttackStart sur le joueur), EV_EGARE_RELANCES fois ; ensuite -> vrai (l'appelant le RETIRE et le
+// compte). Un FORT (v.fort : chef, elite) est relance a chaque EV_EGARE_S et n'est jamais retire. Joueur absent, mort, sur une autre carte ou en teleportation : la garde attend (les fermetures implicites
+// et la regle de mort du service jugent). Journal `sous_action=egare` (le service ne lit que `sous_action=invoquer`).
+bool SuivreEgare(EvInvoque& v, Creature* cr, uint32 maintenant)
+{
+    Player* p = JoueurConnecte(v.joueur);
+    if (!p || !p->IsInWorld() || p->IsBeingTeleported() || p->GetMapId() != cr->GetMapId() || !p->IsAlive())
+    {
+        v.egareDepuisS = 0;
+        return false;
+    }
+    Unit* victime = cr->GetVictim();
+    bool const pnj = cr->IsInCombat() && victime && !victime->HasUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
+    float const d = cr->GetExactDist2d(p);
+    if (!pnj && (cr->IsInCombat() || d <= EV_EGARE_YD))
+    {
+        v.egareDepuisS = 0;
+        return false;
+    }
+    if (!v.egareDepuisS)
+    {
+        v.egareDepuisS = std::max<uint32>(maintenant, 1);
+        return false;
+    }
+    if (maintenant - v.egareDepuisS < EV_EGARE_S)
+        return false;
+    if (v.relances < EV_EGARE_RELANCES || v.fort)   // un fort : relance a chaque EV_EGARE_S, jamais retire
+    {
+        if (v.relances < 255)
+            ++v.relances;
+        v.egareDepuisS = std::max<uint32>(maintenant, 1);
+        bool relance = false;
+        if (pnj)
+            cr->CombatStop(true);
+        if (cr->AI() && cr->IsValidAttackTarget(p))
+        {
+            cr->SetReactState(REACT_AGGRESSIVE);
+            cr->AI()->AttackStart(p);
+            relance = true;
+        }
+        LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=egare joueur={} valeur={} motif=relance"
+                 " distance={:.0f} pnj={} relance={} relances={} fort={}", v.id, v.joueur, v.entree, d, pnj ? 1 : 0,
+                 relance ? 1 : 0, v.relances, v.fort ? 1 : 0);
+        return false;
+    }
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=egare joueur={} valeur={} motif=retire"
+             " distance={:.0f} pnj={} relances={}", v.id, v.joueur, v.entree, d, pnj ? 1 : 0, v.relances);
+    return true;
+}
+
 // Chaque seconde (Entretien, bus allume ou eteint) : renforts inscrits ; joueur parti (hors ligne, autre
 // carte) -> retrait immediat ; morts relevees ; niveau surveille (reecrit -> retire) ; retraits hors de
 // vue ; fins de lot.
@@ -5275,6 +5389,26 @@ void SuivreInvoques()
         if (v.retraitDepuisS &&
             (maintenant - v.retraitDepuisS >= EV_RETRAIT_HORS_VUE_MAX_S || !VueDUnHumain(cr)))
         {
+            EffacerInvoque(v);
+            it = evInvoques.erase(it);
+            continue;
+        }
+        // 10/10 : arrivee `ciel` -- GARDE-FOU seulement : le coeur rend deja la gravite a ces gabarits terrestres
+        // (Creature::UpdateMovementFlags) ; ceci la rend au cas ou un gabarit porterait un jour Flight != None.
+        // Jamais avant 2 s, et jamais pendant la spline de MoveLand avant EV_CIEL_MAX_S.
+        if (v.cielDepuisS && (v.mort || maintenant - v.cielDepuisS >= EV_CIEL_MAX_S ||
+                              (maintenant - v.cielDepuisS >= 2 && cr->movespline->Finalized())))
+        {
+            if (!v.mort)
+                cr->SetDisableGravity(false);
+            v.cielDepuisS = 0;
+        }
+        // 10/10 : garde des egares (relance, puis retrait compte).
+        if (!v.mort && v.attaqueS && !v.retraitDepuisS && SuivreEgare(v, cr, maintenant))
+        {
+            auto l = evLots.find(v.id);
+            if (l != evLots.end())
+                ++l->second.egares;
             EffacerInvoque(v);
             it = evInvoques.erase(it);
             continue;
