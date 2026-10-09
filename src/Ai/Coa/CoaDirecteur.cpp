@@ -15,6 +15,8 @@
 #include "GridDefines.h"
 #include "GridTerrainData.h"
 #include "Group.h"
+#include "GroupMgr.h"
+#include "LFGMgr.h"
 #include "Item.h"
 #include "Log.h"
 #include "Mail.h"
@@ -1718,6 +1720,10 @@ bool PrimeCourt(uint32 joueurLow, uint32 maintenant)
     return it != primes.end() && it->second.finS > maintenant;
 }
 
+// Vrai groupe (09/10/2026, CoaDirecteurGroupe.inc) : le bot est-il dans le groupe pose pour l'evenement de ce joueur ?
+// Fil monde seul. Declaree ici : SuivreAffectations la lit, le fragment la definit plus bas.
+bool GroupeDEvenementPour(uint32 botLow, uint32 joueurLow);
+
 // Suivi des phases, chaque seconde, fil monde, cartes a l'arret (§ 6.2). Au plus
 // MaxAffectations recherches. Trois temps : copie sous verrou partage, examen
 // des joueurs HORS verrou (MercenaireEnRpg prend lui-meme le verrou partage),
@@ -1802,7 +1808,13 @@ void SuivreAffectations()
             continue;
         }
         // Un humain l'a pris apres la pose : c'est son maitre qui le mene.
-        if (ia->HasGameClientMaster())
+        // Vrai groupe (09/10) : SAUF l'inscrit que le Directeur a mis dans le groupe du joueur servi, et dont ce
+        // joueur est devenu le maitre (UpdateAIGroupMaster) : il sert toujours l'evenement, et son inscription
+        // (cibles, defense, soins, accuses du service) doit tenir jusqu'a la fin.
+        if (ia->HasGameClientMaster() &&
+            !(f.a.presence && f.a.mission == CoaDirecteur::CoaDirMission::Evenement &&
+              GroupeDEvenementPour(f.guid, f.a.missionParam) && ia->GetMaster() &&
+              ia->GetMaster()->GetGUID().GetCounter() == f.a.missionParam))
         {
             lever(f, "maitre_humain", CoaDirecteur::COA_DIR_NB_COMPTEURS);
             continue;
@@ -3033,12 +3045,17 @@ void ExecuterRecompense(CoaDirCommande const& c)
     }
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
     // 06/10 : `intensite` = 1 marque une part de la Faille d'orage (service : recompenses.MARQUE_FAILLE).
+    // 09/10 : `intensite` = 2, une part de la Nuit des morts (recompenses.MARQUE_NUIT ; versee a la victoire, sans
+    // objet a cliquer). Toute autre valeur : la prime, comme avant.
     bool const faille = c.intensite == 1.0f;
+    bool const nuit = c.intensite == 2.0f;
+    char const* const titre = faille ? "La faille d'orage" : nuit ? "La nuit des morts" : "Votre prime";
+    char const* const corps = faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
+                              : nuit ? "Vous avez tenu jusqu'à l'aube. Voici votre part. Le Directeur."
+                                     : "Le contrat sur votre tête est soldé. Le Directeur.";
     // 08/10 : en jeu, dans les sacs et la bourse ; le reste (et tout, hors ligne) par courrier (VerserRecompense).
     RemiseRecompense const r =
-        VerserRecompense(trans, p, c.cible, cuivre, objets, crees, faille ? "La faille d'orage" : "Votre prime",
-                         faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
-                                : "Le contrat sur votre tête est soldé. Le Directeur.",
+        VerserRecompense(trans, p, c.cible, cuivre, objets, crees, titre, corps,
                          !banc);   // cible de banc (un bot) : tout par courrier, comme avant
     // L'accuse dans la MEME transaction (voir plus haut). Meme garde de statut que
     // CoaDirSourceMysql::Acquitter ; c'est la seule source en service.
@@ -3048,7 +3065,9 @@ void ExecuterRecompense(CoaDirCommande const& c)
             " AND statut = 'en_attente'",
             c.id));
     CharacterDatabase.CommitTransaction(trans);
-    DireRemise(p, r, faille ? "Votre part de la faille d'orage" : "Votre prime");
+    DireRemise(p, r, faille ? "Votre part de la faille d'orage"
+                     : nuit ? "Votre part de la nuit des morts"
+                            : "Votre prime");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Journaliser(c, "execute", nullptr);
     LOG_INFO("playerbots",
@@ -6199,6 +6218,8 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
 
 // Lot S des evenements (08/10/2026) : le soin des bots envers le joueur (fragment a part, meme espace de noms).
 #include "CoaDirecteurSoin.inc"
+// Vrai groupe (09/10/2026) : les inscrits rejoignent le groupe du joueur servi (fragment a part, meme espace de noms).
+#include "CoaDirecteurGroupe.inc"
 
 // ------------------------------------------------------------------ lot F des evenements (06/10/2026) : les bots inscrits
 //
@@ -6575,6 +6596,8 @@ void Entretien(uint32 diff)
     SuivreMortsEnTrajet();
     SuivreTrajetsLeves();
     SuivrePactes();
+    // Vrai groupe (09/10) : APRES le suivi (une arrivee de cette seconde est en sejour, une levee est faite).
+    SuivreGroupesEvenement();
     // Lot D3 : ciels, meteos, paroles (fil monde seul).
     SuivreCiels();
     SuivreMeteos();
@@ -9659,6 +9682,21 @@ bool CoaDirecteur::Pacte(uint32 botLow, uint32 uniteLow)
     return autre != pactes.end() && autre->second.finS > maintenant && autre->second.joueur == it->second.joueur;
 }
 
+bool CoaDirecteur::PacteEntreBots(uint32 botLow, uint32 autreLow)
+{
+    if (!nbPactes.load(std::memory_order_relaxed) || botLow == autreLow)
+        return false;
+    if (!sPlayerbotAIConfig.directeurCompagnons)
+        return false;
+    uint32 const maintenant = Maintenant();
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto const it = pactes.find(botLow);
+    if (it == pactes.end() || it->second.finS <= maintenant)
+        return false;
+    auto const autre = pactes.find(autreLow);
+    return autre != pactes.end() && autre->second.finS > maintenant && autre->second.joueur == it->second.joueur;
+}
+
 bool CoaDirecteur::PointDApproche(Map* carte, Affectation const& a, float bx, float by, float& x, float& y, float& z)
 {
     return PointPres(carte, a, bx, by, COMPAGNON_CIBLE_YD, x, y, z);
@@ -10003,6 +10041,8 @@ public:
             try { r->reponse.set_value("timeout"); } catch (...) { }
         }
         PersisterArrets(true);
+        // Vrai groupe (09/10) : les bots quittent les groupes d'evenement (ils sont gardes en base sinon).
+        PurgerGroupesEvenement("arret_serveur");
         LOG_INFO("playerbots", "coa directeur : arret du serveur, file 8888 fermee ({} requete(s) abandonnee(s))",
                  restantes.size());
     }

@@ -279,6 +279,21 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
         }
     }
 
+    // UN BOT QUI FLOTTE (Nuit des morts du 09/10/2026, coa-project/docs/EVENEMENTS-groupe.md). Illidan's Guile
+    // 806109 (Felsworn, 69 personnages) porte SPELL_AURA_HOVER (106) et SCHOOL_IMMUNITY (39, toutes ecoles) sur le
+    // lanceur, 8 s (DurationIndex 31) : « immune to all physical attacks and spells [...] but during that time you
+    // cannot attack, move or cast spells ». L'immunite le classait KIND_DEFENSIVE : « coa defensive » le lancait a
+    // PV moyens ou bas, et le bot restait suspendu en l'air huit secondes sans frapper -- vu par le commanditaire
+    // (« Folcal le bot flottait un peu dans les airs », Folcal Felsworn 40, 66 % de PV releves a 10:09:23 Paris).
+    // Releve du 09/10 dans Spell.dbc : parmi les sorts connus d'un personnage, trois portent HOVER (806109, Venomwing
+    // Form 520307, Aether Current 531512) ; seul 806109 etait un defensif. Un sort qui fait FLOTTER son lanceur n'est
+    // plus un defensif de bot ; le joueur humain le garde, rien n'est retire du jeu.
+    bool selfHover = false;
+    for (SpellEffectInfo const& effect : info->Effects)
+        if (effect.IsEffect() && IsAuraEffect(effect) && effect.TargetA.GetTarget() == TARGET_UNIT_CASTER &&
+            effect.ApplyAuraName == SPELL_AURA_HOVER)
+            selfHover = true;
+
     // Only the ability itself: a spell it triggers is not the stance the bot stands in.
     // Same rule for a stance as for a buff: one that incapacitates its caster would be
     // taken out of combat and kept, and the bot with it. No such spell is known by any
@@ -349,7 +364,7 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
             (aura && enemy && effect.ApplyAuraName == SPELL_AURA_MOD_SILENCE))
             ability.kind |= KIND_INTERRUPT;
 
-        if (aura && self && IsDefensiveAura(effect) && duration > 0 && duration < LongAura)
+        if (aura && self && IsDefensiveAura(effect) && duration > 0 && duration < LongAura && !selfHover)
             ability.kind |= KIND_DEFENSIVE;
 
         // La furtivite se reconnait a son aura. Elle ressemble a une posture — aucune duree,

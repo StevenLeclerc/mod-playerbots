@@ -383,6 +383,13 @@ bool PointDApproche(Map* carte, Affectation const& a, float bx, float by, float&
 // deconnexion du joueur, au bus eteint, a l'option eteinte. Sans pacte : un
 // chargement atomique.
 bool Pacte(uint32 botLow, uint32 uniteLow);
+// Bots qui se battaient entre eux (Nuit des morts du 09/10, coa-project/docs/EVENEMENTS-groupe.md) : vrai si
+// `botLow` ET `autreLow` portent chacun un pacte pour le MEME joueur -- deux bots amenes pour lui (inscrits d'un
+// evenement compris). Le joueur lui-meme n'en fait pas partie (a la difference de Pacte). Lu par
+// AttackersValue::IsPossibleTarget, AVANT toute autodefense : deux tels bots ne se prennent JAMAIS pour cible,
+// riposte comprise (un coup de zone FFA de l'un touche l'autre ; la riposte suivait, et le combat survivait entre les
+// vagues). Meme regle que deux membres d'une guilde de reserve. Sans pacte : un chargement atomique.
+bool PacteEntreBots(uint32 botLow, uint32 autreLow);
 
 // Tire un point dans le disque, sol trouve et hors de l'eau (P-132), 6 essais,
 // sinon le centre (valide a la pose). LAISSE DE HAUTEUR (26/09) : le sol est
