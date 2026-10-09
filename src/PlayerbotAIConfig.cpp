@@ -774,6 +774,8 @@ bool PlayerbotAIConfig::Initialize()
     directeurEvenementBots = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementBots", false);
     // Lot S (08/10/2026) : eteint par defaut.
     directeurEvenementSoins = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementSoins", false);
+    // Vrai groupe (09/10/2026) : eteint par defaut.
+    directeurEvenementGroupe = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementGroupe", false);
     // Sous 5 s, un joueur recevrait un paquet meteo presque a chaque seconde.
     if (directeurMeteoReaffirmationSecondes < 5)
         directeurMeteoReaffirmationSecondes = 5;

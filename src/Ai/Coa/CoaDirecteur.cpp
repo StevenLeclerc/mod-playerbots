@@ -15,6 +15,8 @@
 #include "GridDefines.h"
 #include "GridTerrainData.h"
 #include "Group.h"
+#include "GroupMgr.h"
+#include "LFGMgr.h"
 #include "Item.h"
 #include "Log.h"
 #include "Mail.h"
@@ -1718,6 +1720,10 @@ bool PrimeCourt(uint32 joueurLow, uint32 maintenant)
     return it != primes.end() && it->second.finS > maintenant;
 }
 
+// Vrai groupe (09/10/2026, CoaDirecteurGroupe.inc) : le bot est-il dans le groupe pose pour l'evenement de ce joueur ?
+// Fil monde seul. Declaree ici : SuivreAffectations la lit, le fragment la definit plus bas.
+bool GroupeDEvenementPour(uint32 botLow, uint32 joueurLow);
+
 // Suivi des phases, chaque seconde, fil monde, cartes a l'arret (§ 6.2). Au plus
 // MaxAffectations recherches. Trois temps : copie sous verrou partage, examen
 // des joueurs HORS verrou (MercenaireEnRpg prend lui-meme le verrou partage),
@@ -1802,7 +1808,17 @@ void SuivreAffectations()
             continue;
         }
         // Un humain l'a pris apres la pose : c'est son maitre qui le mene.
-        if (ia->HasGameClientMaster())
+        // Vrai groupe (09/10) : SAUF l'inscrit que le Directeur a mis dans le groupe du joueur servi, et dont ce
+        // joueur est devenu le maitre (UpdateAIGroupMaster) : il sert toujours l'evenement, et son INSCRIPTION
+        // (l'affectation : assaillants d'evenement, soins, accuses du service) doit tenir jusqu'a la fin. Son
+        // COMPORTEMENT, lui, change (AiFactory, LU) : un bot aleatoire groupe sans etre chef n'a plus « grind » ni
+        // « new rpg » -- ni CibleDEvenement, ni laisse, ni ralliement ; il suit le joueur (« follow ») et engage par
+        // « dps assist » / « tank assist », qui lisent AssaillantsDEvenement (memes bornes que CibleDEvenement).
+        // EVENEMENTS-groupe.md § 4.
+        if (ia->HasGameClientMaster() &&
+            !(f.a.presence && f.a.mission == CoaDirecteur::CoaDirMission::Evenement &&
+              GroupeDEvenementPour(f.guid, f.a.missionParam) && ia->GetMaster() &&
+              ia->GetMaster()->GetGUID().GetCounter() == f.a.missionParam))
         {
             lever(f, "maitre_humain", CoaDirecteur::COA_DIR_NB_COMPTEURS);
             continue;
@@ -3033,12 +3049,17 @@ void ExecuterRecompense(CoaDirCommande const& c)
     }
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
     // 06/10 : `intensite` = 1 marque une part de la Faille d'orage (service : recompenses.MARQUE_FAILLE).
+    // 09/10 : `intensite` = 2, une part de la Nuit des morts (recompenses.MARQUE_NUIT ; versee a la victoire, sans
+    // objet a cliquer). Toute autre valeur : la prime, comme avant.
     bool const faille = c.intensite == 1.0f;
+    bool const nuit = c.intensite == 2.0f;
+    char const* const titre = faille ? "La faille d'orage" : nuit ? "La nuit des morts" : "Votre prime";
+    char const* const corps = faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
+                              : nuit ? "Vous avez tenu jusqu'à l'aube. Voici votre part. Le Directeur."
+                                     : "Le contrat sur votre tête est soldé. Le Directeur.";
     // 08/10 : en jeu, dans les sacs et la bourse ; le reste (et tout, hors ligne) par courrier (VerserRecompense).
     RemiseRecompense const r =
-        VerserRecompense(trans, p, c.cible, cuivre, objets, crees, faille ? "La faille d'orage" : "Votre prime",
-                         faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
-                                : "Le contrat sur votre tête est soldé. Le Directeur.",
+        VerserRecompense(trans, p, c.cible, cuivre, objets, crees, titre, corps,
                          !banc);   // cible de banc (un bot) : tout par courrier, comme avant
     // L'accuse dans la MEME transaction (voir plus haut). Meme garde de statut que
     // CoaDirSourceMysql::Acquitter ; c'est la seule source en service.
@@ -3048,7 +3069,9 @@ void ExecuterRecompense(CoaDirCommande const& c)
             " AND statut = 'en_attente'",
             c.id));
     CharacterDatabase.CommitTransaction(trans);
-    DireRemise(p, r, faille ? "Votre part de la faille d'orage" : "Votre prime");
+    DireRemise(p, r, faille ? "Votre part de la faille d'orage"
+                     : nuit ? "Votre part de la nuit des morts"
+                            : "Votre prime");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Journaliser(c, "execute", nullptr);
     LOG_INFO("playerbots",
@@ -6197,8 +6220,34 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
     fileMorts.push_back(e);
 }
 
+// Vrai groupe (09/10/2026, coa-project/docs/EVENEMENTS-groupe.md § 2) : un BOT tue par un bot (ou par le familier d'un
+// bot) PACTE POUR LE MEME JOUEUR. Apres la Nuit du 09/10, la mort d'Ulmian 40 s apres le dernier monstre n'avait aucun
+// tueur lisible : TracerMorts ne pousse que les morts ou un humain est victime ou tueur (PousserMort). Cette ligne est
+// la preuve, au prochain essai, qu'un combat entre bots a survecu (ou non) au pacte et au groupe. FIL DE CARTE (crochet
+// de mort) : deux tests d'humain, PacteEntreBots (un chargement atomique sans pacte, sinon le verrou partage des
+// consignes SEUL, comme AttackersValue : jamais avec verrouMorts), un compteur et une ligne. Independante de
+// TracerMorts. Le crochet ne donne pas le sort qui a tue : la ligne ne le dit pas.
+void TracerMortEntrePactes(Player* victime, Player* tueur, Creature* familier)
+{
+    if (!victime || !tueur || victime == tueur || Humain(victime) || Humain(tueur))
+        return;
+    uint32 const v = victime->GetGUID().GetCounter();
+    uint32 const t = tueur->GetGUID().GetCounter();
+    if (!CoaDirecteur::PacteEntreBots(v, t))
+        return;
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_MORTS_ENTRE_PACTES);
+    LOG_INFO("playerbots",
+             "coa directeur mort_entre_pactes: victime={} tueur={} familier={} niveau_v={} niveau_t={} groupe={}"
+             " carte={} zone={} x={:.1f} y={:.1f}",
+             v, t, familier ? familier->GetEntry() : 0, victime->GetLevel(), tueur->GetLevel(),
+             victime->GetGroup() && victime->GetGroup() == tueur->GetGroup() ? 1 : 0, victime->GetMapId(),
+             victime->GetZoneId(), victime->GetPositionX(), victime->GetPositionY());
+}
+
 // Lot S des evenements (08/10/2026) : le soin des bots envers le joueur (fragment a part, meme espace de noms).
 #include "CoaDirecteurSoin.inc"
+// Vrai groupe (09/10/2026) : les inscrits rejoignent le groupe du joueur servi (fragment a part, meme espace de noms).
+#include "CoaDirecteurGroupe.inc"
 
 // ------------------------------------------------------------------ lot F des evenements (06/10/2026) : les bots inscrits
 //
@@ -6219,6 +6268,16 @@ void PousserMort(Player* victime, Player* tueurJoueur, Creature* tueurCreature)
 std::shared_mutex evfVerrou;                                      // le SEUL verrou du lot F
 std::unordered_map<uint32, std::vector<ObjectGuid>> evfCibles;    // cle : guid bas du joueur ; sous evfVerrou
 std::atomic<uint32> evfNbJoueurs{0};                              // evfCibles.size(), chemin chaud sans verrou
+
+// Vrai groupe (09/10/2026, CoaDirecteurGroupe.inc, sortie `sans_evenement`) : un invoque de l'evenement est-il publie
+// pour ce joueur ? Fil monde.
+bool EvenementPubliePour(uint32 joueurLow)
+{
+    if (!evfNbJoueurs.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> garde(evfVerrou);
+    return evfCibles.count(joueurLow) != 0;
+}
 std::atomic<uint32> evfEvaluations{0};                            // cibles rendues a GrindTargetValue (bilan) :
                                                                   // des EVALUATIONS, ni des attaques ni des bots
 std::atomic<uint32> evfAssaillants{0};                            // bots actifs (07/10) : calculs de « attackers »
@@ -6575,6 +6634,8 @@ void Entretien(uint32 diff)
     SuivreMortsEnTrajet();
     SuivreTrajetsLeves();
     SuivrePactes();
+    // Vrai groupe (09/10) : APRES le suivi (une arrivee de cette seconde est en sejour, une levee est faite).
+    SuivreGroupesEvenement();
     // Lot D3 : ciels, meteos, paroles (fil monde seul).
     SuivreCiels();
     SuivreMeteos();
@@ -8980,7 +9041,7 @@ void Bilan()
              " primes_echues={} primes_levees={} proies_imposees={} traques_prime={} meute_permise={}"
              " morts_tracees={} morts_perdues={} primes_actives={} chasseurs_actifs={} teleports_lointains={}"
              " paroles_hors_vue={} missions={} missions_ignorees={} missions_degradees={} patrouilles={}"
-             " bandes_recalees={} bandes_rejointes={}",
+             " bandes_recalees={} bandes_rejointes={} ecartes_pacte_bots={} morts_entre_pactes={}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -9009,7 +9070,7 @@ void Bilan()
              nbChasseurs.load(std::memory_order_relaxed), Lire(COA_DIR_TELEPORTS_LOINTAINS),
              Lire(COA_DIR_PAROLES_HORS_VUE), Lire(COA_DIR_MISSIONS), Lire(COA_DIR_MISSIONS_IGNOREES),
              Lire(COA_DIR_MISSIONS_DEGRADEES), Lire(COA_DIR_PATROUILLES), Lire(COA_DIR_BANDES_RECALEES),
-             Lire(COA_DIR_BANDES_REJOINTES));
+             Lire(COA_DIR_BANDES_REJOINTES), Lire(COA_DIR_ECARTE_PACTE_BOTS), Lire(COA_DIR_MORTS_ENTRE_PACTES));
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -9659,6 +9720,21 @@ bool CoaDirecteur::Pacte(uint32 botLow, uint32 uniteLow)
     return autre != pactes.end() && autre->second.finS > maintenant && autre->second.joueur == it->second.joueur;
 }
 
+bool CoaDirecteur::PacteEntreBots(uint32 botLow, uint32 autreLow)
+{
+    if (!nbPactes.load(std::memory_order_relaxed) || botLow == autreLow)
+        return false;
+    if (!sPlayerbotAIConfig.directeurCompagnons)
+        return false;
+    uint32 const maintenant = Maintenant();
+    std::shared_lock<std::shared_mutex> garde(verrouConsignes);
+    auto const it = pactes.find(botLow);
+    if (it == pactes.end() || it->second.finS <= maintenant)
+        return false;
+    auto const autre = pactes.find(autreLow);
+    return autre != pactes.end() && autre->second.finS > maintenant && autre->second.joueur == it->second.joueur;
+}
+
 bool CoaDirecteur::PointDApproche(Map* carte, Affectation const& a, float bx, float by, float& x, float& y, float& z)
 {
     return PointPres(carte, a, bx, by, COMPAGNON_CIBLE_YD, x, y, z);
@@ -10003,6 +10079,8 @@ public:
             try { r->reponse.set_value("timeout"); } catch (...) { }
         }
         PersisterArrets(true);
+        // Vrai groupe (09/10) : les bots quittent les groupes d'evenement (ils sont gardes en base sinon).
+        PurgerGroupesEvenement("arret_serveur");
         LOG_INFO("playerbots", "coa directeur : arret du serveur, file 8888 fermee ({} requete(s) abandonnee(s))",
                  restantes.size());
     }
@@ -10029,6 +10107,9 @@ public:
 
     void OnPlayerPVPKill(Player* killer, Player* killed) override
     {
+        // Vrai groupe (09/10) : bot tue par un bot pacte pour le meme joueur, independamment de TracerMorts.
+        if (killer && killed && killer != killed)
+            TracerMortEntrePactes(killed, killer, nullptr);
         if (!sPlayerbotAIConfig.directeurTracerMorts || !killer || !killed)
             return;
         PousserMort(killed, killer == killed ? nullptr : killer, nullptr);
@@ -10036,6 +10117,11 @@ public:
 
     void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
     {
+        // Vrai groupe (09/10) : le familier d'un bot pacte pour le meme joueur.
+        if (killer && killed)
+            if (Player* proprietaire = killer->GetCharmerOrOwnerPlayerOrPlayerItself())
+                if (proprietaire != killed)
+                    TracerMortEntrePactes(killed, proprietaire, killer);
         if (!sPlayerbotAIConfig.directeurTracerMorts || !killer || !killed)
             return;
         Player* maitre = killer->GetCharmerOrOwnerPlayerOrPlayerItself();

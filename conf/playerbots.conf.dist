@@ -3524,6 +3524,21 @@ AiPlayerbot.Directeur.EvenementBots = 0
 #        Default: 0
 AiPlayerbot.Directeur.EvenementSoins = 0
 
+#    AiPlayerbot.Directeur.EvenementGroupe
+#        Vrai groupe (09/10/2026, coa-project/docs/EVENEMENTS-groupe.md) : un bot INSCRIT a l'evenement d'un
+#        joueur (mission `evenement`, ci-dessus), ARRIVE au lieu (sejour), rejoint le GROUPE de ce joueur : groupe
+#        cree (le joueur chef) s'il n'en a pas, bot ajoute s'il mene un groupe (pas un raid) qui a de la place.
+#        Groupe plein, raid, joueur non chef, bot deja groupe, champ de bataille : pas de groupe, l'inscription
+#        reste telle quelle, ligne `coa directeur groupe: ... motif=refus raison=...`. Groupe : soins, butin et XP
+#        partages, aucun coup entre membres (le coeur les rend amicaux, FFA compris), plus d'anti vol de kill ;
+#        le bot suit le joueur (maitre humain : son IA de playerbots) et garde son inscription.
+#        Il QUITTE le groupe (dissous s'il n'y reste que le joueur) et reprend sa vie quand plus aucun bot n'est
+#        inscrit a l'evenement de ce joueur (fin, `lever`, stop, bus eteint, deconnexion du joueur), ou a sa
+#        propre deconnexion, ou si l'option est eteinte. Exige EvenementBots = 1.
+#        Lue par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0
+AiPlayerbot.Directeur.EvenementGroupe = 0
+
 #
 #    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
 #

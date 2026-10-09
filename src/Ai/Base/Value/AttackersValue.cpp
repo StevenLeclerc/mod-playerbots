@@ -192,6 +192,22 @@ bool AttackersValue::IsPossibleTarget(Unit* attacker, Player* bot, float /*range
     if (attacker->IsFriendlyTo(bot))
         return false;
 
+    // CoA -- Directeur, bots qui se battaient entre eux (Nuit des morts du 09/10, coa-project/docs/EVENEMENTS-groupe.md).
+    // Deux bots amenes pour le MEME joueur (pacte : presences, inscrits d'un evenement) ne se prennent JAMAIS pour
+    // cible, riposte comprise -- ni leurs familiers. Hors groupe ils portent le FFA (WildPvp.AllBotsAreTargets) : le
+    // coup de zone de l'un touche l'autre, et sans ce test la riposte (assaillants du bot, autodefense de
+    // PossibleTargetsValue) rouvrait un combat qui survivait entre les vagues. Place ICI, avant tout le reste du tri,
+    // parce que PossibleTargetsValue::AcceptUnit commence par cette fonction et que la riposte y passe avant le pacte.
+    // Duel : laisse a la regle d'origine. Sans pacte : un chargement atomique.
+    if (!bot->duel || bot->duel->Opponent != attacker)
+        if (Player* autre = attacker->GetCharmerOrOwnerPlayerOrPlayerItself())
+            if (autre != bot && CoaDirecteur::PacteEntreBots(bot->GetGUID().GetCounter(), autre->GetGUID().GetCounter()))
+            {
+                // Bilan `ecartes_pacte_bots=` (des evaluations, pas des combats) : la preuve que le pacte a servi.
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_PACTE_BOTS);
+                return false;
+            }
+
     // Critter exception
     if (attacker->GetCreatureType() == CREATURE_TYPE_CRITTER && !attacker->IsInCombat())
         return false;

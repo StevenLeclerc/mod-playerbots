@@ -469,6 +469,10 @@ public:
     // (« party member to heal ») et de buff/dissipation des classes CoA (NearbyGroup), bien qu'il ne soit pas
     // dans son groupe. Eteint par defaut : rien ne change (CoaDirecteur::JoueurASoigner rend nul).
     bool directeurEvenementSoins;
+    // Vrai groupe (09/10/2026, coa-project/docs/EVENEMENTS-groupe.md) : un bot INSCRIT a l'evenement d'un joueur,
+    // arrive au lieu (sejour), REJOINT le groupe de ce joueur (cree, joueur chef, s'il n'en a pas ; ajoute s'il en
+    // mene un qui a de la place) et le quitte a la fin de l'evenement. Eteint par defaut : rien ne change.
+    bool directeurEvenementGroupe;
     // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
     // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
     // eteint par defaut (les crochets de mort rendent la main au premier test).
