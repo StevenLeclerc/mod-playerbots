@@ -547,6 +547,11 @@ enum CoaDirCompteur : uint8
     COA_DIR_PATROUILLES,             // errances d'un bot en mission vers un point a plat de son disque
     COA_DIR_BANDES_RECALEES,         // centres de suiveurs recales sur leur chef
     COA_DIR_BANDES_REJOINTES,        // suiveurs repartis rejoindre leur chef (laisse de bande)
+    // Vrai groupe (09/10/2026, coa-project/docs/EVENEMENTS-groupe.md), en fin de la ligne bilan :
+    COA_DIR_ECARTE_PACTE_BOTS,       // EVALUATIONS ou AttackersValue::IsPossibleTarget a ecarte un bot pacte pour le
+                                     // meme joueur (PacteEntreBots) : plusieurs par seconde et par bot, pas des combats
+    COA_DIR_MORTS_ENTRE_PACTES,      // bots tues par un bot (ou son familier) pacte pour le meme joueur : lignes
+                                     // `coa directeur mort_entre_pactes:` ecrites
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);

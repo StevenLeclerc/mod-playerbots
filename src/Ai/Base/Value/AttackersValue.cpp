@@ -202,7 +202,11 @@ bool AttackersValue::IsPossibleTarget(Unit* attacker, Player* bot, float /*range
     if (!bot->duel || bot->duel->Opponent != attacker)
         if (Player* autre = attacker->GetCharmerOrOwnerPlayerOrPlayerItself())
             if (autre != bot && CoaDirecteur::PacteEntreBots(bot->GetGUID().GetCounter(), autre->GetGUID().GetCounter()))
+            {
+                // Bilan `ecartes_pacte_bots=` (des evaluations, pas des combats) : la preuve que le pacte a servi.
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_PACTE_BOTS);
                 return false;
+            }
 
     // Critter exception
     if (attacker->GetCreatureType() == CREATURE_TYPE_CRITTER && !attacker->IsInCombat())

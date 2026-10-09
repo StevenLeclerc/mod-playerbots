@@ -18,6 +18,12 @@
 //    sans maitre prend le chef humain pour maitre (FindNewMaster), ResetStrategies, « +follow », et le dit
 //    (« Hello, I follow you! ») ; un bot ALEATOIRE sans groupe perd son maitre, Reset, ResetStrategies : il reprend sa
 //    vie. Le fil monde n'ecrit donc NI le maitre NI les strategies (P-134) : il groupe et degroupe, l'IA suit.
+//  - AiFactory::AddDefaultNonCombatStrategies (relecture du 09/10) : ResetStrategies d'un bot ALEATOIRE groupe sans en
+//    etre le chef ne pose NI « grind » NI « new rpg ». Groupe, l'inscrit n'a donc plus CibleDEvenement
+//    (GrindTargetValue), ni la laisse ni le ralliement (NewRpgAction) : il SUIT le joueur. Il engage par
+//    « dps assist » / « tank assist » (poses pour toute classe AVANT la branche du bot aleatoire), qui lisent
+//    « attackers », ou AssaillantsDEvenement ajoute la defense ET (a) tout invoque a EVENEMENT_ENGAGEMENT_YD dans la
+//    laisse : les memes bornes que CibleDEvenement. L'engagement de lui-meme tient par cette voie (LU ; non vu en jeu).
 //  - PlayerbotAI::UpdateAI, meriteLeDrapeauFFA : `AllBotsAreTargets && !GetMaster()` ; un bot a maitre perd le FFA
 //    au tick suivant (branche de retrait, UpdateFFAPvPState(true)).
 //  - AttackersValue::Calculate ajoute les assaillants du GROUPE (AddAttackersOf(group)) ; IsPossibleTarget admet une
@@ -30,7 +36,10 @@
 //  - groupesTentes : inscriptions (id de commande) deja essayees, pour qu'un refus ne soit dit et tente qu'une fois.
 // ENTREE : inscription (presence + mission Evenement) en SEJOUR, non echue, option Directeur.EvenementGroupe allumee.
 // SORTIE : plus AUCUN bot inscrit a l'evenement de ce joueur (fin, `lever`, stop, bus eteint, deconnexion du joueur
-// -- qui leve l'inscription `joueur_hors_ligne`), option eteinte, joueur ou bot hors ligne, arret du serveur. Un
+// -- qui leve l'inscription `joueur_hors_ligne`), option eteinte, joueur ou bot hors ligne, arret du serveur ; et
+// `sans_evenement` (relecture du 09/10) : aucun invoque de l'evenement publie pour ce joueur (evfCibles) depuis
+// GROUPE_SANS_EVENEMENT_S -- le service mort sans emettre ses levees (plantage, kill -9) laissait sinon le bot dans le
+// groupe, a suivre le joueur, jusqu'a l'echeance de l'inscription (duree d'ambiance, jusqu'a 3600 s). Un
 // inscrit mort (inscription levee `mort`) RESTE dans le groupe tant que d'autres servent le joueur : le joueur peut le
 // relever, et il ne quitte pas le groupe sous ses yeux au milieu d'une vague.
 
@@ -40,7 +49,15 @@ struct GroupeDEvenement
     uint32 id = 0;                      // inscription qui l'a groupe
     ObjectGuid::LowType groupe = 0;     // Group::GetGUID().GetCounter()
     bool cree = false;                  // le groupe a ete cree pour l'evenement
+    uint32 vuS = 0;                     // Maintenant() a l'entree, puis au dernier invoque publie pour le joueur
 };
+// Sans invoque publie pour le joueur depuis ce temps, le groupe d'evenement est quitte (`sans_evenement`). Bien
+// au-dela des attentes du service (attente des bots 150 s, entre deux vagues 75 s par defaut, nuit_des_morts.py) :
+// c'est un filet pour un service mort, pas une regle de jeu.
+constexpr uint32 GROUPE_SANS_EVENEMENT_S = 600;
+// Defini apres evfCibles (lot F, plus bas dans CoaDirecteur.cpp) : un invoque vivant est-il publie pour ce joueur ?
+// Fil monde (verrou partage evfVerrou).
+bool EvenementPubliePour(uint32 joueurLow);
 std::unordered_map<uint32, GroupeDEvenement> groupesEvenement;   // cle : guid bas du bot
 std::unordered_set<uint32> groupesTentes;                        // ids d'inscription deja essayes
 
@@ -152,6 +169,7 @@ void RejoindreGroupeDEvenement(uint32 botLow, uint32 joueurLow, uint32 id)
     e.id = id;
     e.groupe = groupe->GetGUID().GetCounter();
     e.cree = cree;
+    e.vuS = Maintenant();
     groupesEvenement[botLow] = e;
     LOG_INFO("playerbots", "coa directeur groupe: id={} guid={} joueur={} motif={} membres={}", id, botLow, joueurLow,
              cree ? "cree" : "ajoute", groupe->GetMembersCount());
@@ -192,8 +210,14 @@ void SuivreGroupesEvenement()
 
     // 1. Sorties (d'abord : un bot qui sort ne rentre pas a la meme seconde, son inscription etant deja essayee).
     std::vector<std::pair<uint32, char const*>> sorties;
-    for (auto const& [botLow, e] : groupesEvenement)
+    std::unordered_map<uint32, bool> publies;   // joueur -> invoque publie (une lecture sous verrou par joueur)
+    for (auto& [botLow, e] : groupesEvenement)
     {
+        auto pub = publies.find(e.joueur);
+        if (pub == publies.end())
+            pub = publies.emplace(e.joueur, EvenementPubliePour(e.joueur)).first;
+        if (pub->second)
+            e.vuS = maintenant;
         char const* raison = nullptr;
         Player* bot = JoueurConnecte(botLow);
         // Ordre : la cause la plus precise d'abord (un joueur deconnecte voit aussi ses inscriptions levees a la
@@ -208,6 +232,8 @@ void SuivreGroupesEvenement()
             raison = "plus_dans_le_groupe";   // renvoye par le joueur, groupe dissous par lui : rien a retirer
         else if (!joueursServis.count(e.joueur))
             raison = "fin";
+        else if (maintenant > e.vuS + GROUPE_SANS_EVENEMENT_S)
+            raison = "sans_evenement";   // service mort sans ses levees : l'inscription tient, le groupe non
         if (raison)
             sorties.emplace_back(botLow, raison);
     }
