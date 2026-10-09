@@ -4488,8 +4488,8 @@ void SuivreEvenements()
 //        `scene` (mise en scene) ou `hors_vue` (refus `vue` si un humain est a moins de 110 yd + la
 //        dispersion du point, regle V6) ; point (et chaque point disperse) hors sanctuaire, capitale et
 //        lieu sans JcJ (CoaLieuSansPvp, refus `lieu`) ; arrivee `aucune` ou `naissance` (7398 lance par l'invoque sur lui-meme, si
-//        EvenementSortsArrivee le permet) ou `ciel` (10/10 : pose a EV_CIEL_HAUTEUR_YD au-dessus de son sol, sans gravite,
-//        DESCEND au sol par MoveLand ; gravite rendue a l'atterrissage ou apres EV_CIEL_MAX_S ; option
+//        EvenementSortsArrivee le permet) ou `ciel` (10/10 : pose a EV_CIEL_HAUTEUR_YD au-dessus de son sol,
+//        DESCEND au sol par la spline de MoveLand, point de retour remis au sol ; le coeur rend la gravite seul ; option
 //        EvenementArriveeCiel, eteinte : pose au sol comme `aucune`, journal `arrivee=ciel_eteint`). Jamais visibleBySummonerOnly ni phase : les bots le voient.
 //        Map::SummonCreature SANS invocateur : aucun lien au joueur (ni m_CreatedByPlayer, ni crochet
 //        OnPlayerBeforeTempSummonInitStats). Tout ou rien : un echec en cours retire ceux deja poses.
@@ -4545,9 +4545,15 @@ constexpr uint32 EV_POINT_CIEL = 0xC1E1;             // id du mouvement MoveLand
 // par un joueur) n'est JAMAIS egare, meme loin : il chasse, ou un bot inscrit le tient (relecture : sans cela, un chef
 // qui poursuit un joueur qui recule aurait ete retire, et la victoire avec lui). Jamais pendant un `tenir`, un `errer`, un `charger_vers` (seul
 // `attaquer` arme la garde), ni joueur mort, ni retrait hors de vue demande.
+// Relecture du 10/10 : un invoque FORT (chef, Mere-wyrm, Seigneur, elite : rang non nul, PV du gabarit >= EV_EGARE_FORT_PV,
+// forme etendue du lot G ou renfort a mi-vie arme) n'est JAMAIS retire par cette garde : il est relance a chaque
+// EV_EGARE_S, sans limite. Sans cela, un chef sorti de combat (joueur recule de plus de 60 yd pour se soigner, laisse)
+// etait retire avec tues = 0, et la Faille finissait sans victoire ni coffre (faille_orage.py : la victoire exige un
+// gardien tue, la retentative exige qu'aucun gardien ne soit pose).
 constexpr float EV_EGARE_YD = 60.0f;
 constexpr uint32 EV_EGARE_S = 20;
 constexpr uint8 EV_EGARE_RELANCES = 1;
+constexpr float EV_EGARE_FORT_PV = 3.0f;             // CreatureTemplate::ModHealth ; les chefs sont a 6-8, les elites a 3-3,5
 
 // Niveau impose au monstre en cours de creation (Map::SummonCreature -> Creature::Create ->
 // UpdateEntry -> SelectLevel -> OnBeforeCreatureSelectLevel). Pose par le fil monde autour de l'appel
@@ -4690,6 +4696,7 @@ struct EvInvoque
     uint32 attaqueS = 0;         // 10/10 : Maintenant() du dernier `attaquer` ; 0 : garde des egares desarmee
     uint32 egareDepuisS = 0;     // 10/10 : debut de l'egarement en cours ; 0 : aucun
     uint8 relances = 0;          // 10/10 : relances faites sur cet invoque
+    bool fort = false;           // 10/10 (relecture) : chef ou elite -- la garde des egares le relance, ne le retire jamais
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
 
@@ -5029,12 +5036,20 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         v.pv = lu.pv ? lu.pv : 100;          // lot G
         v.degats = lu.degats ? lu.degats : 100;
         v.renfortArme = lu.renfort;
+        if (CreatureTemplate const* gabarit = s->GetCreatureTemplate())
+            v.fort = lu.etendue || lu.renfort || gabarit->rank != 0 || gabarit->ModHealth >= EV_EGARE_FORT_PV;
         if (ciel)
         {
-            // Sans gravite, puis la descente vers le sol lu (animation d'atterrissage) ; SuivreInvoques rend la
-            // gravite a la fin de la spline ou apres EV_CIEL_MAX_S.
+            // La DESCENTE tient a la spline de MoveLand, pas au drapeau de gravite : Creature::UpdateMovementFlags
+            // (appelee a chaque mise a jour de position, Unit::ProcessTerrainStatusUpdate) rend la gravite d'elle-meme
+            // a toute creature dont le gabarit interdit le vol (creature_template_movement absent : Flight None, cas
+            // des 37 gabarits). SetDisableGravity ici ne vaut que pour l'envoi de la pose ; rendu de la descente
+            // SUPPOSE, a verifier au banc avant EvenementArriveeCiel = 1.
             s->SetDisableGravity(true);
             s->GetMotionMaster()->MoveLand(EV_POINT_CIEL, x, y, z);
+            // Relecture du 10/10 : Map::SummonCreature a pose le point de retour au point de POSE (sol + 18 yd) ;
+            // sans cela, toute laisse ou tout retour (MoveTargetedHome) la renverrait en l'air, hors de portee.
+            s->SetHomePosition(x, y, z, face);
             v.cielDepuisS = std::max<uint32>(Maintenant(), 1);
         }
         poses.push_back(v);
@@ -5267,7 +5282,7 @@ void ExecuterApparition(CoaDirCommande const& c)
 // Egare : aux prises avec un PNJ (victime non controlee par un joueur : un bot inscrit qui le tient n'en est pas un),
 // ou hors combat a plus de EV_EGARE_YD du joueur ; en combat contre un joueur ou un bot : jamais. Egare EV_EGARE_S secondes d'affilee : RELANCE (combat rompu s'il se bat
 // contre un PNJ, AttackStart sur le joueur), EV_EGARE_RELANCES fois ; ensuite -> vrai (l'appelant le RETIRE et le
-// compte). Joueur absent, mort, sur une autre carte ou en teleportation : la garde attend (les fermetures implicites
+// compte). Un FORT (v.fort : chef, elite) est relance a chaque EV_EGARE_S et n'est jamais retire. Joueur absent, mort, sur une autre carte ou en teleportation : la garde attend (les fermetures implicites
 // et la regle de mort du service jugent). Journal `sous_action=egare` (le service ne lit que `sous_action=invoquer`).
 bool SuivreEgare(EvInvoque& v, Creature* cr, uint32 maintenant)
 {
@@ -5292,9 +5307,10 @@ bool SuivreEgare(EvInvoque& v, Creature* cr, uint32 maintenant)
     }
     if (maintenant - v.egareDepuisS < EV_EGARE_S)
         return false;
-    if (v.relances < EV_EGARE_RELANCES)
+    if (v.relances < EV_EGARE_RELANCES || v.fort)   // un fort : relance a chaque EV_EGARE_S, jamais retire
     {
-        ++v.relances;
+        if (v.relances < 255)
+            ++v.relances;
         v.egareDepuisS = std::max<uint32>(maintenant, 1);
         bool relance = false;
         if (pnj)
@@ -5306,8 +5322,8 @@ bool SuivreEgare(EvInvoque& v, Creature* cr, uint32 maintenant)
             relance = true;
         }
         LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=egare joueur={} valeur={} motif=relance"
-                 " distance={:.0f} pnj={} relance={} relances={}", v.id, v.joueur, v.entree, d, pnj ? 1 : 0,
-                 relance ? 1 : 0, v.relances);
+                 " distance={:.0f} pnj={} relance={} relances={} fort={}", v.id, v.joueur, v.entree, d, pnj ? 1 : 0,
+                 relance ? 1 : 0, v.relances, v.fort ? 1 : 0);
         return false;
     }
     LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=egare joueur={} valeur={} motif=retire"
@@ -5377,9 +5393,9 @@ void SuivreInvoques()
             it = evInvoques.erase(it);
             continue;
         }
-        // 10/10 : arrivee `ciel` -- la gravite revient a l'atterrissage (spline finie) ou apres EV_CIEL_MAX_S.
-        // Relecture : jamais avant 2 s (la spline de MoveLand pourrait ne pas etre encore lancee a la premiere lecture,
-        // et le monstre tomberait au lieu de descendre).
+        // 10/10 : arrivee `ciel` -- GARDE-FOU seulement : le coeur rend deja la gravite a ces gabarits terrestres
+        // (Creature::UpdateMovementFlags) ; ceci la rend au cas ou un gabarit porterait un jour Flight != None.
+        // Jamais avant 2 s, et jamais pendant la spline de MoveLand avant EV_CIEL_MAX_S.
         if (v.cielDepuisS && (v.mort || maintenant - v.cielDepuisS >= EV_CIEL_MAX_S ||
                               (maintenant - v.cielDepuisS >= 2 && cr->movespline->Finalized())))
         {

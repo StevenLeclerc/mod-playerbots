@@ -3792,7 +3792,8 @@ AiPlayerbot.Directeur.EvenementSortsArrivee = "7398"
 
 #    AiPlayerbot.Directeur.EvenementArriveeCiel
 #        arrivee `ciel` d'invoquer (variantes, 10/10/2026) : le monstre est pose a 18 yd au-dessus de son sol,
-#        sans gravite, et DESCEND au sol (MoveLand) ; la gravite revient a l'atterrissage (6 s au plus).
+#        et DESCEND au sol (spline de MoveLand ; le coeur rend la gravite seul) ; point de retour remis au sol.
+#        Rendu a verifier au banc avant de passer a 1.
 #        0 : `ciel` est acceptee et posee au sol, comme `aucune` (le journal dit arrivee=ciel_eteint).
 #        Le service ne l'emet que si cette option vaut 1 dans le fichier de conf.
 #        Default: 0
