@@ -557,13 +557,51 @@ public:
     }
 };
 
+// BUTIN SELON LA CLASSE (09/10/2026, commanditaire : « faut quand meme que tu fasses des recompenses en fonction de
+// la classe du personnage qui ramasse »). Le butin 9100024 (celui des DEUX coffres : 9100026 a le meme lootId) porte,
+// par objet, une condition de CLASSE (CONDITION_CLASS, masque) en plus de sa tranche de niveau (CONDITION_LEVEL) :
+// migration exploitation/directeur/sql/2026_10_09_01_evenement_butin_classe.sql, engendree par
+// outils/generer-coffre-faille.py. LU dans le coeur (LootMgr.cpp) : les conditions ne sont evaluees qu'a
+// l'AFFICHAGE (LootItem::AllowedForPlayer, depuis FillNonQuestNonFFAConditionalLoot pour un butin personnel) ; le
+// TIRAGE d'un groupe les ignore (LootTemplate::LootGroup::Roll : LootGroupInvalidSelector ne lit que le mode de butin
+// et les doublons). Un groupe de tranche qui mele les classes tirerait donc le plus souvent l'objet d'une AUTRE
+// classe, invisible au pilleur : coffre vide. Et chaque groupe pose un objet (14 tranches) sous le plafond de
+// MAX_NR_LOOT_ITEMS (18, LootMgr.h) : un groupe par tranche ET par classe le depasserait (les objets en trop sont
+// perdus sans un mot, Loot::AddItem).
+// Ces deux crochets restreignent le TIRAGE aux objets dont les conditions passent pour le pilleur, et seulement pour
+// les objets de ce butin (une condition de source 4, GAMEOBJECT_LOOT_TEMPLATE, de groupe EV_COFFRE_ENTREE) :
+//   - OnItemRoll : un objet a chance EXPLICITE (les bleus) non permis voit sa chance mise a 0 (le groupe passe au
+//     suivant ; rendre faux viderait tout le groupe, LootGroup::Roll) ;
+//   - OnBeforeLootEqualChanced : parmi les objets « a chance egale » (les verts), un tirage parmi les PERMIS seulement,
+//     pose par Loot::AddItem ; aucun permis : rien (le groupe d'une autre tranche ne pose plus d'objet cache). Rend
+//     faux pour CE butin (LootGroup::Roll rend alors nullptr, l'objet est deja pose) ; vrai pour tout autre.
+// Sans la migration (butin du 08/10 : conditions de niveau seules), le tirage reste juste : seule la tranche du
+// pilleur pose son objet. Fils de carte (SendLoot) : lecture seule des conditions chargees.
+bool EstButinCoffre(LootStoreItem const* item)
+{
+    if (!item)
+        return false;
+    for (Condition const* c : item->conditions)
+        if (c && c->SourceType == CONDITION_SOURCE_TYPE_GAMEOBJECT_LOOT_TEMPLATE && c->SourceGroup == EV_COFFRE_ENTREE)
+            return true;
+    return false;
+}
+
+bool ButinPermis(Player const* player, LootStoreItem const* item)
+{
+    return sConditionMgr->IsObjectMeetToConditions(const_cast<Player*>(player), item->conditions);
+}
+
 // Le droit d'ouvrir le coffre (fil de carte, Player::SendLoot). Vrai = REFUS (CALL_ENABLED_BOOLEAN_HOOKS : un
-// script qui rend vrai fait rendre faux a ScriptMgr, et SendLoot repond LOOT_ERROR_DIDNT_KILL).
+// script qui rend vrai fait rendre faux a ScriptMgr, et SendLoot repond LOOT_ERROR_DIDNT_KILL). Et le tirage du
+// butin selon la classe (voir plus haut).
 class coa_directeur_coffre_globalscript : public GlobalScript
 {
 public:
     coa_directeur_coffre_globalscript()
-        : GlobalScript("coa_directeur_coffre_globalscript", {GLOBALHOOK_ON_ALLOWED_TO_LOOT_CONTAINER_CHECK})
+        : GlobalScript("coa_directeur_coffre_globalscript",
+                       {GLOBALHOOK_ON_ALLOWED_TO_LOOT_CONTAINER_CHECK, GLOBALHOOK_ON_ITEM_ROLL,
+                        GLOBALHOOK_ON_BEFORE_LOOT_EQUAL_CHANCED})
     {
     }
 
@@ -572,6 +610,31 @@ public:
         if (!EstNotreCoffre(source))
             return false;
         return !CoffrePermis(const_cast<Player*>(player), source);
+    }
+
+    bool OnItemRoll(Player const* player, LootStoreItem const* item, float& chance, Loot& /*loot*/,
+                    LootStore const& store) override
+    {
+        if (&store != &LootTemplates_Gameobject || !player || !EstButinCoffre(item))
+            return true;
+        if (!ButinPermis(player, item))
+            chance = 0.0f;
+        return true;
+    }
+
+    bool OnBeforeLootEqualChanced(Player const* player, std::list<LootStoreItem*> entries, Loot& loot,
+                                  LootStore const& store) override
+    {
+        if (&store != &LootTemplates_Gameobject || !player ||
+            std::none_of(entries.begin(), entries.end(), [](LootStoreItem const* e) { return EstButinCoffre(e); }))
+            return true;
+        std::vector<LootStoreItem*> permis;
+        for (LootStoreItem* e : entries)
+            if (EstButinCoffre(e) && ButinPermis(player, e))
+                permis.push_back(e);
+        if (!permis.empty())
+            loot.AddItem(*permis[urand(0, uint32(permis.size() - 1))]);
+        return false;
     }
 };
 
