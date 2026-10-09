@@ -151,6 +151,10 @@ void RejoindreGroupeDEvenement(uint32 botLow, uint32 joueurLow, uint32 id)
             return;
         }
         sGroupMgr->AddGroup(groupe);
+        // 09/10 (commanditaire : « passe en butin libre ») : un groupe CREE par le Directeur est en butin libre ;
+        // un groupe existant du joueur garde son reglage.
+        groupe->SetLootMethod(FREE_FOR_ALL);
+        groupe->SendUpdate();
         cree = true;
     }
     if (!groupe->AddMember(bot))
