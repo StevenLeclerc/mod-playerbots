@@ -524,19 +524,22 @@ namespace
 //       tree is brought back to it: what either table bought and the build does not want is removed;
 //   2 = CoaLevelBuildData with that same bringing back: the way back from 1, which undoes the kami
 //       trees (0 alone would leave them in place, under the original picks).
+//   3 = EXPERIMENT (score of the bots, lot L3): each bot is drawn once and for all, by a hash of its
+//       guid, into 1 or 2 -- half the bots on each table, both brought back. GetCoaBuildTable says
+//       which; the `coa score:` line carries it. Leaving 3 means choosing 1 or 2 for everyone.
 // Once 1 has been used, never go back to 0: a bot that bought kami picks would keep them under the
 // original ones (two trees). Use 2 instead, for good. For the same reason an invalid value falls
 // back to 2, not 0, and says so once.
 uint32 CoaBuildSource()
 {
     uint32 const source = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.BuildSource", 0, false);
-    if (source <= 2)
+    if (source <= 3)
         return source;
 
     static std::once_flag warned;
     std::call_once(warned, [source]()
     {
-        LOG_WARN("playerbots", "coa build: AiPlayerbot.Coa.BuildSource = {} is not 0, 1 or 2; using 2", source);
+        LOG_WARN("playerbots", "coa build: AiPlayerbot.Coa.BuildSource = {} is not 0, 1, 2 or 3; using 2", source);
     });
     return 2;
 }
@@ -656,6 +659,25 @@ void CollectManagedEntries(std::array<CoaLevelBuildData::Pick, N> const& table, 
 
 }  // namespace
 
+uint32 GetCoaBuildTable(Player const* bot)
+{
+    uint32 const source = CoaBuildSource();
+    if (source != 3)
+        return source;
+    if (!bot)
+        return 2;
+    // FNV-1a 32 bits du compteur de guid, sel 'TALN' : deterministe, rejouable, independant du
+    // hachage des mercenaires (IsMercenary) pour ne pas confondre les deux populations.
+    uint32 h = 2166136261u ^ 0x54414C4Eu;
+    uint32 const g = bot->GetGUID().GetCounter();
+    for (int i = 0; i < 4; ++i)
+    {
+        h ^= (g >> (8 * i)) & 0xFFu;
+        h *= 16777619u;
+    }
+    return (h >> 31) ? 1 : 2;     // bit FORT : le bit faible d un FNV n est que la parite des octets
+}
+
 uint32 ApplyCoaTalents(Player* bot)
 {
     if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel ||
@@ -666,7 +688,7 @@ uint32 ApplyCoaTalents(Player* bot)
     if (!specializationId)
         return 0;
 
-    uint32 const source = CoaBuildSource();
+    uint32 const source = GetCoaBuildTable(bot);
     uint8 const classId = bot->getClass();
 
     // Rank each entry should hold at the bot's level: the build's picks up to that level.

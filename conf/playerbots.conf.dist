@@ -2036,11 +2036,24 @@ AiPlayerbot.PermanentlyInWorldTime = 31104000
 #                         and the tree is brought back to it: picks of either table the build does
 #                         not want are removed.
 #                     2 - CoaLevelBuildData.h, with that same bringing back: the way back from 1.
+#                     3 - EXPERIMENT: each bot drawn once and for all (hash of its guid) into 1 or 2,
+#                         half the bots on each table; the `coa score:` line says which (table=).
 #                     Once 1 has been used, NEVER go back to 0 (bots would keep both trees): use 2,
 #                     for good. An invalid value is logged once and treated as 2.
 #        Default:     0
 
 AiPlayerbot.Coa.BuildSource = 0
+
+#    AiPlayerbot.Coa.Score.Enable
+#        Description: Score of the bots, lot L1 (coa-project/docs/CONCEPTION-score-efficacite-bots.md):
+#                     one `coa score:` line per combat encounter of every random bot of a CoA class,
+#                     with specialization, role, build table, damage dealt (to players / creatures),
+#                     effective healing, damage taken, kills, death. Read by outils/score-bots.py.
+#                     Costs a hash lookup per hit dealt by a CoA player while at least one encounter
+#                     is open; nothing when off. Read at most once a second (".reload config").
+#        Default:     0 - off
+
+AiPlayerbot.Coa.Score.Enable = 0
 
 ####################################################################################################
 # INFORMATION

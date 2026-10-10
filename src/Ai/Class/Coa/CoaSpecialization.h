@@ -69,6 +69,10 @@ bool EnsureCoaSpecialization(Player* bot);
 // Returns the number of entries raised.
 uint32 ApplyCoaTalents(Player* bot);
 
+// Build table this bot follows now (AiPlayerbot.Coa.BuildSource): 0, 1 or 2; under 3 (experiment),
+// 1 or 2 drawn once and for all from the bot's guid.
+uint32 GetCoaBuildTable(Player const* bot);
+
 // Palier d'equipement demande a la selection.
 //
 // POURQUOI RELATIF AU VIVIER, ET JAMAIS ABSOLU. Mesure du 2026-09-23 sur les 500 bots
