@@ -19,6 +19,7 @@
 #include "ObjectAccessor.h"
 #include "Timer.h"
 #include "CombatStrategy.h"
+#include "DBCStores.h"
 #include "DatabaseEnv.h"
 #include "Group.h"
 #include "NamedObjectContext.h"
@@ -398,7 +399,27 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
 
         if (effect.TriggerSpell && !proc && depth < 2)
             if (SpellInfo const* triggered = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
-                Classify(triggered, ability, depth + 1);
+            {
+                // UN SOIN RESERVE AUX PORTEURS D'UNE MARQUE N'EST PAS UN SOIN DU BOT (revue du 11/10, c1). Transfer Life
+                // 801530 (Necromancer) declenche, depuis un effet centre sur le lanceur (TARGET_SRC_CASTER), son soin
+                // 801545 (HEAL_PCT sur TARGET_UNIT_TARGET_ALLY), mais 801545 exige sur sa cible l'aura Raise Marker 807177
+                // (TargetAuraSpell, Spell.dbc) que seuls les serviteurs leves portent -- et le script du module ne garde
+                // qu'eux (AscensionNecromancerAbilities.cpp:446-451). Classe soin, le sort etait offert au bot pour SE
+                // soigner : 10 s de canalisation sur ses serviteurs. Regle lue dans les donnees, sans id : un sort
+                // declenche par un effet TARGET_SRC_CASTER et qui exige une aura sur sa cible n'apporte aucune des marques
+                // de soin. Releve du 11/10 (familles 18-40) : 2 capacites concernees, Transfer Life et Sacrifice Undead
+                // 805027 (805031, aura exigee Necro Minion 805026) ; Guidance, Shadow Pennant, Darkfallen Lament et
+                // Desecrate declenchent depuis une autre cible et gardent leur classement.
+                bool const reserveAuxMarques = triggered->TargetAuraSpell && targetA == TARGET_SRC_CASTER;
+                CoaAbility sous = ability;
+                sous.kind = 0;
+                sous.dispelMask = 0;
+                Classify(triggered, sous, depth + 1);
+                if (reserveAuxMarques)
+                    sous.kind &= ~uint16(KIND_HEAL | KIND_SELF_HEAL | KIND_GROUP_HEAL | KIND_HOT | KIND_ALLY_CAST);
+                ability.kind |= sous.kind;
+                ability.dispelMask |= sous.dispelMask;
+            }
     }
 }
 
@@ -629,6 +650,96 @@ bool CoaRefuseParFormeOuArme(Player* bot, SpellInfo const* info)
     return !info->IsPassive() && !bot->HasItemFitToSpellRequirements(info);
 }
 
+/*
+ * Familier exige et absent : RECOPIE de Spell::CheckCast (Spell.cpp:6045-6058). Le premier effet visant
+ * TARGET_UNIT_PET decide ; sans familier gardien (GetGuardianPet) ni unite possedee (GetCharm), le coeur rend
+ * SPELL_FAILED_NO_PET a un sort lance par CastSpell (TRIGGERED_NONE, sans aura declencheuse). Lu sur le lanceur seul.
+ * Ecarte sans banc : le sort repart des que le familier est la.
+ */
+bool CoaExigeFamilierAbsent(Player* bot, SpellInfo const* info)
+{
+    for (SpellEffectInfo const& effect : info->Effects)
+        if (effect.TargetA.GetTarget() == TARGET_UNIT_PET)
+            return !bot->GetGuardianPet() && !bot->GetCharm();
+    return false;
+}
+
+/*
+ * Refus CERTAINS du coeur lus sur la cible, pour tous les bots CoA (banc d'arene du 11/10/2026 00:36-00:56 Paris :
+ * TARGET_AURASTATE x13 -- Slaughter 500430 et Electrocute 501423 sous 35 % de vie (TargetAuraState 13), Ice Rune 524930
+ * sur cible gelee (4), Lunar Lance 502335 et Umbral Blade 681546 sous l'aura 804378 (TargetAuraSpell) ; NOTHING_TO_DISPEL
+ * x3, Stormbreaker 705669 ; BAD_TARGETS x4, Manaburn 805248 sur une cible sans mana). TARGET_AURASTATE mettait le sort au
+ * banc 20 s (IsLastingFailure) : une execution ratee a 40 % de vie restait ecartee pendant toute la fenetre sous 35 %.
+ * NOTHING_TO_DISPEL n'avait aucun banc : retente a chaque tour.
+ *
+ * Chaque test est une RECOPIE du coeur, jamais plus stricte :
+ *   - seulement si le coeur garde la cible unite (Spell::InitExplicitTargets, Spell.cpp:735-744 : masque explicite
+ *     d'unite) -- sinon il ne la juge pas, et nous non plus ;
+ *   - etat d'aura : SpellInfo::CheckTarget (SpellInfo.cpp:2007-2020), appele par Spell::CheckCast (Spell.cpp:5965)
+ *     sur la cible unite, memes appels (HasAuraState avec sort et lanceur, GetSpellIdForDifficulty) et meme exception
+ *     (lanceur vehicule, cible maitre du lanceur) ;
+ *   - brulure ou drain de ressource : Spell::CheckCast (Spell.cpp:6289-6297), lanceur joueur, cible autre que lui ;
+ *   - dissipation : Spell::CheckCast (Spell.cpp:6157-6200), tous les effets sont des DISPEL ni de zone ni a
+ *     SPELL_ATTR1_INITIATE_COMBAT, et GetDispellableAuraList vide. Le refus de sanctuaire n'est PAS recopie (moins strict).
+ * Aucun de ces blocs n'est precede d'un « return SPELL_CAST_OK » dans CheckCast pour un sort non declenche (lu,
+ * 5730-6300 ; seul TRIGGERED_IGNORE_EFFECTS en sort, Spell.cpp:6134) : un sort qu'ils ecartent etait refuse.
+ * Les refus que rend un SCRIPT (Testament of Faith 501602, Necromancer 500443) restent a StrictCheck.
+ * Fil de l'IA du bot ; la cible est sur la meme carte (P-137).
+ */
+bool CoaRefusCibleCertain(Player* bot, SpellInfo const* info, Unit* target)
+{
+    if (!target || !target->IsInWorld() || target->GetMap() != bot->GetMap() || info->IsPassive() ||
+        !(info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK))
+        return false;
+    // Relecture : un sort a point au sol ou a source est lance par PlayerbotAI::CastSpell SANS cible unite
+    // (PlayerbotAI.cpp:3961-3970) ; InitExplicitTargets la reprend alors dans la selection, ou prend le lanceur si la
+    // selection ne convient pas -- la cible jugee peut ne pas etre `target`. Laisse au coeur.
+    if (info->Targets & (TARGET_FLAG_DEST_LOCATION | TARGET_FLAG_SOURCE_LOCATION))
+        return false;
+
+    if (!bot->IsVehicle() && bot->GetCharmerOrOwner() != target)
+    {
+        if (info->TargetAuraState && !target->HasAuraState(AuraStateType(info->TargetAuraState), info, bot))
+            return true;
+        if (info->TargetAuraStateNot && target->HasAuraState(AuraStateType(info->TargetAuraStateNot), info, bot))
+            return true;
+    }
+    if (info->TargetAuraSpell && !target->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->TargetAuraSpell, bot)))
+        return true;
+    if (info->ExcludeTargetAuraSpell &&
+        target->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->ExcludeTargetAuraSpell, bot)))
+        return true;
+
+    bool zoneOuCombat = false;
+    bool autreEffet = false;
+    uint32 masque = 0;
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if ((effect.Effect == SPELL_EFFECT_POWER_BURN || effect.Effect == SPELL_EFFECT_POWER_DRAIN) && target != bot &&
+            !target->HasActivePowerType(Powers(effect.MiscValue)))
+            return true;
+        if (effect.Effect == SPELL_EFFECT_DISPEL)
+        {
+            if (effect.IsTargetingArea() || info->HasAttribute(SPELL_ATTR1_INITIATE_COMBAT))
+                zoneOuCombat = true;
+            else
+                masque |= SpellInfo::GetDispelMask(DispelType(effect.MiscValue));
+        }
+        else if (effect.IsEffect())
+            autreEffet = true;
+    }
+    // Le coeur sort de sa boucle au premier effet de zone ou non-DISPEL : le masque qu'il a lu jusque-la ne compte
+    // que si aucun des deux n'existe, ce qui revient au meme test sur la boucle complete.
+    if (!zoneOuCombat && !autreEffet && masque)
+    {
+        DispelChargesList liste;
+        target->GetDispellableAuraList(bot, masque, liste, info);
+        if (liste.empty())
+            return true;
+    }
+    return false;
+}
+
 // Whether a spell is still set aside. The bench is keyed by the id that was actually checked,
 // which is the replacement's id when a proc or a talent has swapped the listed spell (see
 // EffectiveSpell), so both ids have to be consulted before a spell is tried.
@@ -657,6 +768,9 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
             continue;
         // Same form, weapon and resource tests as CastFirst (banc d'arene du 10/10) : skipped there, not ready here.
         if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
+            continue;
+        // Same pet test as CastFirst (banc d'arene du 11/10).
+        if (CoaExigeFamilierAbsent(bot, info))
             continue;
         if (!bot->HasSpellCooldown(info->Id) && !IsBenched(benched, spell.info->Id, now) &&
             !IsBenched(benched, info->Id, now))
@@ -1042,6 +1156,11 @@ constexpr time_t StanceRecastSeconds = 30;
 constexpr time_t SpellBenchSeconds = 20;
 constexpr time_t RefusedBenchSeconds = 8;
 constexpr time_t NoPowerBenchSeconds = 5;
+// Banc d'arene du 11/10 00:36-00:56 (Paris) : SPELL_FAILED_NO_PET x34, tous Transfer Life 801530 (Necromancer 537), que
+// le SCRIPT du module refuse sans serviteur releve (AscensionNecromancerAbilities.cpp:158) -- ni test de DBC a recopier,
+// ni banc : le sort etait retente a chaque tour (jusqu'a 6 fois par seconde). Banc court, comme NO_POWER : le sort
+// repart au plus 5 s apres l'arrivee d'un serviteur.
+constexpr time_t NoPetBenchSeconds = 5;
 
 // Failures that will not clear up on the next tick: wrong target or state for this spell.
 bool IsLastingFailure(SpellCastResult result)
@@ -1221,6 +1340,12 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
             continue;
 
+        // Banc d'arene du 11/10 : familier exige et absent (CoaExigeFamilierAbsent), refus certains lus sur la cible --
+        // etat d'aura, ressource a bruler, rien a dissiper (CoaRefusCibleCertain). Recopies du coeur, ecartes sans banc
+        // ni echec consigne : le sort repart des que le familier, l'etat ou l'aura est la.
+        if (CoaExigeFamilierAbsent(bot, info) || CoaRefusCibleCertain(bot, info, target))
+            continue;
+
         // The global cooldown blocks every spell alike: try again on a later tick.
         if (bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
             return nullptr;
@@ -1268,10 +1393,20 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             // CoA (banc d'arene du 10/10, `en_mouvement` x15) : sauf pendant un deplacement VOULU de l'IA d'arene
             // (recul, retour, cachette, cacheur en route) -- l'arreter defaisait ce deplacement (le retour se
             // declarait fini des que le bot ne bougeait plus) ; on passe alors au sort suivant, un instantane s'il y en a.
-            if (bot->isMoving() && info->CalcCastTime(bot))
+            // CoA (banc d'arene du 11/10) : seulement si le mouvement l'interrompt. Un sort a incantation SANS
+            // SPELL_INTERRUPT_FLAG_MOVEMENT (Makeshift Dynamite 504590 du Tinker, « Usable while moving » ; Throw Weapon
+            // 806878, Felbreak 800203) part en courant chez le coeur (Spell::prepare, Spell.cpp:3594) : l'arreter etait
+            // plus strict que lui. PlayerbotAI::CastSpell ne l'empeche pas : son test (PlayerbotAI.cpp:4012) lit
+            // Spell::GetCastTime() AVANT prepare, donc 0 (Spell.cpp:671) -- c'est prepare qui refuse, sur ce drapeau.
+            // Condition RECOPIEE de prepare : drapeau de mouvement, ni grace de Manastorm, ni sort mobile du coeur
+            // (Unit::CanCastSpellWhileMoving : sorts Tinker, Starcaller, Witch Doctor... et aura 313).
+            if (bot->isMoving() && info->CalcCastTime(bot) && (info->InterruptFlags & SPELL_INTERRUPT_FLAG_MOVEMENT) &&
+                !bot->HasManastormMovementGrace() && !bot->CanCastSpellWhileMoving(info))
             {
                 bool const voulu = CoaAreneMouvementVoulu(botAI);
-                if (!voulu)
+                // Jamais pendant une charge, un saut ou sous controle (UNIT_STATE_LOST_CONTROL) : arreter couperait la
+                // trajectoire imposee (meme garde que le demi-tour plus haut). Le sort est ecarte quand meme.
+                if (!voulu && !bot->HasUnitState(UNIT_STATE_LOST_CONTROL))
                     bot->StopMoving();
                 if (usage != 255)
                     RecordFailure(usage, info->Id, FAILURE_MOVING);
@@ -1312,6 +1447,9 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // it can afford instead of spending its ticks being turned down.
         else if (check == SPELL_FAILED_NO_POWER)
             benched[info->Id] = now + NoPowerBenchSeconds;
+        // Familier ou serviteur absent, refus rendu par un script (voir NoPetBenchSeconds).
+        else if (check == SPELL_FAILED_NO_PET)
+            benched[info->Id] = now + NoPetBenchSeconds;
 
         if (usage != 255)
             RecordFailure(usage, info->Id, uint16(check));

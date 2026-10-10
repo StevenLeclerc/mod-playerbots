@@ -447,7 +447,7 @@ void CoaAreneClore(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* ad
                                                            "cacheur_aucun={} cacheur_vu={}", etat.cacheurCaches,
                                                            etat.cacheurTirs, etat.cacheurAucun, etat.cacheurVu)
                                      : std::string()) +
-                    Acore::StringFormat(" instance={} fin={}", etat.instance, fin));
+                    Acore::StringFormat(" instance={} fin={} familiers={}", etat.instance, fin, etat.familiers));
     etat.actif = false;
     etat.cacheurEnRouteMs = 0;
     etat.reculFinMs = 0;
@@ -1712,6 +1712,107 @@ public:
     }
 };
 
+/*
+ * Familier (banc d'arene du 11/10/2026 00:36-00:56 Paris). Aucune action CoA n'invoquait rien : une invocation sort de
+ * Classify avec kind 0 (ni degat, ni soin, ni aura), et IsAttack ecarte kind 0. Le Necromancer 537 connait six « Raise: »
+ * et n'a jamais leve un serviteur -- d'ou Transfer Life refuse NO_PET x34 ; le Tinker 752 connait quatre « Build: »
+ * familiers (SUMMON_PET) et n'en a construit aucun (character_pet vide). Le coeur renvoie en outre le familier a
+ * l'entree en arene (Battleground::AddPlayer -> UnsummonPetTemporaryIfAny, Battleground.cpp:1222).
+ *
+ * Invocation PERMANENTE, lue dans Spell.dbc, sans id ecrit ici : duree infinie (GetMaxDuration() < 0 : index 21, -1) ET
+ * un effet SUMMON_PET, ou SUMMON dont les SummonProperties sont allie ou familier (categorie 1 ou 2) de type familier,
+ * gardien ou serviteur. Releve du 11/10 sur les familles 18-40 : les 13 « Raise: » (Necromancer), 26 SUMMON_PET
+ * (« Build: » du Tinker, Summon: Greater Imp, Houndmaster...), Houndmaster's Whistle, Primal Spirit: Tiger/Elemental,
+ * Phoenix Egg. Tourelles, totems, etendards et pieges ont une duree : jamais retenus.
+ */
+bool CoaAreneEstFamilier(SpellInfo const* info)
+{
+    if (!info || info->IsPassive() || info->GetMaxDuration() >= 0)
+        return false;
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (effect.Effect == SPELL_EFFECT_SUMMON_PET)
+            return true;
+        if (effect.Effect != SPELL_EFFECT_SUMMON)
+            continue;
+        SummonPropertiesEntry const* prop = sSummonPropertiesStore.LookupEntry(uint32(effect.MiscValueB));
+        if (prop && (prop->Category == SUMMON_CATEGORY_ALLY || prop->Category == SUMMON_CATEGORY_PET) &&
+            (prop->Type == SUMMON_TYPE_PET || prop->Type == SUMMON_TYPE_GUARDIAN || prop->Type == SUMMON_TYPE_MINION))
+            return true;
+    }
+    return false;
+}
+
+/*
+ * Le bot a-t-il deja UN familier vivant : son familier (GetPet), ou une unite qu'il controle creee par une invocation
+ * permanente (UNIT_CREATED_BY_SPELL, pose par Map::SummonCreature, Object.cpp:2325). Un seul suffit, A DESSEIN : deux
+ * invocations qui se remplacent (Primal Spirit: Tiger / Elemental) s'invoqueraient sinon l'une l'autre sans fin, et le
+ * Necromancer ne relance pas tant qu'il a un serviteur (sa capacite de Life Force n'est lisible que du module).
+ * Lit le bot et ses unites, fil de l'IA du bot (P-137).
+ */
+bool CoaAreneAFamilier(Player* bot)
+{
+    if (Pet* pet = bot->GetPet())
+        if (pet->IsAlive())
+            return true;
+    for (Unit* unite : bot->m_Controlled)
+        if (unite && unite->IsInWorld() && unite->IsAlive())
+            if (CoaAreneEstFamilier(sSpellMgr->GetSpellInfo(unite->GetUInt32Value(UNIT_CREATED_BY_SPELL))))
+                return true;
+    return false;
+}
+
+// Entre deux essais d'invocation (reussi ou non) : borne le cout a un CheckCast par sort candidat toutes les 3 s, et
+// laisse l'incantation (2 a 3 s pour les « Raise: ») aboutir avant de rejuger.
+constexpr uint32 CoaAreneFamilierReessaiMs = 3 * IN_MILLISECONDS;
+// Portes ouvertes : incantation d'invocation la plus longue tentee (au-dela, le bot resterait plante sous les coups).
+constexpr uint32 CoaAreneFamilierIncantationMaxMs = 3 * IN_MILLISECONDS;
+// Revue c2 : un adversaire qui tue le familier en boucle ne doit pas occuper le match. Attente apres la perte d'un
+// familier, et invocations reussies au plus par engagement (preparation comprise).
+constexpr uint32 CoaAreneFamilierApresPerteMs = 15 * IN_MILLISECONDS;
+constexpr uint32 CoaAreneFamilierMaxParEngagement = 3;
+
+// Arene ou duel (preparation comprise), bras tire, CoaArene.IaCommune : le bot n'a aucun familier et son kit en a un.
+// Jamais en monde ouvert (cadre MONDE) ni hors engagement : inerte pour tous les autres bots.
+class CoaAreneFamilierTrigger : public Trigger
+{
+public:
+    CoaAreneFamilierTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa arene familier") {}
+
+    bool IsActive() override
+    {
+        if (!sPlayerbotAIConfig.coaAreneIaCommune || !bot->IsAlive())
+            return false;
+        CoaAreneEtat& etat = CoaAreneMaj(botAI, bot);
+        // Relecture : engagement VU a ce tick ou preparation -- pas pendant les 10 s de grace d'apres un duel, ou le bot
+        // est deja rendu au monde ouvert (etat.cadre garde DUEL).
+        if (!etat.actif || !etat.bras || etat.familierAucun || (!etat.vuCeTick && !etat.preparation) ||
+            (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL))
+            return false;
+        // Revue c2 : plafond par engagement (l'etat est remis a zero a chaque engagement, CoaAreneMaj).
+        if (etat.familiers >= CoaAreneFamilierMaxParEngagement)
+            return false;
+        uint32 const maintenant = getMSTime();
+        // Revue c2 : perte d'un familier vu vivant (tue, ou renvoye) -> CoaAreneFamilierApresPerteMs avant de relancer.
+        // Teste a chaque tour, avant le delai d'essai, pour dater la perte au tour pres.
+        bool const present = CoaAreneAFamilier(bot);
+        if (present)
+            etat.familierVu = true;
+        else if (etat.familierVu)
+        {
+            etat.familierVu = false;
+            etat.familierPerduMs = maintenant ? maintenant : 1;
+        }
+        if (present)
+            return false;
+        if (etat.familierPerduMs && getMSTimeDiff(etat.familierPerduMs, maintenant) < CoaAreneFamilierApresPerteMs)
+            return false;
+        if (etat.prochainFamilierMs && getMSTimeDiff(etat.prochainFamilierMs, maintenant) >= 0x80000000u)
+            return false;
+        return !bot->IsNonMeleeSpellCast(false, true, true);
+    }
+};
+
 // ---------------------------------------------------------------------------------------------------------------
 // Actions.
 // ---------------------------------------------------------------------------------------------------------------
@@ -2503,6 +2604,51 @@ public:
     }
 };
 
+// Invoque le premier familier du kit que le coeur accepte (CastFirst : StrictCheck, banc, mouvement). Un seul essai
+// toutes les CoaAreneFamilierReessaiMs, quoi qu'il arrive : pas de boucle sur un refus (capacite de Life Force pleine,
+// ressource, GCD). Kit sans invocation permanente : note une fois pour tout l'engagement.
+class CoaAreneFamilierAction : public Action
+{
+public:
+    CoaAreneFamilierAction(PlayerbotAI* botAI) : Action(botAI, "coa arene familier") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+        uint32 const prochain = getMSTime() + CoaAreneFamilierReessaiMs;
+        etat.prochainFamilierMs = prochain ? prochain : 1;
+
+        std::vector<Usable> familiers = KnownAbilities(botAI, bot, [](uint16) { return true; });
+        familiers.erase(std::remove_if(familiers.begin(), familiers.end(), [this](Usable const& s)
+                                       { return !CoaAreneEstFamilier(EffectiveSpell(bot, s.info)); }),
+                        familiers.end());
+        if (familiers.empty())
+        {
+            etat.familierAucun = true;
+            return false;
+        }
+        // Portes ouvertes, seulement une incantation courte : les « Build: » du Tinker durent 6 s (SpellCastTimes 171),
+        // les « Raise: » 1,5 a 3 s. Tout le kit en preparation d'ARENE seulement (revue c3) : le compte a rebours d'un
+        // duel (DUEL_STATE_COUNTDOWN) ne dure que 3 s, il suit la regle des portes ouvertes.
+        if (!etat.preparation || etat.cadre != COA_ARENE_ARENE)
+            familiers.erase(std::remove_if(familiers.begin(), familiers.end(), [this](Usable const& s)
+                                           { return EffectiveSpell(bot, s.info)->CalcCastTime(bot) >
+                                                    CoaAreneFamilierIncantationMaxMs; }),
+                            familiers.end());
+
+        SpellInfo const* lance = CastFirst(botAI, bot, familiers, bot);
+        if (!lance)
+            return false;
+        ++etat.familiers;
+        CoaAreneJournal(bot, etat, "familier", -1.0f, -1.0f,
+                        Acore::StringFormat(" sort={} preparation={} candidats={}", lance->Id, etat.preparation ? 1 : 0,
+                                            familiers.size()));
+        return true;
+    }
+
+    bool isUseful() override { return bot->IsAlive(); }
+};
+
 // ---------------------------------------------------------------------------------------------------------------
 // La strategie, ses fabriques. Fabrique SANS freres (P-130) : sa pose ne retire rien du moteur.
 // ---------------------------------------------------------------------------------------------------------------
@@ -2530,6 +2676,10 @@ constexpr float CoaAreneDefensifPriority = ACTION_MOVE + 9.5f;
 // Banc, cacheur 39,2 : devant la cachette L2 (39), le recul (38) et le retour (37,5), sous le defensif (39,5) et les
 // interruptions (40).
 constexpr float CoaAreneCacheurPriority = ACTION_MOVE + 9.2f;
+// Familier 24 = ACTION_HIGH + 4 : devant la rotation (10), « reach spell » (20) et « coa aoe » (22-23) ; sous
+// « coa defensive » (26-28), les soins (30+) et tous les deplacements d'arene (37,5-39,5). En preparation, sous l'ouverture
+// et la furtivite (57).
+constexpr float CoaAreneFamilierPriority = ACTION_HIGH + 4.0f;
 
 class CoaAreneStrategy : public Strategy
 {
@@ -2553,6 +2703,7 @@ public:
         triggers.push_back(new TriggerNode("coa arene pilier", { NextAction("coa arene pilier", CoaArenePilierPriority) }));
         triggers.push_back(new TriggerNode("coa arene defensif", { NextAction("coa arene defensif", CoaAreneDefensifPriority) }));
         triggers.push_back(new TriggerNode("coa arene cacheur", { NextAction("coa arene cacheur", CoaAreneCacheurPriority) }));
+        triggers.push_back(new TriggerNode("coa arene familier", { NextAction("coa arene familier", CoaAreneFamilierPriority) }));
     }
 };
 
@@ -2578,6 +2729,7 @@ public:
         creators["coa arene pilier"] = &CoaAreneActionFactoryInternal::pilier;
         creators["coa arene defensif"] = &CoaAreneActionFactoryInternal::defensif;
         creators["coa arene cacheur"] = &CoaAreneActionFactoryInternal::cacheur;
+        creators["coa arene familier"] = &CoaAreneActionFactoryInternal::familier;
     }
 
 private:
@@ -2589,6 +2741,7 @@ private:
     static Action* pilier(PlayerbotAI* botAI) { return new CoaArenePilierAction(botAI); }
     static Action* defensif(PlayerbotAI* botAI) { return new CoaAreneDefensifAction(botAI); }
     static Action* cacheur(PlayerbotAI* botAI) { return new CoaAreneCacheurAction(botAI); }
+    static Action* familier(PlayerbotAI* botAI) { return new CoaAreneFamilierAction(botAI); }
 };
 
 class CoaAreneTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -2604,6 +2757,7 @@ public:
         creators["coa arene pilier"] = &CoaAreneTriggerFactoryInternal::pilier;
         creators["coa arene defensif"] = &CoaAreneTriggerFactoryInternal::defensif;
         creators["coa arene cacheur"] = &CoaAreneTriggerFactoryInternal::cacheur;
+        creators["coa arene familier"] = &CoaAreneTriggerFactoryInternal::familier;
     }
 
 private:
@@ -2615,4 +2769,5 @@ private:
     static Trigger* pilier(PlayerbotAI* botAI) { return new CoaArenePilierTrigger(botAI); }
     static Trigger* defensif(PlayerbotAI* botAI) { return new CoaAreneDefensifTrigger(botAI); }
     static Trigger* cacheur(PlayerbotAI* botAI) { return new CoaAreneCacheurTrigger(botAI); }
+    static Trigger* familier(PlayerbotAI* botAI) { return new CoaAreneFamilierTrigger(botAI); }
 };

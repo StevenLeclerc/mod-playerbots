@@ -105,6 +105,15 @@ struct CoaAreneEtat
     uint32 cacheurTirMs = 0;
     uint32 cacheurJournalMs = 0;   // debit de la ligne « cacheur_aucun »
     uint32 cacheurCaches = 0, cacheurTirs = 0, cacheurAucun = 0, cacheurVu = 0;
+    // Familier (11/10, CoaAreneIa.inc « coa arene familier ») : prochain essai d'invocation (0 : tout de suite), kit
+    // sans aucune invocation permanente (lu une fois par engagement : le kit ne change pas pendant un match),
+    // invocations reussies (bilan).
+    uint32 prochainFamilierMs = 0;
+    bool familierAucun = false;
+    uint32 familiers = 0;
+    // Revue c2 : un familier a ete vu vivant (pour reconnaitre sa perte), et l'instant de cette perte (0 : aucune).
+    bool familierVu = false;
+    uint32 familierPerduMs = 0;
 };
 
 /*
