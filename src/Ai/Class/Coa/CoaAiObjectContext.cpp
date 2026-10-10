@@ -1101,12 +1101,26 @@ SpellCastResult CoaPreControleCible(Player* bot, SpellInfo const* info, Unit* ta
         return SPELL_CAST_OK;
     if (info->Effects[0].Effect == SPELL_EFFECT_OPEN_LOCK || info->Effects[0].Effect == SPELL_EFFECT_SKINNING)
         return SPELL_CAST_OK;
+    bool const ignoreVue = info->HasAttribute(SPELL_ATTR2_IGNORE_LINE_OF_SIGHT) ||
+                           info->HasAttribute(SPELL_ATTR5_ALWAYS_AOE_LINE_OF_SIGHT);
     // Revue m1 : sans cible unitaire EXPLICITE (zone autour du lanceur, soin de groupe), le coeur retire la cible
     // (Spell::InitExplicitTargets) et ne teste ni vue ni portee sur elle : ne pas etre plus strict.
+    // SAUF la ligne de vue, que StrictCheck (appele juste apres) teste quand meme : il pose la cible unite sur le Spell
+    // SANS passer par InitExplicitTargets, et Spell::CheckCast (Spell.cpp:5977-6006) juge alors la vue sur elle. Tour 4
+    // du banc (10/10 22:05-22:10 UTC, Starcaller 1422) : 22 refus LINE_OF_SIGHT, tous sur des sorts sans cible unite
+    // explicite (cibles implicites lues dans Spell.dbc : Eclipse of Fury 570218 = 22 SRC_CASTER, Celestial Cleave
+    // 802435 = 104 cone, Vigil of the Moon 802797 = 87 DEST_DEST, Stellar Drift 800501 et Starshatter 801135 = 1
+    // CASTER). Les ecarter ici rend le MEME verdict que StrictCheck, sans construire de Spell : aucun changement de jeu.
     if (!(info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK))
-        return SPELL_CAST_OK;
+    {
+        if (ignoreVue)
+            return SPELL_CAST_OK;
+        if (vue < 0)
+            vue = bot->IsWithinLOSInMap(target, VMAP::ModelIgnoreFlags::M2, LINEOFSIGHT_ALL_CHECKS) ? 1 : 0;
+        return vue ? SPELL_CAST_OK : SPELL_FAILED_LINE_OF_SIGHT;
+    }
 
-    if (!info->HasAttribute(SPELL_ATTR2_IGNORE_LINE_OF_SIGHT) && !info->HasAttribute(SPELL_ATTR5_ALWAYS_AOE_LINE_OF_SIGHT))
+    if (!ignoreVue)
     {
         if (vue < 0)
             vue = bot->IsWithinLOSInMap(target, VMAP::ModelIgnoreFlags::M2, LINEOFSIGHT_ALL_CHECKS) ? 1 : 0;
@@ -1881,6 +1895,9 @@ public:
         CoaAreneBurst const burst = CoaAreneOrdonnerBurst(botAI, bot, target, usable);
         if (usable.empty())
             return RecordUsage(USAGE_ATTACK, nullptr);
+        // CoaArene (melee, duel ou arene 1v1) : adversaire a plus de 10 yd, charge et saut devant. Apres la copie du
+        // tourniquet, comme le burst : l'index se relit sur l'ordre d'avant. Voir CoaAreneOrdonnerRapprochement.
+        CoaAreneOrdonnerRapprochement(botAI, bot, target, usable);
 
         // The cast goes through CastFirst rather than through a second loop of its own. The one
         // written here judged every refusal by PlayerbotAI::CastSpell to be the spell's fault and

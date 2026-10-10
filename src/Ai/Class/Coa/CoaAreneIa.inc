@@ -692,8 +692,10 @@ bool CoaAreneFiltreEtatActif(PlayerbotAI* botAI, Player* bot)
 // Spell::CheckCasterAuras (Spell.cpp:6968-6984) : SPELL_ATTR1_IMMUNITY_PURGES_EFFECT n'exempte de rien par lui-meme ;
 // le coeur ne regarde plus loin que si un effet accorde une immunite d'ecole, de mecanisme ou de dissipation (ou l'un
 // des sept bijoux JcJ nommes). Banc de reference du 10/10 23:38-23:42 (Paris) : Eye of Archimonde 804052, Stoicism
-// 804802, Vigil of the Moon 802797 portent l'attribut (AttributesEx 0x8000) SANS aucun effet d'immunite -- 32 refus
-// SPELL_FAILED_STUNNED que le filtre laissait passer, l'attribut seul suffisant a les exempter.
+// 804802 portent l'attribut (AttributesEx 0x8000) SANS aucun effet d'immunite -- 32 refus SPELL_FAILED_STUNNED que le
+// filtre laissait passer, l'attribut seul suffisant a les exempter. RECTIFIE (tour 4, 11/10) : Vigil of the Moon
+// 802797, cite ici a tort, porte DEUX effets SPELL_AURA_DISPEL_IMMUNITY (41) ; vrai pour lui, le coeur juge alors
+// aura par aura -- voir CoaAreneImmuniteInsuffisante, qui recopie ce jugement.
 bool CoaAreneAccordeImmunite(SpellInfo const* info)
 {
     if (!info->HasAttribute(SPELL_ATTR1_IMMUNITY_PURGES_EFFECT))
@@ -713,34 +715,120 @@ bool CoaAreneAccordeImmunite(SpellInfo const* info)
     return false;
 }
 
+// Le sort accorde une immunite, et pourtant le coeur le refuserait : RECOPIE de la seconde boucle de
+// Spell::CheckCasterAuras (Spell.cpp:7044-7104), masques compris. Tour 4 du banc (10/10 22:07:29 UTC, Starcaller
+// 1422) : Vigil of the Moon 802797 porte SPELL_ATTR1_IMMUNITY_PURGES_EFFECT ET deux effets SPELL_AURA_DISPEL_IMMUNITY
+// (41, MiscValue 5 et 6 : furtivite, invisibilite -- lu dans Spell.dbc) ; CoaAreneAccordeImmunite le laissait donc au
+// coeur, qui le refusait SPELL_FAILED_STUNNED x3 sous Battle Rush 501546 (MOD_STUN, mecanisme etourdissement, que
+// l'immunite de dissipation ne couvre pas). Appele seulement quand le lanceur est deja entrave ET que le sort accorde
+// une immunite : la boucle sur les auras ne coute rien au tour ordinaire.
+bool CoaAreneImmuniteInsuffisante(Player* bot, SpellInfo const* info)
+{
+    uint8 school_immune = 0;
+    uint64 mechanic_immune = 0;
+    uint32 dispel_immune = 0;
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        if (info->Effects[i].ApplyAuraName == SPELL_AURA_SCHOOL_IMMUNITY)
+            school_immune |= uint32(info->Effects[i].MiscValue);
+        else if (info->Effects[i].ApplyAuraName == SPELL_AURA_MECHANIC_IMMUNITY)
+            mechanic_immune |= 1ULL << uint32(info->Effects[i].MiscValue);
+        else if (info->Effects[i].ApplyAuraName == SPELL_AURA_DISPEL_IMMUNITY)
+            dispel_immune |= SpellInfo::GetDispelMask(DispelType(info->Effects[i].MiscValue));
+    }
+    switch (info->Id)
+    {
+        case 42292: case 59752: case 65547: case 53490: case 19574: case 34471: case 46227:
+            mechanic_immune = IMMUNE_TO_MOVEMENT_IMPAIRMENT_AND_LOSS_CONTROL_MASK;
+            break;
+        default:
+            break;
+    }
+    // Le coeur : aucune immunite reelle -> refus (prevented_reason). CoaAreneAccordeImmunite garantit qu'il y en a une.
+    if (!school_immune && !mechanic_immune && !dispel_immune)
+        return true;
+
+    bool usableInStun = info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_STUNNED);
+    if (info->Id == 33206 && !bot->HasAura(63248))
+        usableInStun = false;
+    for (auto const& [id, application] : bot->GetAppliedAuras())
+    {
+        Aura const* aura = application->GetBase();
+        SpellInfo const* auraInfo = aura->GetSpellInfo();
+        if (auraInfo->GetAllEffectsMechanicMask() & mechanic_immune)
+            continue;
+        if ((auraInfo->GetSchoolMask() & school_immune) &&
+            !auraInfo->HasAttribute(SPELL_ATTR1_IMMUNITY_TO_HOSTILE_AND_FRIENDLY_EFFECTS))
+            continue;
+        if (auraInfo->GetDispelMask() & dispel_immune)
+            continue;
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        {
+            AuraEffect* part = aura->GetEffect(i);
+            if (!part)
+                continue;
+            switch (part->GetAuraType())
+            {
+                case SPELL_AURA_MOD_STUN:
+                {
+                    uint64 mask = 1ULL << MECHANIC_STUN;
+                    if (info->Id == 22812)
+                        mask |= 1ULL << MECHANIC_SAPPED | 1ULL << MECHANIC_HORROR | 1ULL << MECHANIC_SLEEP;
+                    if (info->Id == 1044)
+                        mask |= (1ULL << MECHANIC_SAPPED) | (1ULL << MECHANIC_FEAR);
+                    if (!usableInStun || !(auraInfo->GetAllEffectsMechanicMask() & mask))
+                        return true;
+                    break;
+                }
+                case SPELL_AURA_MOD_CONFUSE:
+                    if (!info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_CONFUSED))
+                        return true;
+                    break;
+                case SPELL_AURA_MOD_FEAR:
+                    if (!info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_FLEEING))
+                        return true;
+                    break;
+                case SPELL_AURA_MOD_SILENCE:
+                case SPELL_AURA_MOD_PACIFY:
+                case SPELL_AURA_MOD_PACIFY_SILENCE:
+                    if (info->PreventionType == SPELL_PREVENTION_TYPE_PACIFY ||
+                        info->PreventionType == SPELL_PREVENTION_TYPE_SILENCE)
+                        return true;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    return false;
+}
+
 bool CoaAreneBloqueParEtat(Player* bot, SpellInfo const* info)
 {
-    // Un sort qui accorde une immunite : le coeur compare alors chaque aura du lanceur a l'immunite ; on le lui laisse.
-    if (info->HasAttribute(SPELL_ATTR6_NOT_AN_ATTACK) || CoaAreneAccordeImmunite(info))
+    if (info->HasAttribute(SPELL_ATTR6_NOT_AN_ATTACK))
         return false;
 
+    // Ce que le coeur appelle prevented_reason (Spell.cpp:6997-7038), sans le tri des mecanismes des sorts utilisables
+    // etourdi (laisse au coeur : jamais plus strict).
+    bool entrave = false;
     uint32 const drapeaux = bot->GetUnitFlags();
     if (drapeaux & UNIT_FLAG_STUNNED)
-    {
-        if (!info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_STUNNED))
-            return true;
-    }
+        entrave = !info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_STUNNED);
     else if (drapeaux & UNIT_FLAG_CONFUSED)
-    {
-        if (!info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_CONFUSED))
-            return true;
-    }
+        entrave = !info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_CONFUSED);
     else if (drapeaux & UNIT_FLAG_FLEEING)
-    {
-        if (!info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_FLEEING))
-            return true;
-    }
+        entrave = !info->HasAttribute(SPELL_ATTR5_ALLOW_WHILE_FLEEING);
+    if (!entrave && (drapeaux & UNIT_FLAG_SILENCED) && info->PreventionType == SPELL_PREVENTION_TYPE_SILENCE)
+        entrave = true;
+    if (!entrave && (drapeaux & UNIT_FLAG_PACIFIED) && info->PreventionType == SPELL_PREVENTION_TYPE_PACIFY)
+        entrave = true;
+    if (!entrave)
+        return false;
 
-    if ((drapeaux & UNIT_FLAG_SILENCED) && info->PreventionType == SPELL_PREVENTION_TYPE_SILENCE)
-        return true;
-    if ((drapeaux & UNIT_FLAG_PACIFIED) && info->PreventionType == SPELL_PREVENTION_TYPE_PACIFY)
-        return true;
-    return false;
+    // Un sort qui accorde une immunite : le coeur compare chaque aura du lanceur a l'immunite (recopie ci-dessus).
+    if (CoaAreneAccordeImmunite(info))
+        return CoaAreneImmuniteInsuffisante(bot, info);
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -872,6 +960,60 @@ CoaAreneBurst CoaAreneOrdonnerBurst(PlayerbotAI* botAI, Player* bot, Unit* cible
     if (autres || !burst.pile)
         usable.erase(std::remove_if(usable.begin(), usable.end(), consommateur), usable.end());
     return burst;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Rapprochement (tour 4 du banc, 11/10) : une melee CoA en duel ou en arene 1v1 dont l'adversaire est a plus de
+// CoaAreneRapprochementMin yd met en tete de sa liste ses sorts de charge ou de saut VISES sur la cible. Aucun sort
+// ajoute : seulement l'ordre de ceux que l'action d'attaque a deja retenus (et filtres a cette distance), le tourniquet
+// les tentant sinon dans son ordre a lui. Le classifieur (KIND_*, 16 bits, tous pris) n'a pas de genre « mobilite » :
+// le test se lit sur les effets. Mesure d'avant (ticks du tour 4, moteur combat, sans cacheur) : la melee voyait son
+// adversaire a plus de 10 yd 14 a 42 % du temps, et sur 16 matchs deux charges seulement sont parties (Battle Rush
+// 501546 a 12 yd, Lunge 500126 a 9 yd). Hors arene 1v1 et hors duel : un test de booleen, rien d'autre.
+// ---------------------------------------------------------------------------------------------------------------
+constexpr float CoaAreneRapprochementMin = 10.0f;
+
+// Charge ou saut vers une cible unite explicite (Battle Rush, Lunge). Pas Hellfire Trample 804704 (CHARGE_DEST vers
+// l'avant du lanceur, cible implicite 47) : il ne vise pas l'adversaire.
+bool CoaAreneSortDeRapprochement(SpellInfo const* info)
+{
+    if (!(info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK))
+        return false;
+    for (SpellEffectInfo const& effect : info->Effects)
+        switch (effect.Effect)
+        {
+            case SPELL_EFFECT_CHARGE: case SPELL_EFFECT_CHARGE_DEST: case SPELL_EFFECT_JUMP: case SPELL_EFFECT_JUMP_DEST:
+            {
+                // Revue tour 5 : l'effet de mobilite lui-meme doit viser l'ADVERSAIRE (6 TARGET_UNIT_TARGET_ENEMY,
+                // 25 TARGET_UNIT_TARGET_ANY, 53 TARGET_DEST_TARGET_ENEMY, 63-71 TARGET_DEST_TARGET_*), pas un allie
+                // (Intervene, Temple Guardian 801165) ni un point sans rapport (Heroic Leap 606544, Grand Entrance).
+                auto versAdversaire = [](uint32 t) { return t == 6 || t == 25 || t == 53 || (t >= 63 && t <= 71); };
+                if (versAdversaire(effect.TargetA.GetTarget()) || versAdversaire(effect.TargetB.GetTarget()))
+                    return true;
+                break;
+            }
+            default:
+                break;
+        }
+    return false;
+}
+
+void CoaAreneOrdonnerRapprochement(PlayerbotAI* botAI, Player* bot, Unit* cible, std::vector<Usable>& usable)
+{
+    if (!sPlayerbotAIConfig.coaAreneIaCommune || !cible || usable.size() < 2 ||
+        !(bot->InArena() || (bot->duel && bot->duel->Opponent)))
+        return;
+    if (bot->GetExactDist2d(cible) <= CoaAreneRapprochementMin)
+        return;
+    CoaAreneEtat& etat = CoaAreneMaj(botAI, bot);
+    if (!CoaAreneL1Actif(etat) || !CoaAreneEstAdversaire(etat, cible) || CoaAreneMouvementVoulu(botAI) ||
+        CoaAreneCacheurActif(bot, etat))
+        return;
+    // Melee seulement (le retour la mene au contact) ; le Ranger de L1 garde sa distance.
+    if (!CoaAreneRetourArme(bot) || CoaAreneEstRangerDistance(bot) || !CoaAreneRetourAuContact(botAI, bot))
+        return;
+    std::stable_partition(usable.begin(), usable.end(),
+                          [bot](Usable const& spell) { return CoaAreneSortDeRapprochement(EffectiveSpell(bot, spell.info)); });
 }
 
 void CoaAreneNoterBurst(PlayerbotAI* botAI, Player* bot, Unit* cible, CoaAreneBurst const& burst, SpellInfo const* cast)
