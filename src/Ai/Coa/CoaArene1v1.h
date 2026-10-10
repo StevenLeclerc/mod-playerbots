@@ -1,6 +1,7 @@
 /*
  * Conquest of Azeroth -- arene 1 contre 1 non classee (escarmouche) : un joueur
- * humain contre un bot Ranger, le « gladiateur », mis a son niveau.
+ * humain contre un bot d'une classe CoA (Ranger a l'origine, toutes depuis le 10/10 soir), le
+ * « gladiateur », mis a son niveau.
  *
  * Conception : coa-project/docs/CONCEPTION-arene-1v1.md. Le detail (file 11, type
  * d'arene 1, appariement, garde-fous, fils) est en tete de CoaArene1v1.cpp.
@@ -28,8 +29,9 @@ constexpr uint32 FILE_ARENE = 11;
 
 // FIL MONDE SEULEMENT (option de dialogue, commande MJ). Inscrit `joueur` et un
 // gladiateur libre prepare a son niveau dans la file 11. Rend faux et remplit `refus`
-// (code court, deja explique au joueur) si rien n'a ete mis en file.
-bool Inscrire(Player* joueur, std::string const& origine, std::string& refus);
+// (code court, deja explique au joueur) si rien n'a ete mis en file. `classeVoulue` : une
+// classe CoA (sous-menu du dialogue) ; 0 = rotation (la classe affrontee le moins recemment).
+bool Inscrire(Player* joueur, std::string const& origine, std::string& refus, uint8 classeVoulue = 0);
 
 // TOUT FIL. Le bot `guidLow` est-il un gladiateur engage (inscrit, en file, invite ou
 // en arene) ? Lu par le Directeur (CoaDirecteur.cpp, garde du bus) pour ne jamais

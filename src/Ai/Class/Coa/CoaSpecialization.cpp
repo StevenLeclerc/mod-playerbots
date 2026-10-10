@@ -5,6 +5,7 @@
  */
 
 #include "CoaSpecialization.h"
+#include "CoaArene1v1.h"
 #include "CoaLevelBuildData.h"
 #include "CoaLevelBuildDataKami.h"
 #include "CoaSpecStrategies.h"
@@ -436,6 +437,17 @@ bool EnsureCoaSpecialization(Player* bot)
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
         return false;
 
+    // CoA arene 1v1 (10/10 soir) : un gladiateur ENGAGE (inscrit, en file, en arene, retenu) garde la
+    // specialisation de degats que sa preparation lui a posee (CoaSpecialiserGladiateur) ; sans ce garde, la
+    // composition a l'entree en arene (Liberer -> ResetStrategies) la rendrait au role tire par le hachage.
+    // Chargement atomique hors match (GladiateurEngage).
+    if (CoaArene1v1::GladiateurEngage(bot->GetGUID().GetCounter()))
+    {
+        uint32 const courante = GetAscensionActiveSpecialization(bot);
+        if (courante && !IsExcludedSpecialization(courante) && RoleOf(bot->getClass(), courante) == CoaRole::Dps)
+            return false;
+    }
+
     // Embuscade (02/10, option Directeur.Embuscade) : un membre de la RESERVE de
     // chasseurs (guilde de Directeur.ReserveGuildes) prend la specialisation
     // d'embuscade de sa classe, s'il y en a une -- a la preparation `P-`
@@ -512,6 +524,41 @@ bool EnsureCoaSpecialization(Player* bot)
     LOG_INFO("playerbots", "coa: {} (class {}, level {}) took specialization {} as {}",
              bot->GetName(), bot->getClass(), bot->GetLevel(), specializationId, RoleName(CoaRole(chosenRole)));
     return true;
+}
+
+uint32 CoaSpecialiserGladiateur(Player* bot)
+{
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel ||
+        !sRandomPlayerbotMgr.IsRandomBot(bot))
+        return 0;
+
+    std::vector<uint32> candidates = SpecializationsByRole(bot->getClass())[uint8(CoaRole::Dps)];
+    // Le Ranger : seulement a distance. Le gladiateur 682 (specialisation 30, melee) a joue le 10/10 a 21:12
+    // (Paris) sans aucun geste de L1 (CoaAreneEstRangerDistance), ni ouverture, ni recul, ni burst garde.
+    if (bot->getClass() == CLASS_RANGER)
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](uint32 spec)
+            {
+                SpecializationProfile const* profile = FindProfile(spec);
+                return !profile || profile->Style == CoaStyle::Melee;
+            }), candidates.end());
+    if (candidates.empty())
+        return 0;
+
+    uint32 const avant = GetAscensionActiveSpecialization(bot);
+    if (std::find(candidates.begin(), candidates.end(), avant) != candidates.end())
+        return 0;
+
+    uint32 const choisie = candidates[Hash(bot->GetGUID().GetCounter(), 0x474C4144u) % candidates.size()];   // 'GLAD'
+    if (!SwitchAscensionSpecialization(bot, choisie))
+    {
+        LOG_INFO("playerbots", "coa: {} (class {}, level {}) gladiator specialization {} refused (was {})",
+                 bot->GetName(), bot->getClass(), bot->GetLevel(), choisie, avant);
+        return 0;
+    }
+    uint32 const points = ApplyCoaTalents(bot);
+    LOG_INFO("playerbots", "coa: {} (class {}, level {}) took gladiator specialization {} (was {}), {} talent entries raised",
+             bot->GetName(), bot->getClass(), bot->GetLevel(), choisie, avant, points);
+    return choisie;
 }
 
 namespace

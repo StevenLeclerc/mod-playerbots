@@ -63,6 +63,12 @@ uint8 GetCoaPrimaryStats(Player const* player);
 // player picks one in the client. Returns true when a specialization was just chosen.
 bool EnsureCoaSpecialization(Player* bot);
 
+// CoA arene 1v1 (10/10/2026 soir) : la specialisation d'un GLADIATEUR (Ai/Coa/CoaArene1v1.cpp, preparation,
+// FIL MONDE). Toujours de DEGATS ; pour le Ranger, a DISTANCE (L1 de l'IA d'arene ne joue que 28 et 29). Garde la
+// courante si elle convient, sinon en pose une (hachage du guid) et redepense les points. Rend la specialisation
+// posee, 0 si rien n'a change. EnsureCoaSpecialization ne la defait pas tant que le gladiateur est engage.
+uint32 CoaSpecialiserGladiateur(Player* bot);
+
 // Spends a random bot's Character Advancement points the way a player of its specialization
 // would: one ability essence at every even level from 10 (class tree), one talent essence at every
 // odd level from 11 (specialization tree), in the order of the ascensionsidekick.com level build.

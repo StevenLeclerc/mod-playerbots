@@ -63,7 +63,10 @@
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "CoaDirecteur.h"
+#include "CoaSpecialization.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
 #include "Creature.h"
+#include "GossipDef.h"
 #include "DBCStores.h"
 #include "DatabaseEnv.h"
 #include "DisableMgr.h"
@@ -90,7 +93,9 @@
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
+#include <map>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -105,6 +110,8 @@ uint8 const TYPE_1V1 = CoaArene1v1::TYPE_ARENE;
 // ni GOSSIP_SENDER_MAIN (1) n'emploient.
 constexpr uint32 GOSSIP_EXPEDITEUR = 0xC0A11;
 constexpr uint32 GOSSIP_ACTION_INSCRIRE = 1;
+constexpr uint32 GOSSIP_ACTION_CHOISIR = 2;      // sous-menu « Choisir la classe adverse »
+constexpr uint32 GOSSIP_ACTION_CLASSE = 100;     // + id de classe CoA (12-32) : inscription contre cette classe
 
 constexpr uint32 RELANCE_FILE_S = 5;            // ScheduleQueueUpdate tant que non apparie
 constexpr uint32 ATTENTE_APPARIEMENT_S = 30;    // au-dela : abandon `sans_appariement`
@@ -139,6 +146,7 @@ struct Match
     uint32 gladiateur = 0;    // guid bas
     std::string nomJoueur;
     std::string nomGladiateur;
+    uint8 classe = 0;         // classe du gladiateur (journal de fin)
     uint8 tranche = 0;        // BattlegroundBracketId
     uint32 inscritS = 0;
     uint32 relanceS = 0;
@@ -195,7 +203,10 @@ void Liberer(uint32 guid, uint32 idMatch, char const* raison)
     Player* bot = ObjectAccessor::FindPlayerByLowGUID(guid);
     if (bot)
     {
-        bot->RemoveUnitFlag(UnitFlags(UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC | UNIT_FLAG_NON_ATTACKABLE));
+        // PACIFIED : celui de la retenue d'un match precedent, si la protection l'a pris dans la seconde
+        // ou il sortait de l'arene (Desapaiser n'y touche pas alors). Aucune autre source ici.
+        bot->RemoveUnitFlag(UnitFlags(UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC | UNIT_FLAG_NON_ATTACKABLE |
+                                      UNIT_FLAG_PACIFIED));
         if (PlayerbotAI* ia = GET_PLAYERBOT_AI(bot))
             ia->ResetStrategies(false);
     }
@@ -203,25 +214,63 @@ void Liberer(uint32 guid, uint32 idMatch, char const* raison)
              raison, bot ? 1 : 0);
 }
 
-// Retenue apres la fin (FIL MONDE) : les deux restent hostiles dans l'arene, et l'IA generique
-// relancerait l'attaque au corps a corps. A chaque tick de retenue : combat arrete, et
-// UNIT_FLAG_IMMUNE_TO_PC (non sauvegarde ; InitStatsForLevel l'efface au rechargement).
-void Apaiser(Player* g)
+/*
+ * Retenue apres la fin (FIL MONDE), A CHAQUE TICK DU SUIVI tant que le gladiateur est dans l'arene, depart
+ * compris (LeaveBG ne le sort qu'a l'accuse de teleportation).
+ *
+ * Pourquoi la premiere version (AttackStop + CombatStop + UNIT_FLAG_IMMUNE_TO_PC, une fois par seconde) n'a pas
+ * suffi -- le 10/10 a 21:12 (Paris), le gladiateur 682 est venu frapper le joueur pendant la retenue :
+ *  - UNIT_FLAG_IMMUNE_TO_PC sur l'ATTAQUANT n'est lu que par Unit::_IsValidAttackTarget (Unit.cpp:11389-11392) :
+ *    il fait refuser les SORTS visant un joueur (Spell::CheckTarget) et le ciblage, pas le corps a corps.
+ *    Unit::Attack (Unit.cpp:7676) ne teste aucune validite, Player::Update frappe tant que
+ *    UNIT_STATE_MELEE_ATTACKING et une victime (PlayerUpdates.cpp:160), et Unit::AttackerStateUpdate ne s'arrete
+ *    que sur UNIT_FLAG_PACIFIED (Unit.cpp:2808).
+ *  - l'IA du bot tourne plusieurs fois par seconde, la retenue une : entre deux passages, « reach melee » le
+ *    ramenait au contact (682 est de specialisation 30, melee) et l'attaque relancait Attack().
+ * D'ou : PACIFIED (plus aucun coup blanc ni sort a prevention « pacify »), IMMUNE_TO_PC (plus aucun sort sur le
+ * joueur, et le joueur ne peut plus le cibler), et les strategies de la protection en file : « passive » annule
+ * toute action sauf follow/stay (PassiveMultiplier.cpp), « stay » le fige. Il ne bouge ni ne frappe plus, meme
+ * entre deux passages. Drapeaux non sauvegardes (une deconnexion les efface), strategies rendues par Desapaiser.
+ */
+void Apaiser(Player* g, bool& apaise)
 {
     if (!g)
         return;
-    g->AttackStop();
-    g->CombatStop(true);
-    g->SetUnitFlag(UNIT_FLAG_IMMUNE_TO_PC);
+    if (g->GetVictim() || g->IsInCombat())
+    {
+        g->AttackStop();
+        g->CombatStop(true);
+    }
+    g->SetUnitFlag(UnitFlags(UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_PACIFIED));
+    if (PlayerbotAI* ia = GET_PLAYERBOT_AI(g))
+    {
+        // Seulement s'il les a perdues (LeaveBG, ou une composition) : ChangeStrategy recompose le moteur.
+        if (!ia->HasStrategy("passive", BOT_STATE_NON_COMBAT) || !ia->HasStrategy("stay", BOT_STATE_NON_COMBAT))
+            ia->ChangeStrategy("+passive,+stay", BOT_STATE_NON_COMBAT);
+        if (!ia->HasStrategy("passive", BOT_STATE_COMBAT))
+            ia->ChangeStrategy("+passive", BOT_STATE_COMBAT);
+    }
+    if (g->isMoving())
+        g->StopMoving();
+    apaise = true;
 }
 
-// Leve le drapeau de la retenue, sauf si la protection de file l'a repris entre-temps (nouveau match).
+// Fin de la retenue (sortie de l'arene, oubli, arene detruite) : drapeaux leves et composition ordinaire rendue.
+// Si la protection de file l'a repris entre-temps (nouveau match dans la seconde), elle a ses propres drapeaux et
+// strategies : on ne retire alors que PACIFIED, qu'elle ne pose pas.
 void Desapaiser(uint32 guid)
 {
+    Player* g = ObjectAccessor::FindPlayerByLowGUID(guid);
+    if (!g)
+        return;   // hors ligne : drapeaux effaces, composition refaite a la connexion
     if (proteges.count(guid))
+    {
+        g->RemoveUnitFlag(UNIT_FLAG_PACIFIED);
         return;
-    if (Player* g = ObjectAccessor::FindPlayerByLowGUID(guid))
-        g->RemoveUnitFlag(UNIT_FLAG_IMMUNE_TO_PC);
+    }
+    g->RemoveUnitFlag(UnitFlags(UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_PACIFIED));
+    if (PlayerbotAI* ia = GET_PLAYERBOT_AI(g))
+        ia->ResetStrategies(false);
 }
 
 uint32 Maintenant() { return static_cast<uint32>(GameTime::GetGameTime().count()); }
@@ -317,6 +366,42 @@ std::vector<uint32> Gladiateurs()
     return ids;
 }
 
+// AiPlayerbot.Arene1v1.Classes : ids de classes CoA separes par des virgules ; vide = toutes. Un morceau qui
+// n'est pas un id de classe CoA est ignore (une liste sans aucun id valable n'admet donc aucune classe). FIL MONDE.
+bool ClasseAdmise(uint8 classe)
+{
+    if (!IsAscensionClass(classe))
+        return false;
+    std::string const& liste = sPlayerbotAIConfig.arene1v1Classes;
+    if (liste.find_first_not_of(" \t,") == std::string::npos)
+        return true;
+    size_t debut = 0;
+    while (debut <= liste.size())
+    {
+        size_t fin = liste.find(',', debut);
+        if (fin == std::string::npos)
+            fin = liste.size();
+        std::string morceau = liste.substr(debut, fin - debut);
+        morceau.erase(std::remove_if(morceau.begin(), morceau.end(), [](char c) { return c == ' ' || c == '\t'; }),
+                      morceau.end());
+        if (!morceau.empty() && morceau.size() <= 3 &&
+            std::all_of(morceau.begin(), morceau.end(), [](char c) { return c >= '0' && c <= '9'; }) &&
+            std::strtoul(morceau.c_str(), nullptr, 10) == classe)
+            return true;
+        debut = fin + 1;
+    }
+    return false;
+}
+
+// Le nom de la classe, lu dans ChrClasses.dbc (comme ChatHelper::FormatClass pour les classes CoA).
+std::string NomClasse(uint8 classe)
+{
+    if (ChrClassesEntry const* entree = sChrClassesStore.LookupEntry(classe))
+        if (entree->name[0] && *entree->name[0])
+            return entree->name[0];
+    return "classe " + std::to_string(classe);
+}
+
 bool DejaEngage(uint32 guid)
 {
     std::lock_guard<std::mutex> garde(verrou);
@@ -340,8 +425,11 @@ char const* RefusGladiateur(uint32 guid, Player* b)
         return "pas_bot_aleatoire";
     if (ia->GetMaster())
         return "a_un_maitre";
-    if (b->getClass() != CLASS_RANGER)
-        return "pas_ranger";
+    // Toute classe CoA (10/10 soir, demande du commanditaire), bornee par AiPlayerbot.Arene1v1.Classes.
+    if (!IsAscensionClass(b->getClass()))
+        return "pas_classe_coa";
+    if (!ClasseAdmise(b->getClass()))
+        return "classe_exclue";
     // Un mercenaire gagne de l'XP de victime JcJ et remonte de niveau
     // (docs/ENQUETE-niveau-reserve.md). Hachage du guid : PlayerbotAIConfig::IsMercenary.
     if (sPlayerbotAIConfig.IsMercenary(b->GetGUID().GetRawValue()))
@@ -428,6 +516,11 @@ void Preparer(Player* bot, Player* joueur, uint32 idMatch)
         PlayerbotFactory fabrique(bot, niveau);
         fabrique.Randomize(false);
     }
+    // Specialisation de DEGATS (et a distance pour le Ranger), comme la reserve du Directeur prend la sienne
+    // (EnsureCoaSpecialization, embuscade) : un soigneur ou un tank n'a rien a faire seul en arene. APRES la
+    // fabrique (Randomize recompose : sans gladiateur engage, la specialisation du hachage revient), AVANT
+    // l'equipement.
+    uint32 const specialisation = CoaSpecialiserGladiateur(bot);
     uint32 const scoreJoueur = ScoreEquipement(joueur, bot->GetLevel());
     uint32 const scoreAvant = ScoreEquipement(bot, bot->GetLevel());
     uint32 scoreApres = scoreAvant;
@@ -461,9 +554,10 @@ void Preparer(Player* bot, Player* joueur, uint32 idMatch)
     if (type != POWER_MANA && bot->GetMaxPower(POWER_MANA) > 0)
         bot->SetPower(POWER_MANA, bot->GetMaxPower(POWER_MANA));
     LOG_INFO("playerbots", "coa arene1v1: preparation id={} gladiateur={} niveau_avant={} niveau_apres={} niveau_joueur={}"
-             " score_joueur={} score_avant={} score_apres={} reequipe={} duree_ms={}", idMatch,
-             bot->GetGUID().GetCounter(), avant, uint32(bot->GetLevel()), niveau, scoreJoueur, scoreAvant, scoreApres,
-             reequipe, GetMSTimeDiffToNow(debutMs));
+             " score_joueur={} score_avant={} score_apres={} reequipe={} classe={} specialisation={} spe_changee={}"
+             " duree_ms={}", idMatch, bot->GetGUID().GetCounter(), avant, uint32(bot->GetLevel()), niveau, scoreJoueur,
+             scoreAvant, scoreApres, reequipe, uint32(bot->getClass()), GetAscensionActiveSpecialization(bot),
+             specialisation ? 1 : 0, GetMSTimeDiffToNow(debutMs));
 }
 
 // ------------------------------------------------------------------ defis CoA
@@ -577,14 +671,77 @@ std::string Explication(std::string const& refus)
         return "Aucun gladiateur n'est libre pour l'instant. Réessayez dans un moment.";
     if (refus == "lfg")
         return "Vous êtes inscrit à la recherche de donjon.";
+    if (refus == "classe_indisponible")
+        return "Aucun gladiateur de cette classe n'est libre à votre niveau ou moins. Choisissez une autre classe.";
     return "Inscription à l'arène 1 contre 1 impossible pour l'instant.";
+}
+
+// Les gladiateurs libres pour `joueur` (niveau <= le sien), et pourquoi les autres ne le sont pas. FIL MONDE.
+struct Recensement
+{
+    std::vector<Player*> libres;
+    std::string raisons;
+    uint32 trop = 0;    // libres mais de niveau superieur au joueur
+    uint32 total = 0;   // gladiateurs de l'option
+};
+
+Recensement Recenser(Player* joueur)
+{
+    Recensement r;
+    std::vector<uint32> const liste = Gladiateurs();
+    r.total = uint32(liste.size());
+    for (uint32 g : liste)
+    {
+        Player* b = ObjectAccessor::FindPlayerByLowGUID(g);
+        if (char const* raison = RefusGladiateur(g, b))
+            r.raisons += (r.raisons.empty() ? "" : ",") + std::to_string(g) + ":" + raison;
+        else if (b->GetLevel() > joueur->GetLevel())
+        {
+            ++r.trop;
+            r.raisons += (r.raisons.empty() ? "" : ",") + std::to_string(g) + ":niveau_" + std::to_string(b->GetLevel());
+        }
+        else
+            r.libres.push_back(b);
+    }
+    return r;
+}
+
+// Rotation des classes adverses (10/10 soir) : par joueur humain (guid bas), classe -> Maintenant() de la derniere
+// inscription contre elle. Memoire du processus (un redemarrage la vide : tout redevient « jamais affronte »).
+// FIL MONDE SEUL (Inscrire), sans verrou. Borne : 21 entrees au plus par joueur inscrit au moins une fois.
+std::unordered_map<uint32, std::unordered_map<uint8, uint32>> rencontres;
+
+// La classe que `joueurGuid` a affrontee le MOINS recemment parmi celles de `libres` (jamais = 0), au sort entre
+// ex aequo. 0 si `libres` est vide.
+uint8 ClasseParRotation(uint32 joueurGuid, std::vector<Player*> const& libres)
+{
+    std::vector<uint8> classes;
+    for (Player* b : libres)
+        if (std::find(classes.begin(), classes.end(), b->getClass()) == classes.end())
+            classes.push_back(b->getClass());
+    if (classes.empty())
+        return 0;
+    auto const it = rencontres.find(joueurGuid);
+    auto Derniere = [&](uint8 c) -> uint32
+    {
+        if (it == rencontres.end())
+            return 0;
+        auto const jt = it->second.find(c);
+        return jt == it->second.end() ? 0 : jt->second;
+    };
+    uint32 plusAncienne = Derniere(classes.front());
+    for (uint8 c : classes)
+        plusAncienne = std::min(plusAncienne, Derniere(c));
+    classes.erase(std::remove_if(classes.begin(), classes.end(), [&](uint8 c) { return Derniere(c) != plusAncienne; }),
+                  classes.end());
+    return classes[urand(0, uint32(classes.size()) - 1)];
 }
 
 }  // namespace
 
 // ------------------------------------------------------------------ inscription
 
-bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::string& refus)
+bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::string& refus, uint8 classeVoulue)
 {
     refus.clear();
     if (!joueur)
@@ -651,30 +808,24 @@ bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::stri
 
     // Le gladiateur. On ne fait JAMAIS descendre un bot de niveau (revue du 10/10 : la
     // descente n'est pas prouvee -- ClearSpells ne fait rien pour une classe CoA, et
-    // SynchronizeProgression garde l'AscensionLiveBaseline). On tire donc, parmi les
-    // libres de niveau <= celui du joueur, ceux du PLUS HAUT niveau (au sort entre
-    // egaux), et on le monte au niveau du joueur. Les gladiateurs montent ainsi avec
-    // les joueurs : la reserve se renouvelle un jour (gladiateurs.py --constituer).
-    std::vector<uint32> const liste = Gladiateurs();
-    std::vector<Player*> libres;
-    std::string raisons;
-    uint32 trop = 0;
-    for (uint32 g : liste)
-    {
-        Player* b = ObjectAccessor::FindPlayerByLowGUID(g);
-        if (char const* r = RefusGladiateur(g, b))
-            raisons += (raisons.empty() ? "" : ",") + std::to_string(g) + ":" + r;
-        else if (b->GetLevel() > joueur->GetLevel())
-        {
-            ++trop;
-            raisons += (raisons.empty() ? "" : ",") + std::to_string(g) + ":niveau_" + std::to_string(b->GetLevel());
-        }
-        else
-            libres.push_back(b);
-    }
+    // SynchronizeProgression garde l'AscensionLiveBaseline). Parmi les libres de niveau <= celui
+    // du joueur : d'abord la CLASSE (demandee au dialogue, sinon la rotation : celle que ce joueur
+    // a affrontee le moins recemment), puis, dans cette classe, les PLUS HAUTS (au sort entre
+    // egaux), montes au niveau du joueur. Les gladiateurs montent ainsi avec les joueurs : la
+    // reserve se renouvelle un jour (gladiateurs.py --constituer).
+    Recensement rec = Recenser(joueur);
+    std::vector<Player*>& libres = rec.libres;
+    std::string const& raisons = rec.raisons;
+    std::string const detailRecensement =
+        "gladiateurs=" + std::to_string(rec.total) + " raisons=" + (raisons.empty() ? "-" : raisons);
     if (libres.empty())
-        return Refuser(trop ? "aucun_gladiateur_au_niveau" : "aucun_gladiateur",
-                       "gladiateurs=" + std::to_string(liste.size()) + " raisons=" + (raisons.empty() ? "-" : raisons));
+        return Refuser(rec.trop ? "aucun_gladiateur_au_niveau" : "aucun_gladiateur", detailRecensement);
+    uint32 const libresToutes = uint32(libres.size());
+    uint8 const classe = classeVoulue ? classeVoulue : ClasseParRotation(jg, libres);
+    libres.erase(std::remove_if(libres.begin(), libres.end(), [classe](Player* b) { return b->getClass() != classe; }),
+                 libres.end());
+    if (libres.empty())
+        return Refuser("classe_indisponible", "classe=" + std::to_string(classe) + " " + detailRecensement);
     uint8 haut = 0;
     for (Player* b : libres)
         haut = std::max(haut, b->GetLevel());
@@ -691,8 +842,9 @@ bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::stri
         idMatch = prochainId++;
     }
     LOG_INFO("playerbots", "coa arene1v1: inscription id={} joueur={} nom={} niveau={} origine={} gladiateur={} nom_gladiateur={}"
-             " libres={}/{} tranche={}", idMatch, jg, joueur->GetName(), uint32(joueur->GetLevel()), origine, bg,
-             bot->GetName(), uint32(libres.size()), uint32(liste.size()), uint32(tranche->GetBracketId()));
+             " classe={} choix={} libres={}/{} tranche={}", idMatch, jg, joueur->GetName(), uint32(joueur->GetLevel()),
+             origine, bg, bot->GetName(), uint32(classe), classeVoulue ? "demande" : "rotation", libresToutes, rec.total,
+             uint32(tranche->GetBracketId()));
 
     Preparer(bot, joueur, idMatch);
 
@@ -729,6 +881,7 @@ bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::stri
     m.gladiateur = bg;
     m.nomJoueur = joueur->GetName();
     m.nomGladiateur = bot->GetName();
+    m.classe = classe;
     m.tranche = tranche->GetBracketId();
     m.inscritS = Maintenant();
     m.relanceS = m.inscritS;
@@ -740,8 +893,10 @@ bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::stri
     sBattlegroundMgr->ScheduleQueueUpdate(0, TYPE_1V1, FILE_1V1, BATTLEGROUND_AA, tranche->GetBracketId());
     LOG_INFO("playerbots", "coa arene1v1: mise_en_file id={} joueur={} gladiateur={} file={} type={} tranche={} slot_joueur={}",
              idMatch, jg, bg, CoaArene1v1::FILE_ARENE, uint32(TYPE_1V1), uint32(m.tranche), slotJ);
-    Dire(joueur, "Arène 1 contre 1 : votre adversaire, " + m.nomGladiateur +
-                     ", est prêt. Acceptez l'invitation quand elle s'affiche.");
+    // Rotation : cette classe passe en dernier pour ce joueur (inscription faite, quelle qu'en soit l'issue).
+    rencontres[jg][classe] = Maintenant();
+    Dire(joueur, "Arène 1 contre 1 : votre adversaire : " + m.nomGladiateur + ", " + NomClasse(classe) + ", niveau " +
+                     std::to_string(bot->GetLevel()) + ". Acceptez l'invitation quand elle s'affiche.");
     return true;
 }
 
@@ -854,12 +1009,29 @@ Verdict Examiner(Match m, uint32 maintenant)
         uint32 const ecoule = m.finS && maintenant >= m.finS ? maintenant - m.finS : 0;
         // Filet : le coeur expulse a TIME_TO_AUTOREMOVE (120 s) ; au-dela du delai + 20 s, on oublie
         // le match sans plus rien retenir (RetenirDepart ne trouve plus rien).
-        if (!gDedans || ecoule > delai + 20)
+        // Revue D5 : a l'oubli, un gladiateur ENCORE dans l'arene reste apaise (plus rien n'est retenu : departLibre)
+        // jusqu'a sa sortie -- expulsion du coeur a 120 s ; filet a 150 s.
+        if (gDedans && ecoule > delai + 20 && ecoule <= 150)
         {
-            if (gDedans)
+            if ((ecoule - delai - 21) % 30 == 0)
                 LOG_INFO("playerbots", "coa arene1v1: depart id={} gladiateur={} raison=oubli essais={} ecoule_s={}", m.id,
                          m.gladiateur, m.essaisDepart, ecoule);
-            // Sortie, oubli ou deconnexion : le drapeau de la retenue tombe (hors ligne : rien a lever).
+            if (!m.departLibre)
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                for (Match& x : matchs)
+                    if (x.id == m.id)
+                        x.departLibre = true;
+                m.departLibre = true;
+            }
+            Apaiser(g, m.apaise);
+            v.maj = m;
+            return v;
+        }
+        if (!gDedans || ecoule > 150)
+        {
+            // Sortie, arene detruite, deconnexion (ou filet de 150 s) : drapeaux et strategies de la retenue rendus
+            // (hors ligne : rien a lever).
             if (m.apaise)
                 Desapaiser(m.gladiateur);
             v.retirer = true;
@@ -867,11 +1039,11 @@ Verdict Examiner(Match m, uint32 maintenant)
         }
         bool const jDedans = j && j->GetBattleground() == bg;
         bool const echu = !delai || ecoule >= delai;
-        if (bg->GetStatus() == STATUS_WAIT_LEAVE && !echu && jDedans)
-        {
-            Apaiser(g);
-            m.apaise = true;
-        }
+        // Pacifique a chaque tick tant qu'il est dans l'arene terminee, depart compris : LeaveBG recompose ses
+        // strategies (ResetStrategies) avant que la teleportation ne l'ait sorti ; les drapeaux tiennent jusqu'a la
+        // sortie, constatee au tick suivant (!gDedans -> Desapaiser).
+        if (bg->GetStatus() == STATUS_WAIT_LEAVE)
+            Apaiser(g, m.apaise);
         if (bg->GetStatus() == STATUS_WAIT_LEAVE && (echu || !jDedans))
         {
             // D'abord rendre le depart libre (sous verrou : RetenirDepart le lit), PUIS appeler
@@ -885,11 +1057,6 @@ Verdict Examiner(Match m, uint32 maintenant)
             }
             m.departLibre = true;
             ++m.essaisDepart;
-            if (m.apaise)
-            {
-                Desapaiser(m.gladiateur);
-                m.apaise = false;
-            }
             if (PlayerbotAI* ia = GET_PLAYERBOT_AI(g))
                 BGStatusAction::LeaveBG(ia);
             if (m.essaisDepart == 1 || m.essaisDepart % 10 == 0)
@@ -1216,8 +1383,9 @@ public:
             // Forfait : l'adversaire n'est jamais entre (CheckWinConditions a l'ouverture).
             bool const forfait = !m.joueurEntre || !m.gladiateurEntre;
             LOG_INFO("playerbots", "coa arene1v1: fin id={} instance={} vainqueur={} guid_vainqueur={} joueur={} nom_joueur={}"
-                     " gladiateur={} nom_gladiateur={} forfait={} duree_combat_s={} duree_totale_s={}", m.id, m.instance,
-                     qui, vainqueur, m.joueur, m.nomJoueur, m.gladiateur, m.nomGladiateur, forfait ? 1 : 0,
+                     " gladiateur={} nom_gladiateur={} classe_gladiateur={} forfait={} duree_combat_s={} duree_totale_s={}",
+                     m.id, m.instance, qui, vainqueur, m.joueur, m.nomJoueur, m.gladiateur, m.nomGladiateur,
+                     uint32(m.classe), forfait ? 1 : 0,
                      m.debutCombatS ? maintenant - m.debutCombatS : 0, maintenant - m.inscritS);
             m.etat = Etat::FINI;
             m.finS = maintenant;
@@ -1287,21 +1455,51 @@ public:
         player->PrepareGossipMenu(creature, creature->GetGossipMenuId(), true);
         AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Arène 1 contre 1 (contre un gladiateur à votre niveau)",
                          GOSSIP_EXPEDITEUR, GOSSIP_ACTION_INSCRIRE);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Arène 1 contre 1 : choisir la classe adverse",
+                         GOSSIP_EXPEDITEUR, GOSSIP_ACTION_CHOISIR);
         player->SendPreparedGossip(creature);
         return true;
     }
 
-    // FIL MONDE (CMSG_GOSSIP_SELECT_OPTION, PROCESS_THREADUNSAFE).
-    bool CanCreatureGossipSelect(Player* player, Creature* /*creature*/, uint32 sender, uint32 action) override
+    // FIL MONDE (CMSG_GOSSIP_SELECT_OPTION, PROCESS_THREADUNSAFE) : Inscrire et le recensement y lisent les
+    // gladiateurs (autres joueurs) et les files.
+    bool CanCreatureGossipSelect(Player* player, Creature* creature, uint32 sender, uint32 action) override
     {
-        if (sender != GOSSIP_EXPEDITEUR)
+        if (sender != GOSSIP_EXPEDITEUR || !player)
             return false;
-        CloseGossipMenuFor(player);
-        if (action == GOSSIP_ACTION_INSCRIRE)
+        if (action == GOSSIP_ACTION_CHOISIR)
         {
-            std::string refus;
-            CoaArene1v1::Inscrire(player, "dialogue", refus);
+            // Sous-menu : les classes pour lesquelles un gladiateur libre de niveau <= au joueur existe, maintenant.
+            // Aucune : explication au joueur, menu ferme. Option eteinte entre-temps : idem (Inscrire refuserait).
+            bool const actif = sPlayerbotAIConfig.arene1v1Enabled;
+            Recensement const rec = actif ? Recenser(player) : Recensement();
+            std::map<uint8, uint32> parClasse;
+            for (Player* b : rec.libres)
+                ++parClasse[b->getClass()];
+            if (parClasse.empty() || !creature)
+            {
+                CloseGossipMenuFor(player);
+                Dire(player, Explication(!actif ? "desactive" : rec.trop ? "aucun_gladiateur_au_niveau" : "aucun_gladiateur"));
+                LOG_INFO("playerbots", "coa arene1v1: sous_menu joueur={} classes=0 actif={}", player->GetGUID().GetCounter(),
+                         sPlayerbotAIConfig.arene1v1Enabled ? 1 : 0);
+                return true;
+            }
+            ClearGossipMenuFor(player);
+            for (auto const& [classe, n] : parClasse)
+                AddGossipItemFor(player, GOSSIP_ICON_BATTLE,
+                                 NomClasse(classe) + " (" + std::to_string(n) + (n > 1 ? " libres)" : " libre)"),
+                                 GOSSIP_EXPEDITEUR, GOSSIP_ACTION_CLASSE + classe);
+            SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature);
+            return true;
         }
+        CloseGossipMenuFor(player);
+        std::string refus;
+        if (action == GOSSIP_ACTION_INSCRIRE)
+            CoaArene1v1::Inscrire(player, "dialogue", refus);
+        else if (action > GOSSIP_ACTION_CLASSE && action - GOSSIP_ACTION_CLASSE < MAX_CLASSES &&
+                 IsAscensionClass(uint8(action - GOSSIP_ACTION_CLASSE)))
+            // Re-verifiee par Inscrire : le gladiateur a pu etre pris ou partir depuis l'affichage du sous-menu.
+            CoaArene1v1::Inscrire(player, "dialogue_classe", refus, uint8(action - GOSSIP_ACTION_CLASSE));
         return true;
     }
 };

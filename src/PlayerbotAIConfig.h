@@ -862,6 +862,13 @@ public:
     // Secondes pendant lesquelles le gladiateur reste visible dans l'arene apres la fin tant
     // que le joueur y est (defaut 30, 0 = depart immediat, borne a 110 : le coeur expulse a 120 s).
     uint32 arene1v1DelaiDepartS;
+    // CoA (10/10/2026 soir) : classes CoA (12-32) admises comme gladiateurs, ids separes par des
+    // virgules ; vide = toutes. Lue au FIL MONDE seul (inscription, dialogue).
+    std::string arene1v1Classes;
+    // Trace de combat des gladiateurs (« coa arene trace: », CoaAreneIa.inc) : une ligne par
+    // tentative de sort et une par seconde, 5 lignes/s au plus par gladiateur. Defaut 1 : elle ne
+    // concerne que les gladiateurs engages dans une arene 1v1 en cours.
+    bool arene1v1Trace;
 
 private:
     PlayerbotAIConfig() = default;

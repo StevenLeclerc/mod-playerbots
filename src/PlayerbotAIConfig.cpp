@@ -1035,6 +1035,8 @@ bool PlayerbotAIConfig::Initialize()
     arene1v1MaintenirEnLigne = sConfigMgr->GetOption<bool>("AiPlayerbot.Arene1v1.MaintenirEnLigne", true);
     // TIME_TO_AUTOREMOVE (Battleground.h) vaut 120 s : au-dela, le coeur expulse de lui-meme.
     arene1v1DelaiDepartS = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Arene1v1.DelaiDepartS", 30), 110);
+    arene1v1Classes = sConfigMgr->GetOption<std::string>("AiPlayerbot.Arene1v1.Classes", "");
+    arene1v1Trace = sConfigMgr->GetOption<bool>("AiPlayerbot.Arene1v1.Trace", true);
     // Sous 10, PvPDifficulty.dbc n'a pas de tranche d'arene (premiere tranche 10-14).
     if (arene1v1NiveauMin < 10)
         arene1v1NiveauMin = 10;

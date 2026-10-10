@@ -8,6 +8,7 @@
 #include "CoaLayaOracle.h"
 #include "CoaAiObjectContext.h"
 #include "CoaChasse.h"
+#include "CoaArene1v1.h"
 #include "CoaRegistreCombat.h"
 
 #include "Action.h"
@@ -27,6 +28,7 @@
 #include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "ServerFacade.h"
+#include "SmartEnum.h"
 #include "SpellMgr.h"
 #include "Strategy.h"
 #include "Trigger.h"
@@ -607,6 +609,9 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
         // swapped spell are the replacement's. Reading only the listed id had this answer yes
         // on a spell CastFirst then refuses to try, and the action ran for nothing.
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+        // Same CasterAuraSpell test as CastFirst (10/10 soir) : a spell CastFirst now skips must not count as ready.
+        if (info->CasterAuraSpell && !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+            continue;
         if (!bot->HasSpellCooldown(info->Id) && !IsBenched(benched, spell.info->Id, now) &&
             !IsBenched(benched, info->Id, now))
             return true;
@@ -1022,6 +1027,11 @@ void RecordFailure(uint8 kind, uint32 spellId, uint16 reason);
 // le coeur refusera a cause de l'etat du lanceur. Faux sans AiPlayerbot.CoaArene.IaCommune.
 bool CoaAreneFiltreEtatActif(PlayerbotAI* botAI, Player* bot);
 bool CoaAreneBloqueParEtat(Player* bot, SpellInfo const* info);
+// Trace des gladiateurs d'arene 1v1 (AiPlayerbot.Arene1v1.Trace, CoaAreneIa.inc) : une ligne par tentative de sort.
+// `motif` : refus du moteur (nullptr : `resultat`, le SpellCastResult du coeur, fait foi).
+bool CoaAreneTraceActive(PlayerbotAI* botAI, Player* bot);
+void CoaAreneTracerSort(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target, SpellCastResult resultat,
+                        char const* motif);
 
 // Casts the first ability of the list that passes the strict check on the target. Returns it,
 // or nullptr when none went off. With a usage kind, why each ability failed is counted.
@@ -1032,6 +1042,8 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
     auto& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
     // CoaArene L0 : un seul test par appel, faux hors engagement ou option eteinte.
     bool const filtreEtat = !spells.empty() && CoaAreneFiltreEtatActif(botAI, bot);
+    // Trace d'arene 1v1 : un test par appel ; faux (InArena) pour tout bot hors arene.
+    bool const trace = !spells.empty() && CoaAreneTraceActive(botAI, bot);
 
     for (Usable const& spell : spells)
     {
@@ -1049,6 +1061,15 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
 
         // A spell on cooldown would only fail with SPELL_FAILED_NOT_READY.
         if (bot->HasSpellCooldown(info->Id))
+            continue;
+
+        // CoA (10/10/2026 soir, arene 1v1) : un sort qui exige une aura du lanceur absente (CasterAuraSpell : les
+        // consommateurs d'Advantage du Ranger -- Skullpiercer, Serrated Shot, Assault, Uncover Weakness -- ou les
+        // techniques d'une forme) serait refuse SPELL_FAILED_CASTER_AURASTATE, que IsLastingFailure met au banc
+        // 20 s : le Ranger perdait son burst 20 s chaque fois que le tourniquet le tentait a 0 charge. Meme test
+        // que Spell::CheckCast (Spell.cpp:5856), sans banc : le sort repart des que l'aura est la.
+        if (info->CasterAuraSpell &&
+            !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
             continue;
 
         // The global cooldown blocks every spell alike: try again on a later tick.
@@ -1084,6 +1105,8 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
                 bot->StopMoving();
                 if (usage != 255)
                     RecordFailure(usage, info->Id, FAILURE_MOVING);
+                if (trace)
+                    CoaAreneTracerSort(botAI, bot, info, target, check, "en_mouvement");
                 continue;
             }
 
@@ -1093,7 +1116,14 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             bool const sitting = !bot->IsStandState();
             bool const casting = bot->IsNonMeleeSpellCast(false, true, true);
             if (botAI->CastSpell(spell.info->Id, target))
+            {
+                if (trace)
+                    CoaAreneTracerSort(botAI, bot, info, target, SPELL_CAST_OK, nullptr);
                 return spell.info;
+            }
+            if (trace)
+                CoaAreneTracerSort(botAI, bot, info, target, check,
+                                   sitting ? "assis" : casting ? "incantation_en_cours" : "refus_castspell");
 
             // Refused for a reason the check cannot see (CoA spell scripts check their own
             // resources when the cast is prepared): leave it aside briefly so the next ability
@@ -1115,6 +1145,8 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
 
         if (usage != 255)
             RecordFailure(usage, info->Id, uint16(check));
+        if (trace)
+            CoaAreneTracerSort(botAI, bot, info, target, check, nullptr);
     }
 
     return nullptr;

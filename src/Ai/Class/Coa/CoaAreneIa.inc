@@ -79,10 +79,18 @@ constexpr uint32 CoaAreneFenetreParDefautMs = 2 * IN_MILLISECONDS;
 // Retour a portee et en vue : un essai par seconde au plus, une ligne de journal toutes les 5 s au plus.
 constexpr uint32 CoaAreneRetourReessaiMs = IN_MILLISECONDS;
 constexpr uint32 CoaAreneRetourJournalMs = 5 * IN_MILLISECONDS;
-// Burst a pile pleine (revue du 10/10 soir) : seulement cible ralentie/controlee ou sous 60 % ; au-dela de 8 s
+// Burst a pile pleine (revue du 10/10 soir) : seulement cible ralentie/controlee ou sous 60 % ; au-dela de 4 s
 // de pile pleine sans fenetre, chaque generateur est perdu (pas de 6e charge) : on depense quand meme.
+// 4 s et non plus 8 (lot 3, demande du commanditaire) : a ~40 de Focus par generateur, 8 s de pile tenue
+// valaient deux generateurs perdus, pour une fenetre qui ne vient souvent jamais contre une cible a distance.
 constexpr float CoaAreneBurstPvCible = 60.0f;
-constexpr uint32 CoaArenePileTenueMaxMs = 8 * IN_MILLISECONDS;
+constexpr uint32 CoaArenePileTenueMaxMs = 4 * IN_MILLISECONDS;
+// Defensif d'arene (lot 3) : sous 50 % de vie, ou apres une perte d'au moins 20 points en 2 a 4 s (burst subi).
+constexpr float CoaAreneDefensifPv = 50.0f;
+constexpr float CoaAreneDefensifBurstPv = 20.0f;
+constexpr uint32 CoaAreneDefensifReleveMs = 2 * IN_MILLISECONDS;
+// Trace des gladiateurs : lignes par seconde et par bot, au plus (ligne « tick » comprise).
+constexpr uint8 CoaAreneTraceParSeconde = 5;
 // L2, piliers : seuil de vie, duree max d'une cachette, pause entre deux, cumul par engagement, frequence des
 // recherches et debit du journal.
 constexpr float CoaArenePilierPvBot = 40.0f;
@@ -122,7 +130,8 @@ float CoaAreneDistanceCombat(Unit const* a, Unit const* b)
 // minimale, plus petite portee maximale]. Repli 5-30 (Quick Shot) si le kit n'en dit rien.
 // Revue M1 : un utilitaire court (Dust Toss, 0-15, sans effet de degats) ramenait `haut` a 15 et la distance
 // visee a 8 yd au lieu de 23. Seuls comptent les sorts qui portent la rotation a distance.
-void CoaArenePlage(PlayerbotAI* botAI, Player* bot, float& bas, float& haut)
+// Rend vrai si la plage vient de sorts reels, faux si c'est le repli 5-30 (revue D4).
+bool CoaArenePlage(PlayerbotAI* botAI, Player* bot, float& bas, float& haut)
 {
     bas = 0.0f;
     haut = 0.0f;
@@ -142,7 +151,9 @@ void CoaArenePlage(PlayerbotAI* botAI, Player* bot, float& bas, float& haut)
     {
         bas = 5.0f;
         haut = 30.0f;
+        return false;
     }
+    return true;
 }
 
 // Ou reculer, en distance de combat : 7 yd sous la portee maximale (23 pour 5-30), jamais a moins de 8 yd de la
@@ -355,6 +366,10 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
     {
         uint32 const tirage = sPlayerbotAIConfig.coaAreneTirage;
         etat = CoaAreneEtat();
+        // Revue D3 : releve de vie du defensif reparti de zero (deja vrai par les valeurs par defaut ; dit ici pour
+        // qu'un champ ajoute a l'etat ne le casse pas en silence) -- pas de faux « burst subi » au match suivant.
+        etat.pvRefMs = 0;
+        etat.pvRef = etat.pvPrec = bot->GetHealthPct();
         etat.majMs = maintenant ? maintenant : 1;
         etat.actif = true;
         etat.cadre = cadre;
@@ -371,6 +386,13 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
         return etat;
 
     etat.vuCeTick = cadre != COA_ARENE_AUCUN && !preparation;
+    // Releve de vie pour le defensif (burst subi) : deux releves espaces de 2 s.
+    if (!etat.pvRefMs || getMSTimeDiff(etat.pvRefMs, maintenant) >= CoaAreneDefensifReleveMs)
+    {
+        etat.pvPrec = etat.pvRefMs ? etat.pvRef : bot->GetHealthPct();
+        etat.pvRef = bot->GetHealthPct();
+        etat.pvRefMs = maintenant ? maintenant : 1;
+    }
     // La pile tenue ne se compte que pendant l'engagement vu (sinon une pile pleine d'avant ferait partir le burst).
     if (!etat.vuCeTick)
         etat.pilePleineDepuisMs = 0;
@@ -704,6 +726,142 @@ void CoaAreneNoterBurst(PlayerbotAI* botAI, Player* bot, Unit* cible, CoaAreneBu
                                         cible ? cible->GetHealthPct() : -1.0f));
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Trace des gladiateurs d'arene 1v1 (lot 3, 10/10 soir ; AiPlayerbot.Arene1v1.Trace, defaut 1).
+//
+// Pourquoi : le combat du 10/10 a 21:12 (Paris) n'a laisse que deux lignes (engagement, bilan) ; on ne savait ni
+// quels sorts le gladiateur tentait, ni pourquoi ils ne partaient pas. Ici : une ligne par tentative de sort de
+// CastFirst (OK, ou refus avec le SpellCastResult du coeur ou le motif du moteur), et une par seconde avec la
+// derniere action reussie du moteur et la cible courante.
+//
+// Cout : hors arene, un test InArena() par appel de CastFirst. En arene, la decision « gladiateur engage dans une
+// arene 1v1 » est prise UNE fois par instance (GladiateurEngage prend un verrou) et gardee dans l'etat du bot.
+// Debit : CoaAreneTraceParSeconde lignes par seconde et par bot au plus ; le surplus est compte (`omises=`).
+// Fil : celui de l'IA du bot ; ne lit que le bot, sa cible et l'etat du bot (P-137).
+// ---------------------------------------------------------------------------------------------------------------
+bool CoaAreneTraceActive(PlayerbotAI* botAI, Player* bot)
+{
+    if (!sPlayerbotAIConfig.arene1v1Trace || !bot || !bot->InArena())
+        return false;
+    Battleground* bg = bot->GetBattleground();
+    if (!bg || bg->GetStatus() != STATUS_IN_PROGRESS)
+        return false;
+    CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+    if (etat.traceInstance != bg->GetInstanceID())
+    {
+        etat.traceInstance = bg->GetInstanceID();
+        etat.traceOui = bg->isArena() && bg->GetArenaType() == CoaArene1v1::TYPE_ARENE &&
+                        CoaArene1v1::GladiateurEngage(bot->GetGUID().GetCounter());
+        etat.traceAuraPile = 0;
+        if (etat.traceOui)
+            for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16) { return true; }))
+                if ((etat.traceAuraPile = CoaAreneAuraConsommee(bot, spell.info)))
+                    break;
+    }
+    return etat.traceOui;
+}
+
+// Debit : vrai si une ligne peut s'ecrire dans cette seconde ; `omises` rend le nombre tu depuis la derniere.
+bool CoaAreneTraceDebit(CoaAreneEtat& etat, uint32& omises)
+{
+    uint32 const seconde = getMSTime() / IN_MILLISECONDS;
+    if (seconde != etat.traceSeconde)
+    {
+        etat.traceSeconde = seconde;
+        etat.traceLignes = 0;
+    }
+    if (etat.traceLignes >= CoaAreneTraceParSeconde)
+    {
+        ++etat.traceOmises;
+        return false;
+    }
+    ++etat.traceLignes;
+    omises = etat.traceOmises;
+    etat.traceOmises = 0;
+    return true;
+}
+
+uint32 CoaAreneTracePile(Player* bot, CoaAreneEtat const& etat)
+{
+    Aura const* pile = etat.traceAuraPile ? bot->GetAura(etat.traceAuraPile) : nullptr;
+    return pile ? pile->GetStackAmount() : 0;
+}
+
+void CoaAreneTracerSort(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target, SpellCastResult resultat,
+                        char const* motif)
+{
+    if (!info)
+        return;
+    CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+    uint32 omises = 0;
+    if (!CoaAreneTraceDebit(etat, omises))
+        return;
+    std::string raison = "-";
+    bool const ok = resultat == SPELL_CAST_OK && !motif;
+    if (motif)
+        raison = motif;
+    else if (!ok)
+    {
+        // EnumUtils leve une exception sur une valeur hors de l'enumeration (enuminfo_SharedDefines.cpp) : le
+        // nombre brut alors.
+        try { raison = EnumUtils::ToConstant(resultat); }
+        catch (...) { raison = std::to_string(uint32(resultat)); }
+    }
+    std::string nom = (info->SpellName[0] && *info->SpellName[0]) ? info->SpellName[0] : "?";
+    std::replace(nom.begin(), nom.end(), ' ', '_');
+    LOG_INFO("playerbots.coa", "coa arene trace: guid={} sort={} nom={} resultat={} raison={} dist={:.1f} pv_bot={:.0f}"
+             " pv_cible={:.0f} pile_advantage={} omises={}", bot->GetGUID().GetCounter(), info->Id, nom,
+             ok ? "OK" : "refus", raison, target && target != bot ? bot->GetExactDist2d(target) : 0.0f,
+             bot->GetHealthPct(), target ? target->GetHealthPct() : -1.0f, CoaAreneTracePile(bot, etat), omises);
+}
+
+// La derniere action REUSSIE du moteur courant, lue dans son journal d'actions (Engine::LogAction : « |A:<nom> -
+// OK », 512 caracteres au plus ; rempli parce que AiPlayerbot.LogInGroupOnly = 0 en service). « - » sinon.
+std::string CoaAreneDerniereAction(PlayerbotAI* botAI)
+{
+    std::string const journal = botAI->HandleRemoteCommand("action");
+    size_t pos = journal.size();
+    while (pos > 0)
+    {
+        size_t const a = journal.rfind("|A:", pos - 1);
+        if (a == std::string::npos)
+            break;
+        size_t fin = journal.find('|', a + 1);
+        if (fin == std::string::npos)
+            fin = journal.size();
+        std::string const entree = journal.substr(a + 3, fin - a - 3);
+        if (entree.size() > 5 && entree.compare(entree.size() - 5, 5, " - OK") == 0)
+            return entree.substr(0, entree.size() - 5);
+        pos = a;
+    }
+    return "-";
+}
+
+// Une ligne par seconde (appelee a chaque tour du moteur par CoaAreneMultiplier::ObserveQueue).
+void CoaAreneTracerTick(PlayerbotAI* botAI, Player* bot)
+{
+    if (!CoaAreneTraceActive(botAI, bot))
+        return;
+    CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+    uint32 const maintenant = getMSTime();
+    if (etat.traceTickMs && getMSTimeDiff(etat.traceTickMs, maintenant) < IN_MILLISECONDS)
+        return;
+    uint32 omises = 0;
+    if (!CoaAreneTraceDebit(etat, omises))
+        return;
+    etat.traceTickMs = maintenant ? maintenant : 1;
+    Unit* cible = botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
+    std::string action = CoaAreneDerniereAction(botAI);
+    std::replace(action.begin(), action.end(), ' ', '_');
+    LOG_INFO("playerbots.coa", "coa arene trace: guid={} tick action={} moteur={} cible={} cible_adversaire={} dist={:.1f}"
+             " vue={} pv_bot={:.0f} pv_cible={:.0f} pile_advantage={} bouge={} omises={}", bot->GetGUID().GetCounter(),
+             action, botAI->GetState() == BOT_STATE_COMBAT ? "combat" : "hors_combat",
+             cible ? cible->GetGUID().GetCounter() : 0, CoaAreneEstAdversaire(etat, cible) ? 1 : 0,
+             cible ? bot->GetExactDist2d(cible) : -1.0f, cible && bot->IsWithinLOSInMap(cible) ? 1 : 0,
+             bot->GetHealthPct(), cible ? cible->GetHealthPct() : -1.0f, CoaAreneTracePile(bot, etat),
+             bot->isMoving() ? 1 : 0, omises);
+}
+
 // Les sorts d'attaque du bot qui creent de la distance, prets a partir sur cette cible maintenant : ni en
 // recharge, ni au banc, ni reserves aux cibles hors combat (Blackjack), ni refuses ici (DropUncastableHere).
 // Sans ce tri, un Dust Toss en recharge gardait le declencheur actif et l'action echouait a chaque tick.
@@ -866,6 +1024,24 @@ void CoaArenePilierSuivre(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, U
     }
 }
 
+// Lot 3, « il se balade » : un bot a distance qui a l'adversaire pour cible, EN VUE et dans sa plage de tir (hors
+// portee minimale), n'a aucune raison de bouger -- il reste plante et tire.
+bool CoaArenePlante(PlayerbotAI* botAI, Player* bot, CoaAreneEtat const& etat)
+{
+    if (GetCoaStyle(bot) == CoaStyle::Melee)
+        return false;
+    Unit* adv = CoaAreneAdversaireVivant(bot, etat);
+    if (!adv || botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get() != adv)
+        return false;
+    float bas = 0.0f, haut = 0.0f;
+    // Revue D4 : seulement une plage lue sur de vrais sorts a distance (>= 25 yd) ; le repli 5-30 d'un kit sans
+    // tir n'immobilise personne.
+    if (!CoaArenePlage(botAI, bot, bas, haut))
+        return false;
+    float const d = CoaAreneDistanceCombat(bot, adv);
+    return d >= bas + 1.0f && d <= haut - 1.0f && bot->IsWithinLOSInMap(adv);
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Multiplicateur : L0 (repas, boisson, suggestions, monture) et, pour le Ranger, la fuite amont et ce qui
 // casserait un recul en cours.
@@ -891,6 +1067,16 @@ public:
             // « check mount state » monte ET descend : on ne lui laisse que la descente.
             if (nom == "check mount state" && !bot->IsMounted())
                 return 0.0f;
+            // Lot 3 (« il se balade ») : en arene ou en duel, un bot a distance en vue de son adversaire et dans sa
+            // plage de tir reste plante. Aucun de ces deplacements n'a alors d'objet : rapprocher (« reach spell »,
+            // « reach melee »), ArenaTactics (repli au centre, poursuite hors de vue), « move random », « flee » amont.
+            // Le test (portee, ligne de vue) n'est paye que pour ces noms. Le recul, le retour et la cachette de L1/L2
+            // ont leurs propres declencheurs et ne sont pas touches.
+            if ((etat.cadre == COA_ARENE_ARENE || etat.cadre == COA_ARENE_DUEL) && etat.vuCeTick &&
+                (nom == "reach spell" || nom == "reach melee" || nom == "arena tactics" || nom == "move random" ||
+                 nom == "flee") &&
+                CoaArenePlante(botAI, bot, etat))
+                return 0.0f;
         }
 
         if (CoaAreneEstRangerDistance(bot))
@@ -914,11 +1100,41 @@ public:
         }
         return 1.0f;
     }
+
+    // Une fois par tour du moteur : la ligne « tick » de la trace des gladiateurs (une par seconde au plus).
+    void ObserveQueue(std::list<ActionBasket*> const& /*candidats*/) override
+    {
+        CoaAreneTracerTick(botAI, bot);
+    }
 };
 
 // ---------------------------------------------------------------------------------------------------------------
 // Declencheurs.
 // ---------------------------------------------------------------------------------------------------------------
+
+// Lot 3 (« pas de defensifs ») : en arene ou en duel, sous 50 % de vie ou apres un burst subi (20 points perdus en
+// 2 a 4 s, vie sous 80 %). « coa defensive » n'etait arme que par « low health » (45 %, AiPlayerbot.LowHealth) a
+// ACTION_HIGH + 8 = 28, SOUS le recul (38), la rupture (36), le retour (37,5) et la cachette (39) : tant que l'un
+// d'eux avait quelque chose a faire, le defensif ne passait pas. Ici a 39,5, sous les interruptions (40), action
+// « coa arene defensif » (sorts KIND_DEFENSIVE seuls, revue D2). Rien de pret : inutile (isUseful), le tour continue.
+class CoaAreneDefensifTrigger : public Trigger
+{
+public:
+    CoaAreneDefensifTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa arene defensif") {}
+
+    bool IsActive() override
+    {
+        if (!sPlayerbotAIConfig.coaAreneIaCommune || !bot->IsAlive())
+            return false;
+        CoaAreneEtat const& etat = CoaAreneMaj(botAI, bot);
+        if (!CoaAreneL1Actif(etat) || (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL))
+            return false;
+        float const pv = bot->GetHealthPct();
+        if (pv < CoaAreneDefensifPv)
+            return true;
+        return pv < 80.0f && std::max(etat.pvPrec, etat.pvRef) - pv >= CoaAreneDefensifBurstPv;
+    }
+};
 
 // Au contact d'une cible qui peut suivre, et un sort de rupture est pret.
 class CoaAreneRuptureTrigger : public Trigger
@@ -1511,6 +1727,26 @@ public:
     }
 };
 
+// Defensif d'arene (revue D2) : les seuls sorts KIND_DEFENSIVE. Les soins sur soi restent a « coa defensive » (28) :
+// un soin a incantation passerait sinon devant le recul, le retour et la cachette, et CastFirst arreterait le bot.
+class CoaAreneDefensifAction : public Action
+{
+public:
+    CoaAreneDefensifAction(PlayerbotAI* botAI) : Action(botAI, "coa arene defensif") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        return RecordUsage(USAGE_DEFENSIVE, CastFirst(botAI, bot,
+            KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }), bot, USAGE_DEFENSIVE));
+    }
+
+    bool isUseful() override
+    {
+        return bot->IsAlive() && ClassHas(bot, KIND_DEFENSIVE) &&
+               HasReadyAbility(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; });
+    }
+};
+
 class CoaArenePreparationAction : public Action
 {
 public:
@@ -1548,6 +1784,8 @@ constexpr float CoaAreneRupturePriority = ACTION_MOVE + 6.0f;
 // sous le recul (38). Pilier 39 : devant le recul et le retour, sous les interruptions (40).
 constexpr float CoaAreneRetourPriority = ACTION_MOVE + 7.5f;
 constexpr float CoaArenePilierPriority = ACTION_MOVE + 9.0f;
+// Defensif 39,5 : devant la cachette, le recul, le retour et la rupture ; sous les interruptions (40).
+constexpr float CoaAreneDefensifPriority = ACTION_MOVE + 9.5f;
 
 class CoaAreneStrategy : public Strategy
 {
@@ -1569,6 +1807,7 @@ public:
         triggers.push_back(new TriggerNode("coa arene rupture", { NextAction("coa arene rupture", CoaAreneRupturePriority) }));
         triggers.push_back(new TriggerNode("coa arene retour", { NextAction("coa arene retour", CoaAreneRetourPriority) }));
         triggers.push_back(new TriggerNode("coa arene pilier", { NextAction("coa arene pilier", CoaArenePilierPriority) }));
+        triggers.push_back(new TriggerNode("coa arene defensif", { NextAction("coa arene defensif", CoaAreneDefensifPriority) }));
     }
 };
 
@@ -1592,6 +1831,7 @@ public:
         creators["coa arene preparation"] = &CoaAreneActionFactoryInternal::preparation;
         creators["coa arene retour"] = &CoaAreneActionFactoryInternal::retour;
         creators["coa arene pilier"] = &CoaAreneActionFactoryInternal::pilier;
+        creators["coa arene defensif"] = &CoaAreneActionFactoryInternal::defensif;
     }
 
 private:
@@ -1601,6 +1841,7 @@ private:
     static Action* preparation(PlayerbotAI* botAI) { return new CoaArenePreparationAction(botAI); }
     static Action* retour(PlayerbotAI* botAI) { return new CoaAreneRetourAction(botAI); }
     static Action* pilier(PlayerbotAI* botAI) { return new CoaArenePilierAction(botAI); }
+    static Action* defensif(PlayerbotAI* botAI) { return new CoaAreneDefensifAction(botAI); }
 };
 
 class CoaAreneTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -1614,6 +1855,7 @@ public:
         creators["coa arene preparation"] = &CoaAreneTriggerFactoryInternal::preparation;
         creators["coa arene retour"] = &CoaAreneTriggerFactoryInternal::retour;
         creators["coa arene pilier"] = &CoaAreneTriggerFactoryInternal::pilier;
+        creators["coa arene defensif"] = &CoaAreneTriggerFactoryInternal::defensif;
     }
 
 private:
@@ -1623,4 +1865,5 @@ private:
     static Trigger* preparation(PlayerbotAI* botAI) { return new CoaArenePreparationTrigger(botAI); }
     static Trigger* retour(PlayerbotAI* botAI) { return new CoaAreneRetourTrigger(botAI); }
     static Trigger* pilier(PlayerbotAI* botAI) { return new CoaArenePilierTrigger(botAI); }
+    static Trigger* defensif(PlayerbotAI* botAI) { return new CoaAreneDefensifTrigger(botAI); }
 };

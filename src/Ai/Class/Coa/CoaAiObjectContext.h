@@ -76,6 +76,18 @@ struct CoaAreneEtat
     uint32 dernierEssaiPilierMs = 0;
     uint32 dernierJournalPilierMs = 0;
     uint32 pilierCumulMs = 0;
+    // Trace des gladiateurs (AiPlayerbot.Arene1v1.Trace, 10/10 soir) : decision prise une fois par instance d'arene,
+    // debit borne par seconde (CoaAreneIa.inc, CoaAreneTraceActive).
+    uint32 traceInstance = 0;      // instance d'arene de la decision (0 : aucune)
+    bool traceOui = false;         // ce bot est un gladiateur engage dans cette arene 1v1
+    uint32 traceAuraPile = 0;      // aura a charges que le kit consomme (Advantage du Ranger) ; 0 : aucune
+    uint32 traceSeconde = 0;       // getMSTime() / 1000 de la fenetre de debit
+    uint8 traceLignes = 0;         // lignes ecrites dans cette seconde
+    uint32 traceOmises = 0;        // lignes tues par le debit depuis la derniere ecrite
+    uint32 traceTickMs = 0;        // derniere ligne « tick »
+    // Defensif d'arene (10/10 soir) : vie releve toutes les 2 s, pour reconnaitre un burst subi.
+    float pvRef = 100.0f, pvPrec = 100.0f;
+    uint32 pvRefMs = 0;
     // Bilan de l'engagement, ecrit a sa cloture.
     uint32 echantillons = 0, auContact = 0, dansLaPlage = 0;
     uint32 reculs = 0, reculsReussis = 0, ruptures = 0, bursts = 0, ouvertures = 0;
