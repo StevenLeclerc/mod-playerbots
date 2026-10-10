@@ -586,6 +586,8 @@ void AddSC_mercenary_rewards();
 // Ai/Coa/CoaDuelCommandScript.cpp : `.coa plein <nom>`, pour le banc de duels.
 void AddSC_coa_duel_commandscript();
 void AddSC_coa_directeur();
+// Ai/Coa/CoaArene1v1.cpp : arene 1 contre 1 contre un gladiateur (Arene1v1, 10/10/2026).
+void AddSC_coa_arene1v1();
 
 void AddPlayerbotsScripts()
 {
@@ -610,4 +612,5 @@ void AddPlayerbotsScripts()
     AddSC_mercenary_rewards();
     AddSC_coa_duel_commandscript();
     AddSC_coa_directeur();
+    AddSC_coa_arene1v1();
 }

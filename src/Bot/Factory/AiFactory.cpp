@@ -464,6 +464,13 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
         // Directeur recompose le chasseur a la pose et a la fin (BasculerComposition).
         if (CoaDirecteur::ChasseurDe(player->GetGUID().GetCounter()))
             engine->addStrategy("coa chasseur prime", false);
+
+        // CoA -- CoaArene IA, lots L0/L1 (10/10/2026, Ai/Class/Coa/CoaAreneIa.inc). Posee seulement si une option
+        // AiPlayerbot.CoaArene.IaCommune / IaRanger est armee : a 0, la composition est celle d'avant, a la lettre.
+        // Ses declencheurs et son multiplicateur ne mordent qu'en arene ou en duel en cours (et, sous
+        // CoaArene.MondeOuvert, en un contre un JcJ hors groupe et hors instance). Fabrique sans freres (P-130).
+        if (sPlayerbotAIConfig.coaAreneIaCommune || sPlayerbotAIConfig.coaAreneIaRanger)
+            engine->addStrategy("coa arene", false);
     }
 
     if (PlayerbotAI::IsTank(player, true))
@@ -647,8 +654,15 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
         default:
             // Conquest of Azeroth classes: party buffs, and tanks take the lead like the vanilla tanks.
             if (IsAscensionCustomClassId(player->getClass()))
+            {
                 nonCombatEngine->addStrategiesNoInit(GetCoaRole(player) == CoaRole::Tank ? "tank assist" : "dps assist",
                                                      "coa buff", nullptr);
+                // CoA -- CoaArene IA (10/10/2026) : le moteur non-combat aussi, pour L0 (repas, boisson, monture
+                // pendant l'engagement : c'est ici que « food » x23 a ete mesure le 02/10, apres un « drop target »),
+                // la furtivite de preparation et l'ouverture. Meme garde que dans le moteur de combat.
+                if (sPlayerbotAIConfig.coaAreneIaCommune || sPlayerbotAIConfig.coaAreneIaRanger)
+                    nonCombatEngine->addStrategy("coa arene", false);
+            }
             else
                 nonCombatEngine->addStrategy("dps assist", false);
             break;

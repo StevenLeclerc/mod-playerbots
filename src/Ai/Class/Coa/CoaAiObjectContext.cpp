@@ -11,7 +11,12 @@
 #include "CoaRegistreCombat.h"
 
 #include "Action.h"
+#include "Battleground.h"
 #include "CoaSpecialization.h"
+#include "MovementActions.h"
+#include "Multiplier.h"
+#include "ObjectAccessor.h"
+#include "Timer.h"
 #include "CombatStrategy.h"
 #include "DatabaseEnv.h"
 #include "Group.h"
@@ -1013,6 +1018,11 @@ bool IsLastingFailure(SpellCastResult result)
 }
 void RecordFailure(uint8 kind, uint32 spellId, uint16 reason);
 
+// CoaArene IA, lot L0 (CoaAreneIa.inc, inclus plus bas) : sous controle en arene ou en duel, ne pas tenter ce que
+// le coeur refusera a cause de l'etat du lanceur. Faux sans AiPlayerbot.CoaArene.IaCommune.
+bool CoaAreneFiltreEtatActif(PlayerbotAI* botAI, Player* bot);
+bool CoaAreneBloqueParEtat(Player* bot, SpellInfo const* info);
+
 // Casts the first ability of the list that passes the strict check on the target. Returns it,
 // or nullptr when none went off. With a usage kind, why each ability failed is counted.
 SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spells, Unit* target,
@@ -1020,6 +1030,8 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
 {
     time_t const now = time(nullptr);
     auto& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
+    // CoaArene L0 : un seul test par appel, faux hors engagement ou option eteinte.
+    bool const filtreEtat = !spells.empty() && CoaAreneFiltreEtatActif(botAI, bot);
 
     for (Usable const& spell : spells)
     {
@@ -1029,6 +1041,11 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // id the lists hold and the one PlayerbotAI::CastSpell has to be given for the proc to be
         // consumed.
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+
+        // CoaArene L0 : refuse d'avance par l'etat du lanceur (etourdi, en fuite, silence...), voir
+        // CoaAreneBloqueParEtat. Ni banc ni echec consigne : le sort n'est pas en cause.
+        if (filtreEtat && CoaAreneBloqueParEtat(bot, info))
+            continue;
 
         // A spell on cooldown would only fail with SPELL_FAILED_NOT_READY.
         if (bot->HasSpellCooldown(info->Id))
@@ -1615,6 +1632,10 @@ bool OrdonnerParLaya(PlayerbotAI* botAI, Player* bot, Unit* target, std::vector<
     return true;
 }
 
+// CoaArene IA, lots L0 et L1 (10/10/2026) : etat d'engagement, multiplicateur, recul, rupture, ouverture,
+// burst. Inerte sans AiPlayerbot.CoaArene.*. Voir l'en-tete du fichier inclus.
+#include "CoaAreneIa.inc"
+
 class CoaAttackAction : public Action
 {
 public:
@@ -1664,6 +1685,15 @@ public:
             std::rotate(usable.begin(), usable.begin() + start, usable.end());
         }
 
+        // CoaArene L1 (Ranger, arene ou duel) : les consommateurs de pile gardes pour une fenetre, mis devant
+        // quand elle est ouverte. Sans effet hors engagement ou option eteinte. Voir CoaAreneOrdonnerBurst.
+        // Revue m2 : le burst retire ou reordonne des sorts ; l'index du tourniquet se relit donc sur l'ordre
+        // d'AVANT lui. Copie prise seulement si une option CoaArene est armee : rien ne change sinon.
+        std::vector<Usable> const tourniquet = CoaAreneArmee() ? usable : std::vector<Usable>();
+        CoaAreneBurst const burst = CoaAreneOrdonnerBurst(botAI, bot, target, usable);
+        if (usable.empty())
+            return RecordUsage(USAGE_ATTACK, nullptr);
+
         // The cast goes through CastFirst rather than through a second loop of its own. The one
         // written here judged every refusal by PlayerbotAI::CastSpell to be the spell's fault and
         // benched it for a minute after three of them - while CastSpell also refuses for reasons
@@ -1675,10 +1705,12 @@ public:
         SpellInfo const* const cast = CastFirst(botAI, bot, usable, target, USAGE_ATTACK);
         if (cast)
         {
-            auto const itr = std::find_if(usable.begin(), usable.end(),
+            std::vector<Usable> const& ordre = tourniquet.empty() ? usable : tourniquet;
+            auto const itr = std::find_if(ordre.begin(), ordre.end(),
                 [cast](Usable const& spell) { return spell.info == cast; });
-            if (itr != usable.end())
-                next = start + size_t(std::distance(usable.begin(), itr)) + 1;
+            if (itr != ordre.end())
+                next = start + size_t(std::distance(ordre.begin(), itr)) + 1;
+            CoaAreneNoterBurst(botAI, bot, target, burst, cast);
         }
 
         return RecordUsage(USAGE_ATTACK, cast);
@@ -2736,18 +2768,22 @@ void CoaAiObjectContext::BuildSharedStrategyContexts(SharedNamedObjectContextLis
     // donc « coa chasse » reste trouvable par create() ; seule GetSiblings, qui
     // parcourt les contextes un par un, voit la difference.
     strategyContexts.Add(new CoaChasseStrategyFactoryInternal());
+    // CoaArene IA : contexte sans freres lui aussi (P-130), sa pose ne retire rien.
+    strategyContexts.Add(new CoaAreneStrategyFactoryInternal());
 }
 
 void CoaAiObjectContext::BuildSharedActionContexts(SharedNamedObjectContextList<Action>& actionContexts)
 {
     AiObjectContext::BuildSharedActionContexts(actionContexts);
     actionContexts.Add(new CoaActionFactoryInternal());
+    actionContexts.Add(new CoaAreneActionFactoryInternal());
 }
 
 void CoaAiObjectContext::BuildSharedTriggerContexts(SharedNamedObjectContextList<Trigger>& triggerContexts)
 {
     AiObjectContext::BuildSharedTriggerContexts(triggerContexts);
     triggerContexts.Add(new CoaTriggerFactoryInternal());
+    triggerContexts.Add(new CoaAreneTriggerFactoryInternal());
 }
 
 void CoaAiObjectContext::BuildSharedValueContexts(SharedNamedObjectContextList<UntypedValue>& valueContexts)

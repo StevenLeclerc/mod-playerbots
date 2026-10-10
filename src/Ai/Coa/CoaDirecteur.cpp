@@ -3,6 +3,7 @@
  */
 
 #include "CoaDirecteur.h"
+#include "CoaArene1v1.h"   // Arene1v1 : GladiateurEngage, garde du bus
 #include "CoaDirecteurSource.h"
 
 #include "Channel.h"
@@ -9100,6 +9101,14 @@ void Recevoir(CoaDirCommande const& c)
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REFUS_ARRET);
         Refuser(c, "arret");
+        return;
+    }
+    // Arene1v1 (10/10/2026, Ai/Coa/CoaArene1v1.cpp) : un gladiateur engage (en file, invite,
+    // en arene) n'est ni affecte, ni prepare, ni deplace. `c.cible` d'un verbe qui vise un
+    // joueur est un humain, jamais un gladiateur : le test ne l'ecarte pas.
+    if (!menage && c.cible && CoaArene1v1::GladiateurEngage(c.cible))
+    {
+        Refuser(c, "arene");
         return;
     }
     // 5. budget (`retirer` du lot D en est exempt : `menage`, plus haut)

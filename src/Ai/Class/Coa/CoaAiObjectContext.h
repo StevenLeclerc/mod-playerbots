@@ -8,6 +8,7 @@
 #define _PLAYERBOT_COAAIOBJECTCONTEXT_H
 
 #include "AiObjectContext.h"
+#include "ObjectGuid.h"
 
 #include <ctime>
 #include <unordered_map>
@@ -30,6 +31,40 @@ struct CoaKnownAbility
     uint16 kind;
     uint32 dispelMask;
     uint32 firstSpellId;
+};
+
+/*
+ * CoaArene IA (lots L0 et L1, 10/10/2026, Ai/Class/Coa/CoaAreneIa.inc) : l'etat d'un
+ * engagement JcJ (arene, duel, et en option le un contre un du monde ouvert), propre a
+ * un bot. Ecrit et lu par la seule mise a jour d'IA de ce bot (fil monde), donc sans
+ * verrou, comme benchedSpells. Inerte tant qu'aucune option AiPlayerbot.CoaArene.* n'est
+ * armee : rien ne l'ecrit.
+ */
+struct CoaAreneEtat
+{
+    uint32 majMs = 0;              // getMSTime() de la derniere mise a jour (0 : jamais)
+    uint8 cadre = 0;               // CoaAreneCadre (CoaAreneIa.inc) ; 0 = aucun
+    bool preparation = false;      // arene portes fermees, ou duel en compte a rebours
+    bool vuCeTick = false;         // l'engagement est vu au tick courant (hors grace) : condition de L1
+    bool actif = false;            // engagement en cours, delai de grace compris
+    bool bras = false;             // tire a l'ouverture de l'engagement : IA appliquee ou non
+    uint32 debutMs = 0;
+    uint32 dernierContactMs = 0;   // dernier tick ou l'engagement a ete vu (hors preparation)
+    ObjectGuid adversaire;
+    // Recul en cours (L1) : fin prevue, distance de depart, dernier essai.
+    uint32 reculFinMs = 0;         // 0 : aucun recul en cours
+    uint32 reculDebutMs = 0;
+    uint32 dernierEssaiReculMs = 0;
+    float reculDistAvant = 0.0f;
+    float reculVise = 0.0f;
+    uint32 prochaineOuvertureMs = 0;
+    uint32 prochainePreparationMs = 0;
+    uint32 dernierTenirMs = 0;
+    uint32 dernierImpossibleMs = 0;
+    // Bilan de l'engagement, ecrit a sa cloture.
+    uint32 echantillons = 0, auContact = 0, dansLaPlage = 0;
+    uint32 reculs = 0, reculsReussis = 0, ruptures = 0, bursts = 0, ouvertures = 0;
+    float pvMin = 100.0f;
 };
 
 /*
@@ -87,6 +122,9 @@ public:
     time_t knownKitBuilt = 0;   // 0 while the kit has never been built
     uint32 knownKitSpells = 0;  // size of the spell book when it was built
     uint8 knownKitLevel = 0;
+
+    // CoaArene IA : voir CoaAreneEtat plus haut.
+    CoaAreneEtat arene;
 };
 
 #endif
