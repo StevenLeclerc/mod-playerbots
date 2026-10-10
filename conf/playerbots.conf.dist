@@ -3991,6 +3991,22 @@ AiPlayerbot.Directeur.EvenementGardien = 0
 #        Default: 0
 AiPlayerbot.Directeur.EvenementObjectifs = 0
 
+#    AiPlayerbot.Directeur.EvenementMecaniques
+#        Chefs a mecaniques (10/10/2026, coa-project/docs/EVENEMENTS-boss-mecaniques.md, CoaDirecteurBoss.inc) :
+#        le 7e morceau de la forme etendue (EvenementGardien = 1 requis) accepte `meca1` | `meca2` | `meca3` (palier
+#        du public : seul, 2 a 5, 5 et plus) pour un chef de la table fermee RegleMeca (les dix chefs des evenements),
+#        nombre 1. Le chef recoit SetData(1, k) (son SmartAI ouvre ses phases 1-12 : seuils 75/50/25, mecaniques
+#        annoncees, frenesie -- migrations exploitation/directeur/sql/2026_10_10_10_evenement_boss_*.sql) ; le jeu
+#        pose ses renforts a chaque palier (au niveau et a la dose du chef, sous son lot), lance et retire son
+#        bouclier lie (Gardien, Haute-sirene, Dame pleureuse), et ses sorts de la table frappent en % des PV max.
+#        Ligne `coa directeur evenement: id= sous_action=meca joueur= valeur= motif=palier|bouclier_*`.
+#        0 : `meca<k>` refuse `meca_eteint`. Lue a chaque commande dans la conf chargee : `.reload config` suffit.
+#        Ne la mettre a 1 qu'APRES les migrations et le binaire qui la porte (le service n'emet `meca` que si elle
+#        vaut 1 dans le fichier ; refuse `meca_eteint` ou `texte`, il reemet le chef une fois sans `meca`).
+#        Retour arriere ATOMIQUE : 0 ICI ET les -RETOUR.sql ; a 0 sans eux, les chefs perdent leurs routines retirees.
+#        Default: 0
+AiPlayerbot.Directeur.EvenementMecaniques = 0
+
 #    AiPlayerbot.Directeur.EvenementAmbiances, EvenementSons, EvenementSonsPoint, EvenementMusiques,
 #    AiPlayerbot.Directeur.EvenementKits, EvenementSorts, EvenementSortsHaut
 #        Lot C des evenements (04/10, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3, § 5.1) :

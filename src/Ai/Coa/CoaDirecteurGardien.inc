@@ -115,7 +115,7 @@ bool LireMorceauxGardien(std::string const& pv, std::string const& degats, std::
         return false;
     if (renfort == "renfort")
         lu.renfort = true;
-    else if (renfort != "sans")
+    else if (renfort != "sans" && !LireMeca(renfort, lu))   // 10/10 : `meca1-3` (CoaDirecteurBoss.inc)
         return false;
     lu.etendue = true;
     return true;
@@ -538,8 +538,16 @@ public:
             damage = uint32(uint64(damage) * pct / 100);
     }
 
-    void ModifySpellDamageTaken(Unit* /*target*/, Unit* attacker, int32& damage, SpellInfo const* /*spellInfo*/) override
+    void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage, SpellInfo const* spellInfo) override
     {
+        // Chefs a mecaniques (10/10, CoaDirecteurBoss.inc) : un sort de la table lance par un chef arme frappe en % des
+        // PV max de la cible, AVANT la dose (qui l'abaisse ensuite, seul). Relecture : SpellDamageBonusTaken a deja ete
+        // applique a l'ancienne valeur (SpellEffects.cpp:970) ; le % le repasse, sans quoi Mur protecteur, Suppression
+        // de la douleur et les reductions Ascension seraient ignores (cette fonction n'appelle aucun crochet).
+        uint8 mp = 0;
+        if (target && spellInfo && damage > 0 && PctMeca(attacker, spellInfo->Id, false, mp))
+            damage = int32(target->SpellDamageBonusTaken(attacker, spellInfo, target->CountPctFromMaxHealth(mp),
+                                                         SPELL_DIRECT_DAMAGE));
         uint32 const pct = DegatsDoses(attacker);
         if (pct < 100 && damage > 0)
             damage = int32(int64(damage) * pct / 100);
@@ -547,10 +555,13 @@ public:
 
     // Ce crochet voit aussi les tics de SOIN (SpellAuraEffects.cpp, HandlePeriodicHealAurasTick) : un sort
     // positif n'est jamais touche.
-    void ModifyPeriodicDamageAurasTick(Unit* /*target*/, Unit* attacker, uint32& damage, SpellInfo const* spellInfo) override
+    void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& damage, SpellInfo const* spellInfo) override
     {
         if (spellInfo && spellInfo->IsPositive())
             return;
+        uint8 mp = 0;   // 10/10 : tic d'un sort de la table lance par un chef arme -> % des PV max (CoaDirecteurBoss.inc)
+        if (target && spellInfo && PctMeca(attacker, spellInfo->Id, true, mp))
+            damage = target->CountPctFromMaxHealth(mp);
         uint32 const pct = DegatsDoses(attacker);
         if (pct < 100)
             damage = uint32(uint64(damage) * pct / 100);
