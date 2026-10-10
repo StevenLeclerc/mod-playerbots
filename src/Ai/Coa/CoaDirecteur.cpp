@@ -10,6 +10,7 @@
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "Corpse.h"
+#include "CreatureTextMgr.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "GridDefines.h"
@@ -4594,10 +4595,15 @@ struct EvAppLu
     uint8 pv = 0;
     uint8 degats = 0;
     bool renfort = false;
+    // Chefs a mecaniques (10/10/2026, CoaDirecteurBoss.inc) : 7e morceau `meca1` | `meca2` | `meca3` (palier du public,
+    // seul / 2 a 5 / 5 et plus). 0 : absent.
+    uint8 meca = 0;
 };
 
 // Lot G des evenements (08/10/2026) : definis dans CoaDirecteurGardien.inc, inclus apres le lot P.
 bool LireMorceauxGardien(std::string const& pv, std::string const& degats, std::string const& renfort, EvAppLu& lu);
+// Chefs a mecaniques (10/10/2026) : definis dans CoaDirecteurBoss.inc, inclus apres le lot G.
+bool LireMeca(std::string const& m, EvAppLu& lu);
 
 char const* NomEvOrdre(EvOrdre o)
 {
@@ -4697,6 +4703,13 @@ struct EvInvoque
     uint32 egareDepuisS = 0;     // 10/10 : debut de l'egarement en cours ; 0 : aucun
     uint8 relances = 0;          // 10/10 : relances faites sur cet invoque
     bool fort = false;           // 10/10 (relecture) : chef ou elite -- la garde des egares le relance, ne le retire jamais
+    // Chefs a mecaniques (10/10/2026, CoaDirecteurBoss.inc).
+    uint8 meca = 0;              // chef arme `meca<k>` : palier du public k (1-3) ; 0 : non arme
+    uint8 paliersFaits = 0;      // chef : bits 0/1/2 = paliers 75/50/25 deja declenches (une fois chacun, meme refuses)
+    bool bouclierActif = false;  // chef : bouclier lie aux renforts du palier 50 pose par le C++, pas encore juge fini
+    uint32 bouclierDepuisS = 0;  // chef : Maintenant() de la pose du bouclier
+    ObjectGuid chefGuid;         // renfort de palier : son chef
+    uint8 palier = 0;            // renfort de palier : 75, 50 ou 25 ; 0 : autre
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
 
@@ -4935,6 +4948,13 @@ bool PointApparition(CoaDirCommande const& c, Player* p, float& sol, char const*
 char const* RefusGardien(EvAppLu const& lu, uint32 entree);
 void DoserInvoque(Creature* cr, uint8 pv, uint8 degats);
 void DeclencherRenforts();
+// Chefs a mecaniques (CoaDirecteurBoss.inc) : gardes de `meca<k>`, armement, paliers, bouclier lie, degats en %.
+char const* RefusMeca(EvAppLu const& lu, uint32 entree);
+void ArmerMeca(Creature* cr, uint8 public_);
+void DeclencherPaliers();
+void SuivreBoucliers();
+bool PctMeca(Unit const* attaquant, uint32 sort, bool tic, uint8& pct);
+bool Insensible(Unit const* u);
 
 void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 {
@@ -4956,6 +4976,11 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
     if (char const* refusG = RefusGardien(lu, entree))   // lot G : forme etendue (option, renfort du Gardien)
     {
         RefuserApparition(c, lu, refusG);
+        return;
+    }
+    if (char const* refusM = RefusMeca(lu, entree))      // 10/10 : `meca<k>` (option, chef de la table, nombre 1)
+    {
+        RefuserApparition(c, lu, refusM);
         return;
     }
     float sol = 0.0f;
@@ -5036,6 +5061,7 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         v.pv = lu.pv ? lu.pv : 100;          // lot G
         v.degats = lu.degats ? lu.degats : 100;
         v.renfortArme = lu.renfort;
+        v.meca = lu.meca;                     // 10/10 : chef a mecaniques (paliers, bouclier lie, degats en %)
         if (CreatureTemplate const* gabarit = s->GetCreatureTemplate())
             v.fort = lu.etendue || lu.renfort || gabarit->rank != 0 || gabarit->ModHealth >= EV_EGARE_FORT_PV;
         if (ciel)
@@ -5066,6 +5092,8 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
             break;
         }
         DoserInvoque(s, lu.pv, lu.degats);   // lot G : rien sans la forme etendue
+        if (lu.meca)
+            ArmerMeca(s, lu.meca);           // 10/10 : marque des degats en % et palier du public au SmartAI (SetData)
         if (lu.naissance)
             s->CastSpell(s, EV_SORT_NAISSANCE, true);   // rendu SUPPOSE (banc du 04/10 : « on voit rien » par .aura)
     }
@@ -5418,6 +5446,9 @@ void SuivreInvoques()
 
     // 2 bis. Lot G : renforts a mi-vie (avant les fins de lot : le lot du Gardien reste ouvert).
     DeclencherRenforts();
+    // 2 ter. Chefs a mecaniques (10/10) : renforts a paliers 75/50/25 et bouclier lie (meme place que le mi-vie).
+    DeclencherPaliers();
+    SuivreBoucliers();
 
     // 3. Lots finis : plus aucun invoque VIVANT (08/10, commanditaire : « on attend betement entre les vagues ») :
     // la fin part des la derniere mort, sans attendre l'effacement des corps (~60 s). Les entrees mortes du
@@ -5450,6 +5481,8 @@ void SuivreInvoques()
 #include "CoaDirecteurPortail.inc"
 // Lot G des evenements (08/10/2026) : Gardien dose, renfort a mi-vie, coffre (fragment a part, meme espace).
 #include "CoaDirecteurGardien.inc"
+// Chefs a mecaniques (10/10/2026) : paliers, bouclier lie, degats en % (fragment a part, meme espace).
+#include "CoaDirecteurBoss.inc"
 
 // ------------------------------------------------------------------ lot D4c : prime et morts tracees
 //
@@ -6535,8 +6568,12 @@ Unit* CoaDirecteur::CibleDEvenement(Player* bot)
         guids = it->second;
     }
     float const laisse = aff.rayon + CoaDirecteur::MISSION_LAISSE_MARGE_YD;
+    // Chefs a mecaniques (10/10) : un invoque INSENSIBLE (bouclier du chef : immunite physique et magique) n'est choisi
+    // que si aucune autre cible d'evenement n'est valide -- les bots frappent les renforts qui portent le bouclier.
     Creature* meilleure = nullptr;
     float meilleureD = 0.0f;
+    Creature* protegee = nullptr;
+    float protegeeD = 0.0f;
     for (ObjectGuid const& g : guids)
     {
         Creature* cr = ObjectAccessor::GetCreature(*bot, g);   // carte du bot : nul si l'invoque est ailleurs
@@ -6547,13 +6584,18 @@ Unit* CoaDirecteur::CibleDEvenement(Player* bot)
         if (cx * cx + cy * cy > laisse * laisse)
             continue;   // hors de la laisse : il ne s'y laisse pas entrainer
         float const d = bot->GetDistance(cr);
-        if (d > CoaDirecteur::EVENEMENT_ENGAGEMENT_YD || (meilleure && d >= meilleureD))
+        if (d > CoaDirecteur::EVENEMENT_ENGAGEMENT_YD)
+            continue;
+        bool const insensible = Insensible(cr);
+        if (insensible ? (protegee && d >= protegeeD) : (meilleure && d >= meilleureD))
             continue;
         if (!bot->IsValidAttackTarget(cr) || !bot->IsWithinLOSInMap(cr))
             continue;
-        meilleure = cr;
-        meilleureD = d;
+        (insensible ? protegee : meilleure) = cr;
+        (insensible ? protegeeD : meilleureD) = d;
     }
+    if (!meilleure)
+        meilleure = protegee;
     if (meilleure)
         evfEvaluations.fetch_add(1, std::memory_order_relaxed);
     return meilleure;
@@ -6616,6 +6658,16 @@ void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie
         // (a) A PORTEE : dans la laisse, a la portee d'engagement (celle de CibleDEvenement).
         if (centre2 <= laisse * laisse && d <= CoaDirecteur::EVENEMENT_ENGAGEMENT_YD)
             aPortee.push_back(cr);
+    }
+    // Chefs a mecaniques (10/10) : un invoque INSENSIBLE (bouclier du chef) quitte les trois listes tant qu'un autre
+    // invoque de l'evenement est vivant et visible ici -- les bots frappent les renforts qui portent le bouclier.
+    // Aucun autre : il reste (la regle d'origine).
+    auto const sensible = [](Unit* u) { return !Insensible(u); };
+    if (std::any_of(autres.begin(), autres.end(), sensible) || std::any_of(defense.begin(), defense.end(), sensible))
+    {
+        for (std::vector<Unit*>* liste : {&defense, &defenseInscrits, &aPortee})
+            liste->erase(std::remove_if(liste->begin(), liste->end(), [](Unit* u) { return Insensible(u); }),
+                         liste->end());
     }
     if (!defense.empty())
     {
