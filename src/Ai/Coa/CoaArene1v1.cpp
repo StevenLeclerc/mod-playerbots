@@ -1204,7 +1204,51 @@ public:
 class CoaArene1v1PlayerScript : public PlayerScript
 {
 public:
-    CoaArene1v1PlayerScript() : PlayerScript("CoaArene1v1PlayerScript", {PLAYERHOOK_CAN_BATTLEFIELD_PORT}) {}
+    CoaArene1v1PlayerScript()
+        : PlayerScript("CoaArene1v1PlayerScript",
+                       {PLAYERHOOK_CAN_BATTLEFIELD_PORT,
+                        PLAYERHOOK_ON_BEFORE_BATTLEMASTER_JOIN_ARENA})  // CoA (10/10/2026) arene 1v1 depuis l'interface JcJ
+    {
+    }
+
+    // CoA (10/10/2026) arene 1v1 depuis l'interface JcJ
+    // HandleBattlemasterJoinArena (BattleGroundHandler.cpp), juste apres la lecture du
+    // paquet, AVANT la recherche du maitre de bataille : le bouton « 1v1 » de l'interface
+    // Ascension (Skirmish1v1Button, bgIndex 3) appelle JoinBattlefield(3) sur la liste
+    // d'arenes, que le coeur a envoyee avec un guid vide (HandleBattlefieldListOpcode) ;
+    // le coeur jetterait donc la demande en silence. ArenaFrame.lua:57 du client :
+    // « Ascension replaced 5v5 by 1v1 queue » -> slot 2. Fil monde
+    // (CMSG_BATTLEMASTER_JOIN_ARENA est PROCESS_THREADUNSAFE, Opcodes.cpp:987), comme
+    // l'option de dialogue : Inscrire peut y lire le gladiateur et les files.
+    // Rend vrai (le coeur s'arrete) seulement pour un humain, Enabled, slot 2, solo, non
+    // classe ; sinon faux et le coeur fait comme avant. Le prix : la file 5v5 solo non
+    // classee n'est plus joignable par un humain quand Enabled = 1 (voulu : l'interface
+    // Ascension n'a plus de 5v5). Les bots (BattleGroundJoinAction.cpp, slot 2 possible
+    // en escarmouche solo) ne sont jamais pris.
+    bool OnPlayerBeforeBattlemasterJoinArena(Player* player, ObjectGuid guid, uint8 arenaslot, uint8 asGroup,
+                                             uint8 isRated) override
+    {
+        if (!player || GET_PLAYERBOT_AI(player))
+            return false;
+        bool const pris = sPlayerbotAIConfig.arene1v1Enabled && arenaslot == 2 && !asGroup && !isRated;
+        // Revue (10/10) : un clic en rafale ne doit pas inonder CoaBots.log ni le chat. Un paquet
+        // par joueur toutes les 2 s au plus ; le surplus est avale (pris) ou rendu au coeur
+        // (non pris), sans ligne. Fil monde seul (PROCESS_THREADUNSAFE) : pas de verrou.
+        static std::unordered_map<uint32, uint32> dernierPaquet;
+        uint32 const maintenantMs = getMSTime();
+        auto it = dernierPaquet.find(player->GetGUID().GetCounter());
+        if (it != dernierPaquet.end() && getMSTimeDiff(it->second, maintenantMs) < 2000)
+            return pris;
+        dernierPaquet[player->GetGUID().GetCounter()] = maintenantMs;
+        LOG_INFO("playerbots", "coa arene1v1: paquet_join_arena joueur={} nom={} guid={} slot={} groupe={} classe={}"
+                 " pris={}", player->GetGUID().GetCounter(), player->GetName(), guid.ToString(), uint32(arenaslot),
+                 uint32(asGroup), uint32(isRated), pris ? 1 : 0);
+        if (!pris)
+            return false;
+        std::string refus;
+        CoaArene1v1::Inscrire(player, "interface", refus);  // explique lui-meme tout refus au joueur
+        return true;
+    }
 
     bool OnPlayerCanBattleFieldPort(Player* player, uint8 arenaType, BattlegroundTypeId bgTypeId, uint8 action) override
     {
