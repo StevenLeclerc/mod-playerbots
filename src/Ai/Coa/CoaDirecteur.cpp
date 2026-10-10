@@ -4041,6 +4041,11 @@ bool EstCoffre(std::string const& t);
 void ExecuterCoffre(CoaDirCommande const& c);
 template <typename Predicat>
 size_t LeverCoffresSi(Predicat lever, char const* raison);
+// Objectifs d'evenement (10/10/2026) : definis dans CoaDirecteurObjectifs.inc, inclus apres le lot G.
+bool EstObjectif(std::string const& t);
+void ExecuterObjectif(CoaDirCommande const& c);
+template <typename Predicat>
+size_t LeverObjectifsSi(Predicat lever, char const* raison);
 
 void ExecuterEvenement(CoaDirCommande const& c)
 {
@@ -4058,6 +4063,11 @@ void ExecuterEvenement(CoaDirCommande const& c)
     if (EstCoffre(c.texte))    // lot G (08/10/2026) : le coffre de la faille
     {
         ExecuterCoffre(c);
+        return;
+    }
+    if (EstObjectif(c.texte))  // 10/10/2026 : objectifs d'evenement (etats du monde)
+    {
+        ExecuterObjectif(c);
         return;
     }
     EvLu lu;
@@ -4307,7 +4317,8 @@ size_t LeverEvenementsSi(Predicat lever, char const* raison)
 {
     // Lot D : les invoques d'abord (retrait immediat, ligne `tues=` par lot).
     size_t const invoques = LeverInvoquesSi(lever, raison) + LeverPortailsSi(lever, raison) +   // + lot P
-                            LeverCoffresSi(lever, raison);                                       // + lot G
+                            LeverCoffresSi(lever, raison) +                                      // + lot G
+                            LeverObjectifsSi(lever, raison);                                     // + objectifs
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
         return invoques;
     std::vector<EvAmbiance> ambiances;
@@ -5450,6 +5461,8 @@ void SuivreInvoques()
 #include "CoaDirecteurPortail.inc"
 // Lot G des evenements (08/10/2026) : Gardien dose, renfort a mi-vie, coffre (fragment a part, meme espace).
 #include "CoaDirecteurGardien.inc"
+// Objectifs d'evenement (10/10/2026) : etats du monde au joueur (fragment a part, meme espace de noms).
+#include "CoaDirecteurObjectifs.inc"
 
 // ------------------------------------------------------------------ lot D4c : prime et morts tracees
 //
@@ -6784,6 +6797,8 @@ void Entretien(uint32 diff)
     SuivrePortails();
     // Lot G des evenements : coffres de la faille (pilles, echeances).
     SuivreCoffres();
+    // Objectifs d'evenement (10/10) : APRES les invoques (ennemis restants de cette seconde).
+    SuivreObjectifs();
     // Lot F des evenements : les invoques vivants par joueur, publies pour les bots inscrits.
     PublierCiblesEvenement();
     LivrerParoles();

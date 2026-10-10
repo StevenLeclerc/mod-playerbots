@@ -3709,6 +3709,20 @@ AiPlayerbot.Directeur.EvenementPortail = 0
 #        Default: 0
 AiPlayerbot.Directeur.EvenementGardien = 0
 
+#    AiPlayerbot.Directeur.EvenementObjectifs
+#        Objectifs d'evenement (10/10/2026, coa-project/docs/CONCEPTION-objectifs-evenement.md) : sous-action
+#        `objectif:<titre>:<etape>[:<n>[:<m>]]` du verbe `evenement` (duree_s 10-3600 ; valeur = lot du chef pour
+#        l'etape `chef`, 0 sinon). Le jeu envoie au joueur de l'evenement, et aux humains de son groupe sur sa
+#        carte, des ETATS DU MONDE 71001-71047 (SMSG_UPDATE_WORLD_STATE) : titre, etape (presage, vague n sur m,
+#        chef, coffre, portail, issue), ennemis restants, vie du chef, compte a rebours -- ces trois derniers
+#        CALCULES ICI chaque seconde, sans commande. Le client les affiche en haut de l'ecran comme un champ de
+#        bataille SEULEMENT s'il porte le patch client (lignes ajoutees a WorldStateUI.dbc, patch-ZZ.MPQ :
+#        coa-project/client/objectifs-evenement/README.md) ; sans lui, rien ne s'affiche (inoffensif). Le service
+#        (faille_orage.py et heritiers) lit cette MEME ligne dans le fichier et n'emet rien tant qu'elle vaut 0.
+#        0 : `objectif:` refuse `objectifs_eteints`. Lue a chaque commande dans la conf chargee : `.reload config`.
+#        Default: 0
+AiPlayerbot.Directeur.EvenementObjectifs = 0
+
 #    AiPlayerbot.Directeur.EvenementAmbiances, EvenementSons, EvenementSonsPoint, EvenementMusiques,
 #    AiPlayerbot.Directeur.EvenementKits, EvenementSorts, EvenementSortsHaut
 #        Lot C des evenements (04/10, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3, § 5.1) :
