@@ -33,18 +33,26 @@
 // invoques vivants du joueur, registre evInvoques, renforts compris), la VIE DU CHEF (le lot `valeur`, creature lue
 // au fil monde) et le COMPTE A REBOURS. Le service n'emet qu'aux changements d'etape : le seau du bus
 // (MaxCommandesParMinute) est commun au royaume.
-// DESTINATAIRES : le joueur, et les HUMAINS de son groupe sur la meme carte (un bot n'a pas de client). Un humain
-// sujet de son propre objectif ne recoit que le sien ; membre de deux groupes d'evenement (impossible : un seul
-// groupe) -- en cas de doublon, le plus petit guid de joueur gagne (deterministe).
+// DESTINATAIRES : le joueur s'il est sur une carte ou l'evenement se joue (CarteDeSuspension : continents,
+// Outreterre, Norfendre -- jamais dans un donjon ni un champ de bataille, ou nos lignes en carte -1 s'empileraient
+// avec les scores), et les HUMAINS de son groupe sur la meme carte ET (dans la meme zone OU a moins de
+// OBJ_GROUPE_YD de lui) -- relecture du 10/10 : pas un membre a l'autre bout du continent. Un bot n'a pas de client.
+// Un humain sujet de son propre objectif ne recoit que le sien ; en cas de doublon, le plus petit guid de joueur
+// gagne (deterministe). Un sujet entre dans un donjon garde son objectif (le service le leve : joueur_absent) mais
+// ne le voit plus ; revenu sur le continent avant la levee, il le revoit.
 // RENVOI : le client remet ses etats a zero a SMSG_INIT_WORLD_STATES ? (NON LU dans le client : SUPPOSE possible) ;
 // Player::UpdateZone l'envoie a chaque changement de zone (PlayerUpdates.cpp), et la connexion aussi
 // (CharacterHandler.cpp). D'ou : changement de zone ou de carte constate -> renvoi complet tout de suite ET
 // OBJ_RENVOI_APRES_S plus tard (l'INIT peut arriver apres notre constat) ; et un renvoi complet toutes les
 // OBJ_RAFRAICHIR_S, filet. Un renvoi complet = tous les etats du bloc, zeros compris.
 // FIN : etape d'issue (victoire, defaite, fin : le service lui donne ISSUE_AFFICHAGE_S = 30 s), echeance, `lever`
-// (id ou tout), `.directeur stop` du joueur et bus eteint (LeverEvenementsSi) -> tous les etats remis a zero chez
-// chaque destinataire en ligne. Un joueur hors ligne garde son objectif jusqu'a l'echeance : il le revoit a sa
-// reconnexion (renvoi complet).
+// (id ou tout), `.directeur stop` du joueur et bus eteint (LeverEvenementsSi), option remise a 0 (`.reload config` :
+// tout est leve a la seconde suivante, motif `eteint`), etape d'ISSUE refusee parce que le joueur est injoignable
+// (hors_ligne, pas_humain, carte : l'objectif en cours est fini, motif `issue_injoignable`) -> tous les etats remis a
+// zero chez chaque destinataire joignable, et chez les autres des qu'ils le redeviennent (objAEffacer, 600 s). Le
+// service, a une issue joueur absent (joueur_absent, abandon, monde_illisible), LEVE l'id du dernier objectif au lieu
+// de publier l'issue (objectifs_evenement.Publieur). Un joueur hors ligne dont l'objectif n'a ete ni leve ni fini le
+// garde jusqu'a l'echeance (service mort) : il le revoit a sa reconnexion.
 // Journal : `coa directeur evenement: id= sous_action=objectif joueur= valeur= etape= motif=<pose|remplace|echu|...>`.
 
 constexpr char const OBJ_OPTION[] = "AiPlayerbot.Directeur.EvenementObjectifs";
@@ -93,6 +101,7 @@ constexpr uint32 OBJ_PHASE_MAX = 9;
 constexpr size_t OBJ_MAX = 64;                     // joueurs suivis, tout le royaume
 constexpr uint32 OBJ_RAFRAICHIR_S = 10;            // renvoi complet, filet
 constexpr uint32 OBJ_RENVOI_APRES_S = 2;           // second renvoi apres un changement de zone ou de carte
+constexpr float OBJ_GROUPE_YD = 150.0f;            // membre du groupe hors de la zone du sujet : servi a <= 150 yd
 
 enum class ObjEtape : uint8 { Presage, Renforts, Ouverture, Vague, Champion, Chrono, Chef, Coffre, Portail, Victoire,
                               Defaite, Fin };
@@ -230,6 +239,28 @@ void RefuserObjectif(CoaDirCommande const& c, char const* raison)
     Refuser(c, raison);
 }
 
+bool EtapeDIssue(ObjEtape e)
+{
+    return e == ObjEtape::Victoire || e == ObjEtape::Defaite || e == ObjEtape::Fin;
+}
+
+void FinirObjectif(EvObjectif const& o, char const* motif);
+
+// Relecture du 10/10 : une ISSUE refusee parce que le joueur est injoignable (hors ligne, en teleportation, dans un
+// donjon) ne doit pas laisser l'etape precedente affichee jusqu'a l'echeance (3600 s au plus) : l'objectif est fini.
+void RefuserIssueInjoignable(CoaDirCommande const& c, ObjLu const& lu, char const* raison)
+{
+    RefuserObjectif(c, raison);
+    if (!EtapeDIssue(lu.etape))
+        return;
+    auto it = evObjectifs.find(c.cible);
+    if (it == evObjectifs.end())
+        return;
+    EvObjectif const o = it->second;
+    evObjectifs.erase(it);
+    FinirObjectif(o, "issue_injoignable");
+}
+
 void ExecuterObjectif(CoaDirCommande const& c)
 {
     if (!ObjectifsAllumes())
@@ -252,17 +283,17 @@ void ExecuterObjectif(CoaDirCommande const& c)
     Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
     if (!p)
     {
-        RefuserObjectif(c, "hors_ligne");
+        RefuserIssueInjoignable(c, lu, "hors_ligne");
         return;
     }
     if (!Humain(p))
     {
-        RefuserObjectif(c, "pas_humain");
+        RefuserIssueInjoignable(c, lu, "pas_humain");
         return;
     }
     if (!p->IsInWorld() || !CarteDeSuspension(p->GetMapId()))
     {
-        RefuserObjectif(c, "carte");
+        RefuserIssueInjoignable(c, lu, "carte");
         return;
     }
     auto it = evObjectifs.find(c.cible);
@@ -364,7 +395,10 @@ std::array<uint32, OBJ_N> ValeursObjectif(EvObjectif& o, uint32 maintenant)
             combat = true;
             if (o.chefLot)
             {
+                // Le lot du chef porte UNE creature (compo {chef: 1}, faille_orage et evenement_variante, relus le
+                // 10/10) ; s'il en portait plusieurs, la plus entamee (minimum) : jamais de saut de l'une a l'autre.
                 bool vivant = false;
+                uint32 pvMin = 100;
                 for (EvInvoque const& x : evInvoques)
                 {
                     if (x.id != o.chefLot || x.mort || x.renfort)
@@ -373,10 +407,14 @@ std::array<uint32, OBJ_N> ValeursObjectif(EvObjectif& o, uint32 maintenant)
                         if (cr->IsAlive())
                         {
                             float const pct = cr->GetHealthPct();
-                            o.chefPv = std::min<uint32>(100, std::max<uint32>(1, uint32(std::ceil(pct))));
-                            o.chefVu = vivant = true;
-                            break;
+                            pvMin = std::min(pvMin, std::min<uint32>(100, std::max<uint32>(1, uint32(std::ceil(pct)))));
+                            vivant = true;
                         }
+                }
+                if (vivant)
+                {
+                    o.chefPv = pvMin;
+                    o.chefVu = true;
                 }
                 if (!vivant && o.chefVu)
                     o.chefPv = 0;   // tombe (ou retire) : 0 %, jusqu'a l'etape suivante
@@ -472,34 +510,41 @@ void SuivreObjectifs()
     if (evObjectifs.empty() && objEnvoyes.empty() && objAEffacer.empty())
         return;
     uint32 const maintenant = Maintenant();
-    // 1. Echeances.
+    // 1. Echeances ; et option remise a 0 (`.reload config`, retour arriere) : tout est leve, motif `eteint`
+    //    (relecture du 10/10 : sinon l'affichage restait fige jusqu'a l'echeance, l'issue etant refusee).
+    bool const eteint = !evObjectifs.empty() && !ObjectifsAllumes();
     for (auto it = evObjectifs.begin(); it != evObjectifs.end();)
     {
-        if (it->second.finS <= maintenant)
+        if (eteint || it->second.finS <= maintenant)
         {
             EvObjectif const o = it->second;
             it = evObjectifs.erase(it);
-            FinirObjectif(o, "echu");
+            FinirObjectif(o, eteint ? "eteint" : "echu");
         }
         else
             ++it;
     }
-    // 2. Destinataires (CONNECTES, teleportation comprise) : le joueur d'abord, puis les humains de son groupe sur sa
-    //    carte. Un sujet ne recoit que le sien ; deux groupes pour un meme humain : le plus petit guid de joueur.
+    // 2. Destinataires (CONNECTES, teleportation comprise) : le joueur d'abord, s'il est sur une carte d'evenement,
+    //    puis les humains de son groupe sur sa carte, dans sa zone ou a moins de OBJ_GROUPE_YD. Un sujet ne recoit que
+    //    le sien ; deux groupes pour un meme humain : le plus petit guid de joueur.
     std::unordered_map<uint32, uint32> pour;   // destinataire -> joueur source
     for (auto const& [joueur, o] : evObjectifs)
-        if (HumainConnecte(joueur))
-            pour[joueur] = joueur;
+        if (Player* p = HumainConnecte(joueur))
+            if (CarteDeSuspension(p->GetMapId()))
+                pour[joueur] = joueur;
     for (auto const& [joueur, o] : evObjectifs)
     {
         Player* p = HumainConnecte(joueur);
-        Group* g = p ? p->GetGroup() : nullptr;
+        Group* g = p && CarteDeSuspension(p->GetMapId()) ? p->GetGroup() : nullptr;
         if (!g)
             continue;
         for (GroupReference* ref = g->GetFirstMember(); ref; ref = ref->next())
         {
             Player* m = ref->GetSource();
             if (!m || m == p || !Humain(m) || m->GetMapId() != p->GetMapId())
+                continue;
+            if (m->GetZoneId() != p->GetZoneId() &&
+                (!m->IsInWorld() || !p->IsInWorld() || !m->IsWithinDistInMap(p, OBJ_GROUPE_YD)))
                 continue;
             uint32 const mg = m->GetGUID().GetCounter();
             if (evObjectifs.count(mg))
