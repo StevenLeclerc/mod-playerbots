@@ -890,22 +890,15 @@ void DropUncastableHere(Player* bot, Unit* target, std::vector<Usable>& spells)
     // Ecarter le sort pour ce tick le laisse disponible au suivant : c'est exactement
     // l'inverse.
     spells.erase(std::remove_if(spells.begin(), spells.end(),
-        [bot, target](Usable const& spell)
+        [bot](Usable const& spell)
         {
             SpellInfo const* info = spell.info;
 
             // Spell.cpp : HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !HasStealthAura().
-            if (info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !bot->HasStealthAura())
-                return true;
-
-            // Spell.cpp, recopie sans le IsPlayer() qui est vrai par construction ici :
-            // (FacingCasterFlags & SPELL_FACING_FLAG_INFRONT) && !HasInArc(M_PI, target)
-            // && !IsWithinBoundaryRadius(target). Le dernier terme compte : au contact,
-            // le coeur ne reclame pas l'orientation, et l'oublier ferait ecarter a tort
-            // les sorts de melee.
-            return (info->FacingCasterFlags & SPELL_FACING_FLAG_INFRONT)
-                && !bot->HasInArc(static_cast<float>(M_PI), target)
-                && !bot->IsWithinBoundaryRadius(target);
+            // ORIENTATION RETIREE D'ICI le 10/10/2026 (banc d'arene) : ecarter le sort laissait le bot
+            // dos a sa cible pour toujours -- seul PlayerbotAI::CastSpell le tourne, et il n'etait plus
+            // appele. CastFirst tourne desormais le bot avant de juger le sort (CoaPreControleCible).
+            return info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !bot->HasStealthAura();
         }),
         spells.end());
 
@@ -1074,6 +1067,84 @@ bool CoaAreneBloqueParEtat(Player* bot, SpellInfo const* info);
 bool CoaAreneTraceActive(PlayerbotAI* botAI, Player* bot);
 void CoaAreneTracerSort(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target, SpellCastResult resultat,
                         char const* motif);
+// CoaArene : le bot suit un deplacement VOULU de l'IA d'arene (recul, retour, cachette L2, cacheur du banc). Faux pour
+// tout bot hors de ces etats, donc pour tout bot hors arene et hors duel. Defini dans CoaAreneIa.inc.
+bool CoaAreneMouvementVoulu(PlayerbotAI* botAI);
+
+/*
+ * Pre-controle de la cible, pour tous les bots CoA (banc d'arene du 10/10/2026 23:31-23:37 Paris : OUT_OF_RANGE 61,
+ * LINE_OF_SIGHT 37, UNIT_NOT_INFRONT 17). Ces refus venaient de StrictCheck : ils ne coutaient pas de temps de
+ * recharge global, mais un Spell construit et un CheckCast complet par sort et par tour pour un refus certain -- et,
+ * pour l'orientation, le bot ne se tournait JAMAIS : StrictCheck refusait avant PlayerbotAI::CastSpell, seul a tourner
+ * le bot (PlayerbotAI.cpp, ServerFacade::SetFacingTo), et la deuxieme passe de DropUncastableHere ecartait le sort.
+ *
+ * Rend le refus que le coeur rendrait, ou SPELL_CAST_OK. RECOPIE de ce que Spell::prepare verifie (CheckCast(true),
+ * donc CheckRange(strict = true) : Spell.cpp:3559, 6123, 7162-7241), jamais plus strict :
+ *   - seulement pour un sort que PlayerbotAI::CastSpell lance sur l'UNITE cible (ni point au sol, ni source, ni objet,
+ *     ni crochetage/depecage) : les autres ont une autre geometrie dans le coeur, on les laisse a StrictCheck ;
+ *   - ligne de vue : CheckCast (Spell.cpp:5979-6006), lanceur joueur, ni IGNORE_LINE_OF_SIGHT ni ALWAYS_AOE_LINE_OF_SIGHT,
+ *     modeles M2 ignores, toutes verifications ; calculee UNE fois par appel (`vue`, -1 = pas encore) ;
+ *   - portee maximale : branche melee (leeway, sinon 2 x MIN_MELEE_REACH) ou IsWithinCombatRange, SPELLMOD_RANGE compris,
+ *     SANS la tolerance de 10 % du mode non strict (le coeur ne l'accorde qu'apres l'incantation) ;
+ *   - orientation : FacingCasterFlags INFRONT, HasInArc(pi), IsWithinBoundaryRadius ;
+ *   - portee minimale : les deux branches de CheckRange (RANGED + portee de melee, sinon IsWithinCombatRange).
+ * Soi-meme, le vehicule porteur, une cible hors du monde ou d'une autre carte, un sort passif ou sans portee lisible
+ * (RangeEntry nul ou ID 1) : SPELL_CAST_OK, le coeur jugera.
+ */
+SpellCastResult CoaPreControleCible(Player* bot, SpellInfo const* info, Unit* target, int8& vue)
+{
+    if (!target || target == bot || bot->GetVehicleBase() == target || !target->IsInWorld() ||
+        target->GetMap() != bot->GetMap() || info->HasAttribute(SPELL_ATTR0_PASSIVE))
+        return SPELL_CAST_OK;
+    if (info->Targets & (TARGET_FLAG_DEST_LOCATION | TARGET_FLAG_SOURCE_LOCATION | TARGET_FLAG_ITEM |
+                         TARGET_FLAG_GAMEOBJECT_ITEM))
+        return SPELL_CAST_OK;
+    if (info->Effects[0].Effect == SPELL_EFFECT_OPEN_LOCK || info->Effects[0].Effect == SPELL_EFFECT_SKINNING)
+        return SPELL_CAST_OK;
+    // Revue m1 : sans cible unitaire EXPLICITE (zone autour du lanceur, soin de groupe), le coeur retire la cible
+    // (Spell::InitExplicitTargets) et ne teste ni vue ni portee sur elle : ne pas etre plus strict.
+    if (!(info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK))
+        return SPELL_CAST_OK;
+
+    if (!info->HasAttribute(SPELL_ATTR2_IGNORE_LINE_OF_SIGHT) && !info->HasAttribute(SPELL_ATTR5_ALWAYS_AOE_LINE_OF_SIGHT))
+    {
+        if (vue < 0)
+            vue = bot->IsWithinLOSInMap(target, VMAP::ModelIgnoreFlags::M2, LINEOFSIGHT_ALL_CHECKS) ? 1 : 0;
+        if (!vue)
+            return SPELL_FAILED_LINE_OF_SIGHT;
+    }
+
+    if (!info->RangeEntry || info->RangeEntry->ID == 1)
+        return SPELL_CAST_OK;
+    uint32 const rangeType = info->RangeEntry->Flags;
+    float maxRange = bot->GetSpellMaxRangeForTarget(target, info);
+    float const minRange = bot->GetSpellMinRangeForTarget(target, info);
+    if (Player* modOwner = bot->GetSpellModOwner())
+        modOwner->ApplySpellMod(info->Id, SPELLMOD_RANGE, maxRange);
+
+    if (rangeType == SPELL_RANGE_MELEE)
+    {
+        float const reelle = maxRange - (bot->GetLeewayBonusRange(target) > 0.0f ? MIN_MELEE_REACH : 2 * MIN_MELEE_REACH);
+        if (!bot->IsWithinMeleeRange(target, std::max(reelle, 0.0f)))
+            return SPELL_FAILED_OUT_OF_RANGE;
+    }
+    else if (!bot->IsWithinCombatRange(target, maxRange))
+        return SPELL_FAILED_OUT_OF_RANGE;
+
+    if ((info->FacingCasterFlags & SPELL_FACING_FLAG_INFRONT) && !bot->HasInArc(static_cast<float>(M_PI), target) &&
+        !bot->IsWithinBoundaryRadius(target))
+        return SPELL_FAILED_UNIT_NOT_INFRONT;
+
+    if (rangeType == SPELL_RANGE_RANGED && !bot->IgnoresSpellMinRange(info))
+    {
+        if (bot->IsWithinRange(target, minRange + bot->GetMeleeRange(target)))
+            return SPELL_FAILED_TOO_CLOSE;
+    }
+    else if (minRange > 0.0f && bot->IsWithinCombatRange(target, minRange))
+        return SPELL_FAILED_TOO_CLOSE;
+
+    return SPELL_CAST_OK;
+}
 
 // Casts the first ability of the list that passes the strict check on the target. Returns it,
 // or nullptr when none went off. With a usage kind, why each ability failed is counted.
@@ -1094,6 +1165,9 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
     // trace du 10/10 19:59:04-19:59:12), sans banc (ce refus n'est pas durable), et l'action d'attaque occupait le
     // tour au lieu de laisser le bot avancer. Meme test que le coeur : rien de ce qu'il accepterait n'est ecarte.
     bool const seulementCapacites = !spells.empty() && bot->HasPlayerFlag(PLAYER_ALLOW_ONLY_ABILITY);
+    // Pre-controle de la cible (CoaPreControleCible) : ligne de vue calculee une fois par appel, et un seul demi-tour.
+    int8 vueCible = -1;
+    bool tourne = false;
 
     for (Usable const& spell : spells)
     {
@@ -1156,18 +1230,39 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         if (stillBenched)
             continue;
 
+        // Pre-controle (CoaPreControleCible) : hors de portee, sans ligne de vue ou trop pres, le sort est ecarte d'avance,
+        // sans banc ni echec consigne (StrictCheck ne mettait aucun de ces trois refus au banc). Pas face a la cible :
+        // le bot se TOURNE (comme PlayerbotAI::CastSpell le ferait), une fois par appel, sauf s'il suit un deplacement
+        // voulu de l'IA d'arene (recul, retour, cachette : se retourner le figerait) ou s'il a perdu le controle
+        // (etourdi, en fuite, en charge) ; sinon, le sort est ecarte.
+        SpellCastResult pre = CoaPreControleCible(bot, info, target, vueCible);
+        if (pre == SPELL_FAILED_UNIT_NOT_INFRONT && !tourne && bot->IsAlive() &&
+            !bot->HasUnitState(UNIT_STATE_LOST_CONTROL) && !CoaAreneMouvementVoulu(botAI))
+        {
+            ServerFacade::instance().SetFacingTo(bot, target);
+            tourne = true;
+            pre = CoaPreControleCible(bot, info, target, vueCible);
+        }
+        if (pre != SPELL_CAST_OK)
+            continue;
+
         SpellCastResult const check = StrictCheck(bot, info, target);
         if (check == SPELL_CAST_OK)
         {
             // PlayerbotAI::CastSpell refuses a spell with a cast time while the bot moves: stop
             // now and cast it on a later tick, once standing still.
+            // CoA (banc d'arene du 10/10, `en_mouvement` x15) : sauf pendant un deplacement VOULU de l'IA d'arene
+            // (recul, retour, cachette, cacheur en route) -- l'arreter defaisait ce deplacement (le retour se
+            // declarait fini des que le bot ne bougeait plus) ; on passe alors au sort suivant, un instantane s'il y en a.
             if (bot->isMoving() && info->CalcCastTime(bot))
             {
-                bot->StopMoving();
+                bool const voulu = CoaAreneMouvementVoulu(botAI);
+                if (!voulu)
+                    bot->StopMoving();
                 if (usage != 255)
                     RecordFailure(usage, info->Id, FAILURE_MOVING);
                 if (trace)
-                    CoaAreneTracerSort(botAI, bot, info, target, check, "en_mouvement");
+                    CoaAreneTracerSort(botAI, bot, info, target, check, voulu ? "en_mouvement_voulu" : "en_mouvement");
                 continue;
             }
 

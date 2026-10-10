@@ -116,6 +116,15 @@ CoaAreneEtat& CoaAreneEtatDe(PlayerbotAI* botAI)
     return static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->arene;
 }
 
+// Declare avant CastFirst (CoaAiObjectContext.cpp). Lit seulement l'etat du bot, ecrit par ses propres actions d'arene :
+// tous ces champs sont nuls hors arene et hors duel, et CoaAreneClore les remet a zero en fin d'engagement (la
+// cachette L2, elle, par CoaArenePilierSuivre). Aucune mise a jour d'etat ici : appele a chaque sort.
+bool CoaAreneMouvementVoulu(PlayerbotAI* botAI)
+{
+    CoaAreneEtat const& etat = CoaAreneEtatDe(botAI);
+    return etat.actif && (etat.reculFinMs || etat.retourEnCours || etat.pilierDebutMs || etat.cacheurEnRouteMs);
+}
+
 bool CoaAreneArmee()
 {
     return sPlayerbotAIConfig.coaAreneIaCommune || sPlayerbotAIConfig.coaAreneIaRanger;
@@ -679,9 +688,35 @@ bool CoaAreneFiltreEtatActif(PlayerbotAI* botAI, Player* bot)
     return CoaAreneEnCombat(CoaAreneMaj(botAI, bot));
 }
 
+// Le sort accorde-t-il une immunite qui peut lever l'entrave ? Recopie de la premiere boucle de
+// Spell::CheckCasterAuras (Spell.cpp:6968-6984) : SPELL_ATTR1_IMMUNITY_PURGES_EFFECT n'exempte de rien par lui-meme ;
+// le coeur ne regarde plus loin que si un effet accorde une immunite d'ecole, de mecanisme ou de dissipation (ou l'un
+// des sept bijoux JcJ nommes). Banc de reference du 10/10 23:38-23:42 (Paris) : Eye of Archimonde 804052, Stoicism
+// 804802, Vigil of the Moon 802797 portent l'attribut (AttributesEx 0x8000) SANS aucun effet d'immunite -- 32 refus
+// SPELL_FAILED_STUNNED que le filtre laissait passer, l'attribut seul suffisant a les exempter.
+bool CoaAreneAccordeImmunite(SpellInfo const* info)
+{
+    if (!info->HasAttribute(SPELL_ATTR1_IMMUNITY_PURGES_EFFECT))
+        return false;
+    switch (info->Id)
+    {
+        case 42292: case 59752: case 65547: case 53490: case 19574: case 34471: case 46227:
+            return true;
+        default:
+            break;
+    }
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        if (info->Effects[i].ApplyAuraName == SPELL_AURA_SCHOOL_IMMUNITY ||
+            info->Effects[i].ApplyAuraName == SPELL_AURA_MECHANIC_IMMUNITY ||
+            info->Effects[i].ApplyAuraName == SPELL_AURA_DISPEL_IMMUNITY)
+            return true;
+    return false;
+}
+
 bool CoaAreneBloqueParEtat(Player* bot, SpellInfo const* info)
 {
-    if (info->HasAttribute(SPELL_ATTR6_NOT_AN_ATTACK) || info->HasAttribute(SPELL_ATTR1_IMMUNITY_PURGES_EFFECT))
+    // Un sort qui accorde une immunite : le coeur compare alors chaque aura du lanceur a l'immunite ; on le lui laisse.
+    if (info->HasAttribute(SPELL_ATTR6_NOT_AN_ATTACK) || CoaAreneAccordeImmunite(info))
         return false;
 
     uint32 const drapeaux = bot->GetUnitFlags();
@@ -756,7 +791,7 @@ bool CoaAreneDegatsDirects(SpellInfo const* info)
 }
 
 // Pret a ce tick : ni en recharge, ni au banc, et la ressource suffit (meme test que StrictCheck). Le reste
-// (portee, orientation) a deja ete filtre par DropUncastableHere chez l'appelant.
+// (portee) a deja ete filtre par DropUncastableHere chez l'appelant ; l'orientation, CastFirst la corrige (demi-tour).
 bool CoaAreneSortPret(PlayerbotAI* botAI, Player* bot, Usable const& spell)
 {
     auto const& banc = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
@@ -1394,14 +1429,24 @@ public:
         if (!CoaAreneL1Actif(etat) || (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL) ||
             CoaAreneReculEnCours(etat) || CoaAreneCachetteEnCours(etat))
             return false;
-        // Un retour en cours se relance au plus une fois par seconde : la destination suit l'adversaire.
-        if (etat.dernierRetourMs && getMSTimeDiff(etat.dernierRetourMs, getMSTime()) < CoaAreneRetourReessaiMs)
-            return false;
         if (!bot->IsAlive())
             return false;
         Unit* adv = CoaAreneAdversaireVivant(bot, etat);
         if (!adv)
             return false;
+        // Un retour en cours se relance au plus une fois par seconde : la destination suit l'adversaire. SAUF la reprise
+        // de cible (banc du 10/10 23:31-23:37 Paris : 9 % des secondes du chasseur sans cible ALORS que l'adversaire
+        // etait en vue, moteur hors combat) : elle ne bouge pas le bot et part au tick ou l'adversaire reparait.
+        // Cout : un test de ligne de vue de plus par tour, pour un bot d'arene 1v1 ou de duel sans cible seulement.
+        bool const relanceRecente =
+            etat.dernierRetourMs && getMSTimeDiff(etat.dernierRetourMs, getMSTime()) < CoaAreneRetourReessaiMs;
+        if (relanceRecente)
+        {
+            // CIBLE n'est possible que sans cible valide (CoaAreneRetourRaison) : test court d'abord.
+            Unit* cible = AI_VALUE(Unit*, "current target");
+            if (cible && AttackersValue::IsValidTarget(cible, bot))
+                return false;
+        }
         // Un Ranger furtif (Elude) ouvre par « coa arene ouverture » -- mais seulement quand elle peut tirer (en vue, a
         // 40 yd au plus) et n'attend pas : ailleurs, c'est le retour qui le mene (CoaAreneOuvertureDansSaFenetre, banc
         // du 10/10 22:56). Les autres classes n'ont pas cette ouverture : furtives, elles reviennent toujours.
@@ -1409,6 +1454,8 @@ public:
             !CoaAreneOuvertureEnAttente(etat))
             return false;
         uint8 const raison = CoaAreneRetourRaison(botAI, bot, adv);
+        if (relanceRecente)
+            return raison == COA_RETOUR_CIBLE;
         if (raison == COA_RETOUR_AUCUN)
             return false;
         return raison == COA_RETOUR_CIBLE || CoaAreneLibreDeBouger(botAI, bot);
@@ -1741,6 +1788,33 @@ public:
                 x = px;
                 y = py;
                 z = pz;
+            }
+        }
+        // Banc du 10/10 23:35:04-23:35:40 (Paris), chasseur 2600 : arrive a 3-8 yd du cacheur, TOUJOURS sans ligne de vue
+        // (un angle de mur ou de tombe entre les deux), immobile -- le point vise etait la position de l'adversaire,
+        // deja atteinte (IsDuplicateMove), et rien d'autre n'etait essaye. Pres de lui (10 yd) ou sur un point deja
+        // demande : un point a 3 yd de lui, sur 8 directions, atteignable depuis LUI en ligne droite (pas derriere le mur
+        // qui le cache) et en vue de lui. Cout borne : 8 lancers de rayon et 8 tests de vue, une fois par seconde au plus
+        // (relance du retour), seulement dans ce cas.
+        if (raison == COA_RETOUR_VUE && (avant <= 10.0f || IsDuplicateMove(x, y, z)))
+        {
+            float const rayon = 3.0f + bot->GetCombatReach() + adv->GetCombatReach();
+            float const angle0 = adv->GetAngle(bot);
+            for (uint8 i = 0; i < 8; ++i)
+            {
+                float const angle = angle0 + float(i) * float(M_PI) / 4.0f;
+                float px = adv->GetPositionX() + std::cos(angle) * rayon;
+                float py = adv->GetPositionY() + std::sin(angle) * rayon;
+                float pz = adv->GetPositionZ();
+                if (!bot->GetMap()->CheckCollisionAndGetValidCoords(adv, adv->GetPositionX(), adv->GetPositionY(),
+                                                                    adv->GetPositionZ(), px, py, pz, false))
+                    continue;
+                if (adv->GetExactDist2d(px, py) < 1.5f || !adv->IsWithinLOS(px, py, pz + 2.0f) || IsDuplicateMove(px, py, pz))
+                    continue;
+                x = px;
+                y = py;
+                z = pz;
+                break;
             }
         }
         if (IsDuplicateMove(x, y, z))

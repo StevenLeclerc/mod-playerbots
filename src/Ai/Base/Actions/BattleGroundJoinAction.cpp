@@ -876,6 +876,23 @@ bool BGStatusAction::Execute(Event event)
 
     if (Time1 == TIME_TO_AUTOREMOVE)  // Battleground is over, bot needs to leave
     {
+        // CoA (banc d'arene du 10/10/2026, match id=6, 21:32:47 UTC) : l'avis « fin de partie » de l'arene PRECEDENTE
+        // (instance 3, finie a 21:32:38) a ete traite par le bot 1095 neuf secondes plus tard, alors qu'il etait deja
+        // dans l'instance 6 en preparation : LeaveBG a quitte la NOUVELLE arene, et le coeur l'a donnee gagnee a
+        // l'autre (combat 0 s). Le coeur n'envoie cet avis qu'apres SetStatus(STATUS_WAIT_LEAVE) (Battleground.cpp,
+        // EndBattleground) : une arene ou un champ de bataille du bot qui n'est pas en WAIT_LEAVE n'est pas celui que
+        // l'avis annonce fini. L'identifiant d'instance du paquet ne suffit pas : il vaut 0 pour toute arene
+        // (BattlegroundMgr::CreateClientVisibleInstanceId). Avis perime : ignore, rien d'autre ne change.
+        if (Battleground* courant = bot->GetBattleground())
+            if (courant->GetStatus() != STATUS_WAIT_LEAVE ||
+                (instanceId && courant->GetClientInstanceID() && instanceId != courant->GetClientInstanceID()))
+            {
+                LOG_INFO("playerbots", "Bot {} <{}>: BG status TIME_TO_AUTOREMOVE perime ignore (statut courant {}, "
+                         "instance client paquet {} courante {})", bot->GetGUID().ToString().c_str(), bot->GetName(),
+                         uint32(courant->GetStatus()), instanceId, courant->GetClientInstanceID());
+                return false;
+            }
+
         LOG_INFO("playerbots", "Bot {} <{}> ({} {}): Received BG status TIME_TO_AUTOREMOVE for {} {}",
                  bot->GetGUID().ToString().c_str(), bot->GetName(), bot->GetLevel(),
                  bot->GetTeamId() == TEAM_ALLIANCE ? "A" : "H", isArena ? "Arena" : "BG", _bgType);
