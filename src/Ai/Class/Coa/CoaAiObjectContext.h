@@ -93,6 +93,15 @@ struct CoaAreneEtat
     uint32 reculs = 0, reculsReussis = 0, ruptures = 0, bursts = 0, ouvertures = 0;
     uint32 retours = 0, piliers = 0;
     float pvMin = 100.0f;
+    // Banc d'arene 1v1, mode cacheur (CoaAreneIa.inc ; `.coa arene banc ... cacheur=A|B`) : decision lue une fois
+    // par instance (CoaArene1v1::CacheurDeBanc), deplacement vers une cachette en cours, essais, dernier tir.
+    uint32 cacheurInstance = 0;    // instance d'arene de la decision (0 : aucune)
+    bool cacheurOui = false;
+    uint32 cacheurEnRouteMs = 0;   // 0 : aucun deplacement vers une cachette en cours
+    uint32 cacheurEssaiMs = 0;
+    uint32 cacheurTirMs = 0;
+    uint32 cacheurJournalMs = 0;   // debit de la ligne « cacheur_aucun »
+    uint32 cacheurCaches = 0, cacheurTirs = 0, cacheurAucun = 0, cacheurVu = 0;
 };
 
 /*

@@ -38,6 +38,12 @@ bool Inscrire(Player* joueur, std::string const& origine, std::string& refus, ui
 // affecter, preparer ni deplacer un gladiateur engage. Aucun match : un chargement
 // atomique.
 bool GladiateurEngage(uint32 guidLow);
+// Banc (AiPlayerbot.Arene1v1.Banc, `.coa arene banc`) : le bot A d'un match de banc tient le role
+// « joueur » ; GladiateurEngage le compte aussi (Directeur et trace le traitent comme un gladiateur).
+
+// TOUT FIL (verrou court). Vrai : `guidLow` est le CACHEUR designe d'un match de banc non termine.
+// Lu par l'IA d'arene (CoaAreneIa.inc) une fois par instance d'arene.
+bool CacheurDeBanc(uint32 guidLow);
 
 // Fil de l'IA du bot (fil de carte de l'arene) ou fil monde. Vrai : `bot` est le gladiateur
 // d'une arene 1v1 TERMINEE (STATUS_WAIT_LEAVE) dont le depart est encore retenu

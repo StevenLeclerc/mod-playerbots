@@ -435,6 +435,8 @@ public:
     float coaHvCoefEquipVertMax;
     float coaHvCoefEquipBleuMin;       // class 2/4, qualite 3
     float coaHvCoefEquipBleuMax;
+    float coaHvCoefRecetteMin;         // class 9, qualite 1-3
+    float coaHvCoefRecetteMax;
     uint32 coaHvMiseMinPct;            // mise a prix, en % du prix d'achat immediat
     uint32 coaHvMiseMaxPct;
     uint32 coaHvBruitPct;              // +/- sur le prix unitaire
@@ -869,6 +871,9 @@ public:
     // tentative de sort et une par seconde, 5 lignes/s au plus par gladiateur. Defaut 1 : elle ne
     // concerne que les gladiateurs engages dans une arene 1v1 en cours.
     bool arene1v1Trace;
+    // Banc d'arene 1v1 BOT CONTRE BOT (`.coa arene banc`, CoaArene1v1.cpp ; coa-project/outils/banc-arene.py).
+    // Defaut faux : la commande refuse (`desactive_banc`), rien d'autre ne change.
+    bool arene1v1Banc;
 
 private:
     PlayerbotAIConfig() = default;

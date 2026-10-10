@@ -1044,6 +1044,14 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
     bool const filtreEtat = !spells.empty() && CoaAreneFiltreEtatActif(botAI, bot);
     // Trace d'arene 1v1 : un test par appel ; faux (InArena) pour tout bot hors arene.
     bool const trace = !spells.empty() && CoaAreneTraceActive(botAI, bot);
+    // CoA (10/10/2026 nuit, arene 1v1 id=1, gladiateur 2543) : sous une aura SPELL_AURA_ALLOW_ONLY_ABILITY (263 ; ici
+    // Boulder Dash 500692, dont chaque coup 500693 la repose pendant les 10 s de la ruee ; aussi Bladestorm, Killing
+    // Spree...), le joueur porte PLAYER_ALLOW_ONLY_ABILITY et Spell::CheckCast (Spell.cpp:5754) refuse TOUT sort lance
+    // sans drapeau de declenchement par SPELL_FAILED_SPELL_IN_PROGRESS, sauf les sorts « au prochain coup »
+    // (SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE) et les passifs. Le bot les tentait tous a chaque tick (36 refus en 9 s,
+    // trace du 10/10 19:59:04-19:59:12), sans banc (ce refus n'est pas durable), et l'action d'attaque occupait le
+    // tour au lieu de laisser le bot avancer. Meme test que le coeur : rien de ce qu'il accepterait n'est ecarte.
+    bool const seulementCapacites = !spells.empty() && bot->HasPlayerFlag(PLAYER_ALLOW_ONLY_ABILITY);
 
     for (Usable const& spell : spells)
     {
@@ -1057,6 +1065,11 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // CoaArene L0 : refuse d'avance par l'etat du lanceur (etourdi, en fuite, silence...), voir
         // CoaAreneBloqueParEtat. Ni banc ni echec consigne : le sort n'est pas en cause.
         if (filtreEtat && CoaAreneBloqueParEtat(bot, info))
+            continue;
+
+        // Voir `seulementCapacites` : refuse d'avance, ni banc ni echec consigne.
+        if (seulementCapacites && !info->HasAttribute(SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE) &&
+            !info->HasAttribute(SPELL_ATTR0_PASSIVE))
             continue;
 
         // A spell on cooldown would only fail with SPELL_FAILED_NOT_READY.

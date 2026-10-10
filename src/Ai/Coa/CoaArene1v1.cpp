@@ -94,6 +94,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <map>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -118,6 +119,17 @@ constexpr uint32 ATTENTE_APPARIEMENT_S = 30;    // au-dela : abandon `sans_appar
 constexpr uint32 OUBLI_S = 3600;                // filet : un match qu'aucune fin n'a clos
 constexpr uint32 MAINTIEN_EN_LIGNE_S = 300;
 constexpr uint32 PREPARATION_SCORE_ECART = 6;   // meme valeur que CoaDirecteur.cpp
+
+// Banc bot contre bot (`.coa arene banc`, AiPlayerbot.Arene1v1.Banc). Le coeur ne borne une arene qu'a 46 min
+// (Battleground.cpp:305) : le banc la termine lui-meme, nulle (EndBattleground(TEAM_NEUTRAL)), apres
+// BANC_COMBAT_MAX_S de combat, ou BANC_SANS_DEBUT_S apres l'inscription si les portes ne se sont jamais ouvertes
+// (preparation d'arene : 60 s). 150 + ~65 s < 4 min, le delai d'abandon de outils/banc-arene.py.
+constexpr uint32 BANC_COMBAT_MAX_S = 150;
+constexpr uint32 BANC_SANS_DEBUT_S = 150;
+// Apres toute demande humaine (dialogue d'un maitre d'arene, inscription), le banc refuse `occupe` ce temps-la.
+constexpr uint32 BANC_PAUSE_HUMAIN_S = 900;
+// Matchs de banc simultanes, au plus (charge du fil monde : chaque preparation passe par la fabrique).
+constexpr uint32 BANC_MAX = 4;
 
 enum class Etat : uint8
 {
@@ -163,6 +175,14 @@ struct Match
     bool departLibre = false; // ecrit au FIL MONDE sous `verrou`, lu par RetenirDepart
     uint32 essaisDepart = 0;  // LeaveBG tentes par le suivi
     bool apaise = false;      // UNIT_FLAG_IMMUNE_TO_PC pose pendant la retenue (Apaiser)
+    // Banc bot contre bot (`.coa arene banc`) : `joueur` est alors le bot A, traite comme un second gladiateur
+    // (protection, entree forcee, depart). Jamais vrai pour un match humain.
+    bool banc = false;
+    uint8 classeJoueur = 0;   // classe du bot A
+    uint8 cacheur = 0;        // 0 aucun, 1 A (joueur), 2 B (gladiateur)
+    uint32 essaisEntreeJ = 0; // entrees forcees du bot A tentees
+    bool strategieVueJ = false;
+    bool limiteFaite = false; // fin nulle du banc deja demandee (BANC_COMBAT_MAX_S)
 };
 
 std::mutex verrou;               // matchs, prochainId
@@ -170,6 +190,9 @@ std::vector<Match> matchs;
 uint32 prochainId = 1;
 std::atomic<bool> tablesPosees{false};
 std::atomic<uint32> nbMatchs{0};   // = matchs.size(), pour GladiateurEngage (tout fil)
+// Maintenant() de la derniere demande d'un HUMAIN (inscription, dialogue d'un maitre d'arene) : le banc lui cede.
+// Ecrit au fil monde (Inscrire) et au fil du paquet CMSG_GOSSIP_HELLO (CanCreatureGossipHello) : atomique.
+std::atomic<uint32> dernierHumainS{0};
 
 // Gladiateurs PROTEGES (inattaquables, passifs) : FIL MONDE SEUL, sans verrou.
 std::unordered_set<uint32> proteges;
@@ -503,12 +526,13 @@ void Reequiper(Player* bot, uint32 qualite)
 // du joueur (niveau, sorts, talents, equipement), puis l'equipement rapproche de celui
 // du joueur par la QUALITE, puis plein de vie et de ressource (CoaDuelCommandScript
 // RemettreAPlein, meme ordre : recalcul avant remplissage).
-void Preparer(Player* bot, Player* joueur, uint32 idMatch)
+// `reference` : celui dont l'equipement sert d'etalon (le joueur ; au banc, le bot A pour B, personne pour A :
+// alors aucun reequipement). `niveau` : celui du joueur, ou celui du banc.
+void Preparer(Player* bot, uint32 niveau, Player* reference, uint32 idMatch)
 {
     uint32 const debutMs = getMSTime();
     uint32 const avant = bot->GetLevel();
-    uint32 const niveau = joueur->GetLevel();
-    // Jamais vers le bas : Inscrire ne tire que des gladiateurs de niveau <= joueur.
+    // Jamais vers le bas : Inscrire ne tire que des gladiateurs de niveau <= joueur, le banc refuse un bot au-dessus.
     if (avant < niveau)
     {
         if (bot->IsMounted())
@@ -521,11 +545,11 @@ void Preparer(Player* bot, Player* joueur, uint32 idMatch)
     // fabrique (Randomize recompose : sans gladiateur engage, la specialisation du hachage revient), AVANT
     // l'equipement.
     uint32 const specialisation = CoaSpecialiserGladiateur(bot);
-    uint32 const scoreJoueur = ScoreEquipement(joueur, bot->GetLevel());
+    uint32 const scoreJoueur = reference ? ScoreEquipement(reference, bot->GetLevel()) : 0;
     uint32 const scoreAvant = ScoreEquipement(bot, bot->GetLevel());
     uint32 scoreApres = scoreAvant;
     uint32 reequipe = 0;
-    if (scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur)
+    if (reference && scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur)
     {
         Reequiper(bot, 0);
         reequipe = static_cast<uint32>(sPlayerbotAIConfig.randomGearQualityLimit);
@@ -533,7 +557,7 @@ void Preparer(Player* bot, Player* joueur, uint32 idMatch)
     }
     for (uint32 qualite : {uint32(ITEM_QUALITY_UNCOMMON), uint32(ITEM_QUALITY_NORMAL)})
     {
-        if (scoreApres <= scoreJoueur + PREPARATION_SCORE_ECART)
+        if (!reference || scoreApres <= scoreJoueur + PREPARATION_SCORE_ECART)
             break;
         Reequiper(bot, qualite);
         reequipe = qualite;
@@ -647,7 +671,8 @@ void SortirDeFile(Player* p, bool prevenir)
 
 void Dire(Player* p, std::string const& texte)
 {
-    if (p && p->GetSession())
+    // Jamais a un bot (le bot A d'un banc tient le role du joueur) : il n'a pas d'interface.
+    if (p && p->GetSession() && !GET_PLAYERBOT_AI(p))
         ChatHandler(p->GetSession()).SendSysMessage(texte);
 }
 
@@ -737,6 +762,58 @@ uint8 ClasseParRotation(uint32 joueurGuid, std::vector<Player*> const& libres)
     return classes[urand(0, uint32(classes.size()) - 1)];
 }
 
+/*
+ * FIL MONDE, AUCUN verrou tenu (EndBattleground -> OnBattlegroundEnd prend `verrou`). Un humain manque de
+ * gladiateur : le banc rend TOUS les siens. En file ou invites sans etre entres : sortis de la file, liberes, match
+ * retire tout de suite (le recensement qui suit les retrouve libres). En arene : fin nulle ; ils sortent dans les
+ * secondes qui suivent (suivi, etat FINI) et l'humain, prevenu « reessayez dans un moment », les retrouve.
+ * Rend le nombre de matchs de banc cedes.
+ */
+uint32 CederLeBanc(char const* raison)
+{
+    std::vector<Match> bancs;
+    {
+        std::lock_guard<std::mutex> garde(verrou);
+        for (Match const& m : matchs)
+            if (m.banc && m.etat != Etat::FINI)
+                bancs.push_back(m);
+    }
+    uint32 cedes = 0;
+    uint32 const maintenant = Maintenant();
+    for (Match const& m : bancs)
+    {
+        Player* a = ObjectAccessor::FindPlayerByLowGUID(m.joueur);
+        Player* b = ObjectAccessor::FindPlayerByLowGUID(m.gladiateur);
+        bool const dedans = (a && a->InBattleground()) || (b && b->InBattleground());
+        if ((m.etat == Etat::EN_FILE || m.etat == Etat::INVITE) && !dedans)
+        {
+            SortirDeFile(a, false);
+            SortirDeFile(b, false);
+            Liberer(m.joueur, m.id, raison);
+            Liberer(m.gladiateur, m.id, raison);
+            LOG_INFO("playerbots", "coa arene1v1: abandon id={} joueur={} gladiateur={} etat={} raison={} duree_s={} banc=1",
+                     m.id, m.joueur, m.gladiateur, NomEtat(m.etat), raison, maintenant - m.inscritS);
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                matchs.erase(std::remove_if(matchs.begin(), matchs.end(), [&](Match const& x) { return x.id == m.id; }),
+                             matchs.end());
+                nbMatchs.store(uint32(matchs.size()), std::memory_order_release);
+            }
+            ++cedes;
+            continue;
+        }
+        Battleground* bg = m.instance ? sBattlegroundMgr->GetBattleground(m.instance, BATTLEGROUND_TYPE_NONE) : nullptr;
+        if (bg && EstArene1v1(bg) && (bg->GetStatus() == STATUS_WAIT_JOIN || bg->GetStatus() == STATUS_IN_PROGRESS))
+        {
+            LOG_INFO("playerbots", "coa arene1v1: banc_cede id={} instance={} raison={} statut={}", m.id, m.instance, raison,
+                     uint32(bg->GetStatus()));
+            bg->EndBattleground(TEAM_NEUTRAL);
+            ++cedes;
+        }
+    }
+    return cedes;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------ inscription
@@ -762,6 +839,8 @@ bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::stri
         return Refuser("desactive");
     if (GET_PLAYERBOT_AI(joueur) || !joueur->GetSession())
         return Refuser("pas_humain");
+    // Un humain demande l'arene : le banc se tait BANC_PAUSE_HUMAIN_S (refus `occupe`), quelle que soit l'issue.
+    dernierHumainS.store(std::max<uint32>(Maintenant(), 1), std::memory_order_release);
     if (joueur->GetLevel() < sPlayerbotAIConfig.arene1v1NiveauMin)
         return Refuser("niveau");
     if (!joueur->IsInWorld() || joueur->IsBeingTeleported())
@@ -814,6 +893,20 @@ bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::stri
     // egaux), montes au niveau du joueur. Les gladiateurs montent ainsi avec les joueurs : la
     // reserve se renouvelle un jour (gladiateurs.py --constituer).
     Recensement rec = Recenser(joueur);
+    // L'humain est prioritaire sur le banc : s'il manque de gladiateur (de la classe demandee, le cas echeant),
+    // le banc lui rend les siens, puis on recense de nouveau.
+    {
+        bool manque = rec.libres.empty();
+        if (!manque && classeVoulue)
+            manque = std::none_of(rec.libres.begin(), rec.libres.end(),
+                                  [classeVoulue](Player* b) { return b->getClass() == classeVoulue; });
+        if (manque)
+            if (uint32 const cedes = CederLeBanc("humain_prioritaire"))
+            {
+                LOG_INFO("playerbots", "coa arene1v1: banc cede au joueur={} matchs={}", jg, cedes);
+                rec = Recenser(joueur);
+            }
+    }
     std::vector<Player*>& libres = rec.libres;
     std::string const& raisons = rec.raisons;
     std::string const detailRecensement =
@@ -846,7 +939,7 @@ bool CoaArene1v1::Inscrire(Player* joueur, std::string const& origine, std::stri
              origine, bg, bot->GetName(), uint32(classe), classeVoulue ? "demande" : "rotation", libresToutes, rec.total,
              uint32(tranche->GetBracketId()));
 
-    Preparer(bot, joueur, idMatch);
+    Preparer(bot, joueur->GetLevel(), joueur, idMatch);
 
     // Apres la fabrique : le gladiateur doit etre encore libre et dans la MEME tranche.
     PvPDifficultyEntry const* trancheBot = GetBattlegroundBracketByLevel(bgt->GetMapId(), bot->GetLevel());
@@ -906,7 +999,19 @@ bool CoaArene1v1::GladiateurEngage(uint32 guidLow)
         return false;
     std::lock_guard<std::mutex> garde(verrou);
     for (Match const& m : matchs)
-        if (m.gladiateur == guidLow)
+        if (m.gladiateur == guidLow || (m.banc && m.joueur == guidLow))
+            return true;
+    return false;
+}
+
+bool CoaArene1v1::CacheurDeBanc(uint32 guidLow)
+{
+    if (!guidLow || !nbMatchs.load(std::memory_order_acquire))
+        return false;
+    std::lock_guard<std::mutex> garde(verrou);
+    for (Match const& m : matchs)
+        if (m.banc && m.etat != Etat::FINI &&
+            ((m.cacheur == 1 && m.joueur == guidLow) || (m.cacheur == 2 && m.gladiateur == guidLow)))
             return true;
     return false;
 }
@@ -947,7 +1052,8 @@ struct Verdict
 // (PROCESS_THREADUNSAFE, Opcodes.cpp:856). Le coeur refuse en silence un joueur en
 // combat (BattleGroundHandler.cpp:420) : combat arrete juste avant, nouvel essai au tick
 // suivant sinon.
-void FaireEntrer(Player* g, Match& m)
+// `estJoueur` : le bot A d'un banc (role « joueur »), entre de force comme le gladiateur.
+void FaireEntrer(Player* g, Match& m, bool estJoueur = false)
 {
     if (!g || !g->GetSession() || g->InBattleground() || !m.instance ||
         !g->IsInvitedForBattlegroundQueueType(FILE_1V1))
@@ -963,11 +1069,13 @@ void FaireEntrer(Player* g, Match& m)
     WorldPacket paquet(CMSG_BATTLEFIELD_PORT, 1 + 1 + 4 + 2 + 1);
     paquet << uint8(TYPE_1V1) << uint8(0) << uint32(bg->GetBgTypeID()) << uint16(0x1F90) << uint8(1);
     g->GetSession()->HandleBattleFieldPortOpcode(paquet);
-    ++m.essaisEntree;
-    if (g->InBattleground() || m.essaisEntree == 1 || m.essaisEntree % 10 == 0)
+    uint32& essais = estJoueur ? m.essaisEntreeJ : m.essaisEntree;
+    ++essais;
+    if (g->InBattleground() || essais == 1 || essais % 10 == 0)
         LOG_INFO("playerbots", "coa arene1v1: entree_forcee id={} gladiateur={} instance={} bg_type={} essai={} reussie={}"
-                 " en_combat={}", m.id, m.gladiateur, m.instance, uint32(bg->GetBgTypeID()), m.essaisEntree,
-                 g->InBattleground() ? 1 : 0, g->IsInCombat() ? 1 : 0);
+                 " en_combat={}{}", m.id, g->GetGUID().GetCounter(), m.instance, uint32(bg->GetBgTypeID()), essais,
+                 g->InBattleground() ? 1 : 0, g->IsInCombat() ? 1 : 0,
+                 m.banc ? (estJoueur ? " banc=1 role=joueur" : " banc=1 role=gladiateur") : "");
 }
 
 // FIL MONDE, sans verrou. `m` est une COPIE.
@@ -983,11 +1091,13 @@ Verdict Examiner(Match m, uint32 maintenant)
     bool const gArene = g && g->InArena();
 
     auto Abandon = [&](char const* raison) {
-        SortirDeFile(j, true);
+        SortirDeFile(j, !m.banc);   // banc : A est un bot, pas de paquet
         SortirDeFile(g, false);
         Liberer(m.gladiateur, m.id, raison);
-        LOG_INFO("playerbots", "coa arene1v1: abandon id={} joueur={} gladiateur={} etat={} raison={} duree_s={}", m.id,
-                 m.joueur, m.gladiateur, NomEtat(m.etat), raison, maintenant - m.inscritS);
+        if (m.banc)
+            Liberer(m.joueur, m.id, raison);
+        LOG_INFO("playerbots", "coa arene1v1: abandon id={} joueur={} gladiateur={} etat={} raison={} duree_s={}{}", m.id,
+                 m.joueur, m.gladiateur, NomEtat(m.etat), raison, maintenant - m.inscritS, m.banc ? " banc=1" : "");
         v.retirer = true;
     };
 
@@ -995,10 +1105,14 @@ Verdict Examiner(Match m, uint32 maintenant)
     // protection tombe, la composition ordinaire revient (avec `arena`).
     if (g && g->InBattleground())
         Liberer(m.gladiateur, m.id, "entree");
+    if (m.banc && j && j->InBattleground())
+        Liberer(m.joueur, m.id, "entree");
 
     if (m.etat == Etat::FINI)
     {
         Liberer(m.gladiateur, m.id, "fin");
+        if (m.banc)
+            Liberer(m.joueur, m.id, "fin");
         // Depart differe (AiPlayerbot.Arene1v1.DelaiDepartS) : le gladiateur reste visible (le
         // coeur a ressuscite tout le monde a la fin, Battleground.cpp:882-885) tant que le joueur
         // est dans l'arene et que le delai court : pas de disparition brutale. Le match reste dans
@@ -1038,7 +1152,8 @@ Verdict Examiner(Match m, uint32 maintenant)
             return v;
         }
         bool const jDedans = j && j->GetBattleground() == bg;
-        bool const echu = !delai || ecoule >= delai;
+        // Banc : personne a qui montrer le gladiateur, depart immediat.
+        bool const echu = m.banc || !delai || ecoule >= delai;
         // Pacifique a chaque tick tant qu'il est dans l'arene terminee, depart compris : LeaveBG recompose ses
         // strategies (ResetStrategies) avant que la teleportation ne l'ait sorti ; les drapeaux tiennent jusqu'a la
         // sortie, constatee au tick suivant (!gDedans -> Desapaiser).
@@ -1059,6 +1174,10 @@ Verdict Examiner(Match m, uint32 maintenant)
             ++m.essaisDepart;
             if (PlayerbotAI* ia = GET_PLAYERBOT_AI(g))
                 BGStatusAction::LeaveBG(ia);
+            // Banc : le bot A sort aussi (sa propre action « bg status » le ferait, plus tard).
+            if (m.banc && jDedans)
+                if (PlayerbotAI* iaJ = GET_PLAYERBOT_AI(j))
+                    BGStatusAction::LeaveBG(iaJ);
             if (m.essaisDepart == 1 || m.essaisDepart % 10 == 0)
                 LOG_INFO("playerbots", "coa arene1v1: depart id={} gladiateur={} raison={} vivant={} ecoule_s={} essai={}"
                          " sorti={}", m.id, m.gladiateur, echu ? "delai" : "joueur_parti", g->IsAlive() ? 1 : 0, ecoule,
@@ -1093,12 +1212,18 @@ Verdict Examiner(Match m, uint32 maintenant)
             {
                 m.etat = Etat::INVITE;
                 m.instance = gi.IsInvitedToBGInstanceGUID;
-                LOG_INFO("playerbots", "coa arene1v1: invitation id={} joueur={} gladiateur={} instance={} attente_s={}",
-                         m.id, m.joueur, m.gladiateur, m.instance, maintenant - m.inscritS);
+                LOG_INFO("playerbots", "coa arene1v1: invitation id={} joueur={} gladiateur={} instance={} attente_s={}{}",
+                         m.id, m.joueur, m.gladiateur, m.instance, maintenant - m.inscritS, m.banc ? " banc=1" : "");
                 FaireEntrer(g, m);
+                if (m.banc)
+                    FaireEntrer(j, m, true);
             }
             else if (m.etat == Etat::INVITE)
+            {
                 FaireEntrer(g, m);
+                if (m.banc)
+                    FaireEntrer(j, m, true);
+            }
             else if (m.etat == Etat::EN_FILE)
             {
                 if (maintenant - m.inscritS > ATTENTE_APPARIEMENT_S)
@@ -1122,6 +1247,44 @@ Verdict Examiner(Match m, uint32 maintenant)
         // Le joueur est entre le premier : le gladiateur, encore invite, entre aussi.
         if (g && gFile && !gArene && !g->InBattleground())
             FaireEntrer(g, m);
+        if (m.banc && j && jFile && !jArene && !j->InBattleground())
+            FaireEntrer(j, m, true);
+        // Banc : meme reposee de la strategie `arena` pour le bot A.
+        if (m.banc && j && jArene && !m.strategieVueJ)
+            if (PlayerbotAI* iaJ = GET_PLAYERBOT_AI(j))
+            {
+                if (!iaJ->HasStrategy("arena", BOT_STATE_COMBAT))
+                {
+                    iaJ->ResetStrategies(false);
+                    LOG_INFO("playerbots", "coa arene1v1: strategie id={} gladiateur={} arena_reposee={} banc=1 role=joueur",
+                             m.id, m.joueur, iaJ->HasStrategy("arena", BOT_STATE_COMBAT) ? 1 : 0);
+                }
+                m.strategieVueJ = iaJ->HasStrategy("arena", BOT_STATE_COMBAT);
+            }
+        // Banc : une arene ne se termine pas forcement (deux bots qui ne se trouvent pas, un cacheur) ; le coeur ne
+        // borne qu'a 46 min. Fin NULLE a BANC_COMBAT_MAX_S de combat (ou BANC_SANS_DEBUT_S sans ouverture). Fil
+        // monde, aucun verrou tenu (OnBattlegroundEnd le prend) ; une seule demande (limiteFaite).
+        if (m.banc && !m.limiteFaite &&
+            maintenant >= (m.debutCombatS ? m.debutCombatS + BANC_COMBAT_MAX_S : m.inscritS + BANC_SANS_DEBUT_S))
+        {
+            Battleground* bg = m.instance ? sBattlegroundMgr->GetBattleground(m.instance, BATTLEGROUND_TYPE_NONE) : nullptr;
+            bool const finissable = bg && EstArene1v1(bg) &&
+                                    (bg->GetStatus() == STATUS_WAIT_JOIN || bg->GetStatus() == STATUS_IN_PROGRESS);
+            LOG_INFO("playerbots", "coa arene1v1: banc_limite id={} instance={} combat_s={} fin_demandee={}", m.id,
+                     m.instance, m.debutCombatS ? maintenant - m.debutCombatS : 0, finissable ? 1 : 0);
+            if (finissable)
+            {
+                m.limiteFaite = true;  // revue D6 : seulement si la fin est vraiment demandee (sinon redemandee)
+                // Pose dans la table AVANT la fin : OnBattlegroundEnd l'ecrit sur la ligne `fin` (limite=1).
+                {
+                    std::lock_guard<std::mutex> garde(verrou);
+                    for (Match& x : matchs)
+                        if (x.id == m.id)
+                            x.limiteFaite = true;
+                }
+                bg->EndBattleground(TEAM_NEUTRAL);
+            }
+        }
         // La strategie `arena` : AiFactory l'ajoute a ResetStrategies quand InArena()
         // (AiFactory.cpp:552-556, 872-876). BGStatusAction l'appelle AVANT la
         // teleportation ; on la relit ici, une fois entre.
@@ -1142,6 +1305,8 @@ Verdict Examiner(Match m, uint32 maintenant)
         {
             LOG_INFO("playerbots", "coa arene1v1: fin id={} raison=oubli duree_s={}", m.id, maintenant - m.inscritS);
             Liberer(m.gladiateur, m.id, "oubli");
+            if (m.banc)
+                Liberer(m.joueur, m.id, "oubli");
             v.retirer = true;
             return v;
         }
@@ -1238,6 +1403,9 @@ public:
             it->relanceS = v.maj.relanceS;
             it->strategieVue = it->strategieVue || v.maj.strategieVue;
             it->essaisEntree = v.maj.essaisEntree;
+            it->strategieVueJ = it->strategieVueJ || v.maj.strategieVueJ;
+            it->essaisEntreeJ = v.maj.essaisEntreeJ;
+            it->limiteFaite = it->limiteFaite || v.maj.limiteFaite;
         }
     }
 
@@ -1383,10 +1551,13 @@ public:
             // Forfait : l'adversaire n'est jamais entre (CheckWinConditions a l'ouverture).
             bool const forfait = !m.joueurEntre || !m.gladiateurEntre;
             LOG_INFO("playerbots", "coa arene1v1: fin id={} instance={} vainqueur={} guid_vainqueur={} joueur={} nom_joueur={}"
-                     " gladiateur={} nom_gladiateur={} classe_gladiateur={} forfait={} duree_combat_s={} duree_totale_s={}",
+                     " gladiateur={} nom_gladiateur={} classe_gladiateur={} forfait={} duree_combat_s={} duree_totale_s={}{}",
                      m.id, m.instance, qui, vainqueur, m.joueur, m.nomJoueur, m.gladiateur, m.nomGladiateur,
                      uint32(m.classe), forfait ? 1 : 0,
-                     m.debutCombatS ? maintenant - m.debutCombatS : 0, maintenant - m.inscritS);
+                     m.debutCombatS ? maintenant - m.debutCombatS : 0, maintenant - m.inscritS,
+                     m.banc ? Acore::StringFormat(" banc=1 classe_joueur={} cacheur={} limite={}", uint32(m.classeJoueur),
+                                                  m.cacheur == 1 ? "A" : m.cacheur == 2 ? "B" : "0", m.limiteFaite ? 1 : 0)
+                            : std::string());
             m.etat = Etat::FINI;
             m.finS = maintenant;
         }
@@ -1400,8 +1571,8 @@ public:
         for (Match& m : matchs)
             if (m.instance == bg->GetInstanceID() && m.etat != Etat::FINI)
             {
-                LOG_INFO("playerbots", "coa arene1v1: fin id={} instance={} vainqueur=aucun raison=arene_detruite", m.id,
-                         m.instance);
+                LOG_INFO("playerbots", "coa arene1v1: fin id={} instance={} vainqueur=aucun raison=arene_detruite{}", m.id,
+                         m.instance, m.banc ? " banc=1" : "");
                 m.etat = Etat::FINI;
                 m.finS = Maintenant();
             }
@@ -1415,7 +1586,58 @@ public:
 class CoaArene1v1ArenaScript : public ArenaScript
 {
 public:
-    CoaArene1v1ArenaScript() : ArenaScript("CoaArene1v1ArenaScript", {ARENAHOOK_ON_ARENA_START}) {}
+    CoaArene1v1ArenaScript()
+        : ArenaScript("CoaArene1v1ArenaScript", {ARENAHOOK_ON_ARENA_START, ARENAHOOK_ON_BEFORE_CHECK_WIN_CONDITION})
+    {
+    }
+
+    /*
+     * Victoire a l'ouverture (match id=2 du 10/10, 20:00:02 UTC : Onyx contre Gnuklato, Guardian, « fin
+     * vainqueur=joueur duree_combat_s=0 », aucune ligne `debut`). Arena::CheckWinConditions (Arena.cpp), appele a
+     * l'ouverture des portes (Battleground.cpp:626), a chaque mort et a chaque depart, compte les vivants par
+     * Battleground::GetAlivePlayersCountByTeam (Battleground.cpp:1831), qui ecarte tout joueur dont
+     * HasByteFlag(UNIT_FIELD_BYTES_2, 3, FORM_SPIRITOFREDEMPTION) : un test de BIT (0x20) sur le numero de forme, pas
+     * une egalite. Toute forme 32-63 de SpellShapeshiftForm.dbc y passe pour l'Esprit de redemption : Line, Tower,
+     * Assault Formation (35-37, Guardian), Elude (51) et Stalker Form (52, Ranger), Lich Form, Draconic Form...
+     * Gnuklato portait Assault Formation (803709, aura 36 forme 37 = 0x25) : son equipe comptait 0 vivant, l'autre
+     * gagnait. La faction n'y est pour rien. Le coeur n'est pas touche : pour les seules arenes 1v1, la meme regle
+     * avec une EGALITE de forme, puis on rend faux (le coeur saute sa propre verification).
+     * Fil : celui de l'appelant (monde a l'ouverture, carte d'arene a une mort) ; ne lit que l'arene et ses
+     * joueurs, aucun verrou (P-137).
+     */
+    bool OnBeforeArenaCheckWinConditions(Battleground* const bg) override
+    {
+        if (!EstArene1v1(bg))
+            return true;
+        uint32 vivants[PVP_TEAMS_COUNT] = {0, 0};
+        uint32 ecartesParLeCoeur = 0;
+        for (auto const& [guid, p] : bg->GetPlayers())
+        {
+            if (!p || !p->IsAlive())
+                continue;
+            TeamId const equipe = p->GetBgTeamId();
+            if (equipe != TEAM_ALLIANCE && equipe != TEAM_HORDE)
+                continue;
+            ShapeshiftForm const forme = p->GetShapeshiftForm();
+            if (forme == FORM_SPIRITOFREDEMPTION)
+                continue;
+            ++vivants[equipe];
+            if (forme & FORM_SPIRITOFREDEMPTION)
+                ++ecartesParLeCoeur;
+        }
+        TeamId vainqueur = TEAM_NEUTRAL;
+        if (!vivants[TEAM_ALLIANCE] && bg->GetPlayersCountByTeam(TEAM_HORDE))
+            vainqueur = TEAM_HORDE;
+        else if (bg->GetPlayersCountByTeam(TEAM_ALLIANCE) && !vivants[TEAM_HORDE])
+            vainqueur = TEAM_ALLIANCE;
+        if (ecartesParLeCoeur)
+            LOG_INFO("playerbots", "coa arene1v1: verif_victoire instance={} statut={} vivants_alliance={} vivants_horde={}"
+                     " formes_0x20={} vainqueur={}", bg->GetInstanceID(), uint32(bg->GetStatus()), vivants[TEAM_ALLIANCE],
+                     vivants[TEAM_HORDE], ecartesParLeCoeur, uint32(vainqueur));
+        if (vainqueur != TEAM_NEUTRAL)
+            bg->EndBattleground(vainqueur);
+        return false;
+    }
 
     void OnArenaStart(Battleground* bg) override
     {
@@ -1426,8 +1648,8 @@ public:
             if (m.instance == bg->GetInstanceID() && m.etat != Etat::FINI)
             {
                 m.debutCombatS = Maintenant();
-                LOG_INFO("playerbots", "coa arene1v1: debut id={} instance={} joueur_present={} gladiateur_present={}",
-                         m.id, m.instance, m.joueurEntre ? 1 : 0, m.gladiateurEntre ? 1 : 0);
+                LOG_INFO("playerbots", "coa arene1v1: debut id={} instance={} joueur_present={} gladiateur_present={}{}",
+                         m.id, m.instance, m.joueurEntre ? 1 : 0, m.gladiateurEntre ? 1 : 0, m.banc ? " banc=1" : "");
             }
     }
 };
@@ -1452,6 +1674,9 @@ public:
             return false;
         if (sBattlegroundMgr->GetBattleMasterBG(creature->GetEntry()) != BATTLEGROUND_AA)
             return false;
+        // Un humain au maitre d'arene : le banc se tait (refus `occupe`). Atomique : ce crochet tourne au fil du paquet.
+        if (!GET_PLAYERBOT_AI(player))
+            dernierHumainS.store(std::max<uint32>(Maintenant(), 1), std::memory_order_release);
         player->PrepareGossipMenu(creature, creature->GetGossipMenuId(), true);
         AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Arène 1 contre 1 (contre un gladiateur à votre niveau)",
                          GOSSIP_EXPEDITEUR, GOSSIP_ACTION_INSCRIRE);
@@ -1595,9 +1820,15 @@ public:
 
     ChatCommandTable GetCommands() const override
     {
+        // Banc bot contre bot (AiPlayerbot.Arene1v1.Banc) et etat lu par outils/banc-arene.py.
+        static ChatCommandTable areneTable = {
+            {"banc", HandleBancCommand, SEC_GAMEMASTER, Console::Yes},
+            {"etat", HandleEtatCommand, SEC_GAMEMASTER, Console::Yes},
+        };
         static ChatCommandTable coaTable = {
             // Console::Yes : pour les essais par la console RA (le nom designe le joueur).
             {"arene1v1", HandleArene1v1Command, SEC_GAMEMASTER, Console::Yes},
+            {"arene", areneTable},
         };
         static ChatCommandTable commandTable = {
             {"coa", coaTable},
@@ -1628,6 +1859,253 @@ public:
         bool const ok = CoaArene1v1::Inscrire(joueur, "commande", refus);
         handler->PSendSysMessage("coa arene1v1: {} {}", joueur->GetName(), ok ? "inscrit" : "refus=" + refus);
         return ok;
+    }
+
+    // .coa arene etat -- lecture seule, fil monde (console RA). Ce que outils/banc-arene.py verifie avant chaque match.
+    static bool HandleEtatCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        uint32 humains = 0, bancs = 0;
+        {
+            std::lock_guard<std::mutex> garde(verrou);
+            for (Match const& m : matchs)
+                if (m.etat != Etat::FINI)
+                    ++(m.banc ? bancs : humains);
+        }
+        // Les humains en arene (toute arene) ou en file d'arene, lus au fil monde comme WhoListCacheMgr.
+        uint32 enArene = 0, enFile = 0;
+        for (auto const& [guid, p] : ObjectAccessor::GetPlayers())
+        {
+            if (!p || !p->GetSession() || GET_PLAYERBOT_AI(p))
+                continue;
+            if (p->InArena())
+                ++enArene;
+            else
+                for (uint8 i = 0; i < PLAYER_MAX_BATTLEGROUND_QUEUES; ++i)
+                {
+                    BattlegroundQueueTypeId const q = p->GetBattlegroundQueueTypeId(i);
+                    if (q >= BATTLEGROUND_QUEUE_2v2 && q < MAX_BATTLEGROUND_QUEUE_TYPES)
+                    {
+                        ++enFile;
+                        break;
+                    }
+                }
+        }
+        uint32 const dernier = dernierHumainS.load(std::memory_order_acquire);
+        uint32 const maintenant = Maintenant();
+        uint32 const pause = dernier && maintenant - dernier < BANC_PAUSE_HUMAIN_S ? BANC_PAUSE_HUMAIN_S - (maintenant - dernier) : 0;
+        handler->PSendSysMessage("coa arene etat: banc_option={} ia_armee={} matchs_humains={} matchs_banc={} banc_max={}"
+                                 " humains_en_arene={} humains_en_file_arene={} pause_humaine_s={}",
+                                 sPlayerbotAIConfig.arene1v1Banc ? 1 : 0,
+                                 (sPlayerbotAIConfig.coaAreneIaCommune || sPlayerbotAIConfig.coaAreneIaRanger) ? 1 : 0,
+                                 humains, bancs, BANC_MAX, enArene, enFile, pause);
+        return true;
+    }
+
+    /*
+     * .coa arene banc <guidA> <guidB> <niveau> [cacheur=0|A|B] -- FIL MONDE (console RA : World::ProcessCliCommands).
+     * Deux gladiateurs de AiPlayerbot.Arene1v1.Gladiateurs, prepares au niveau donne (jamais descendus), mis en file
+     * 11 l'un contre l'autre : A tient le role « joueur », B celui du gladiateur. Meme table `matchs`, drapeau `banc`.
+     * L'humain d'abord : refus `occupe` pendant un match humain, BANC_PAUSE_HUMAIN_S apres toute demande humaine, et
+     * au-dela de BANC_MAX bancs ; un humain qui manque de gladiateur fait ceder le banc (CederLeBanc, Inscrire).
+     * Monter un bot ne doit pas priver un humain de bas niveau : refus `reserve_niveau` si le bot est le seul de sa
+     * classe a ce niveau ou en dessous (le plus bas niveau de chaque classe de gladiateurs ne monte jamais).
+     */
+    static bool HandleBancCommand(ChatHandler* handler, char const* args)
+    {
+        std::vector<std::string> mots;
+        {
+            std::istringstream flux(args ? args : "");
+            for (std::string mot; flux >> mot;)
+                mots.push_back(mot);
+        }
+        uint32 a = 0, b = 0, niveau = 0;
+        uint8 cacheur = 0;
+        auto Refus = [&](std::string const& code, std::string const& detail = "") {
+            handler->PSendSysMessage("coa arene banc: refus={}{}{}", code, detail.empty() ? "" : " ", detail);
+            LOG_INFO("playerbots", "coa arene1v1: banc refus={} a={} b={} niveau={}{}{}", code, a, b, niveau,
+                     detail.empty() ? "" : " ", detail);
+            handler->SetSentErrorMessage(true);
+            return false;
+        };
+        if (!sPlayerbotAIConfig.arene1v1Banc)
+            return Refus("desactive_banc");
+        auto Entier = [](std::string const& t, uint32& v) {
+            if (t.empty() || t.size() > 10 || !std::all_of(t.begin(), t.end(), [](char c) { return c >= '0' && c <= '9'; }))
+                return false;
+            unsigned long long const x = std::strtoull(t.c_str(), nullptr, 10);
+            if (x == 0 || x > 0xFFFFFFFFull)
+                return false;
+            v = uint32(x);
+            return true;
+        };
+        if (mots.size() < 3 || mots.size() > 4 || !Entier(mots[0], a) || !Entier(mots[1], b) || !Entier(mots[2], niveau))
+        {
+            handler->PSendSysMessage("Usage: .coa arene banc <guidA> <guidB> <niveau> [cacheur=0|A|B]");
+            return Refus("syntaxe");
+        }
+        if (mots.size() == 4)
+        {
+            std::string c = mots[3];
+            std::transform(c.begin(), c.end(), c.begin(), [](unsigned char x) { return char(std::tolower(x)); });
+            if (c.rfind("cacheur=", 0) == 0)
+                c = c.substr(8);
+            if (c == "a")
+                cacheur = 1;
+            else if (c == "b")
+                cacheur = 2;
+            else if (c != "0" && c != "aucun")
+                return Refus("syntaxe", "cacheur=" + mots[3]);
+        }
+        // L'IA d'arene (strategie « coa arene ») porte la trace par seconde et le mode cacheur : sans elle, le banc ne
+        // mesurerait rien de ce qu'il pretend mesurer.
+        if (!sPlayerbotAIConfig.coaAreneIaCommune && !sPlayerbotAIConfig.coaAreneIaRanger)
+            return Refus("ia_eteinte");
+        if (a == b)
+            return Refus("meme_bot");
+        if (niveau < 10 || niveau > sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL))
+            return Refus("niveau_hors_bornes");
+
+        // L'humain d'abord.
+        {
+            uint32 humains = 0, bancs = 0;
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                for (Match const& m : matchs)
+                    if (m.etat != Etat::FINI)
+                        ++(m.banc ? bancs : humains);
+            }
+            if (humains)
+                return Refus("occupe", "raison=match_humain");
+            uint32 const dernier = dernierHumainS.load(std::memory_order_acquire);
+            uint32 const maintenant = Maintenant();
+            if (dernier && maintenant - dernier < BANC_PAUSE_HUMAIN_S)
+                return Refus("occupe", "raison=humain_recent attente_s=" +
+                                           std::to_string(BANC_PAUSE_HUMAIN_S - (maintenant - dernier)));
+            if (bancs >= BANC_MAX)
+                return Refus("occupe", "raison=bancs_max");
+        }
+
+        std::vector<uint32> const liste = Gladiateurs();
+        for (uint32 g : {a, b})
+            if (std::find(liste.begin(), liste.end(), g) == liste.end())
+                return Refus("pas_gladiateur", "guid=" + std::to_string(g));
+        Player* pa = ObjectAccessor::FindPlayerByLowGUID(a);
+        Player* pb = ObjectAccessor::FindPlayerByLowGUID(b);
+        if (char const* r = RefusGladiateur(a, pa))
+            return Refus(std::string("a_") + r);
+        if (char const* r = RefusGladiateur(b, pb))
+            return Refus(std::string("b_") + r);
+        if (!pa->GetSession() || !pb->GetSession() || pa->GetSession()->GetAccountId() == pb->GetSession()->GetAccountId())
+            return Refus("meme_compte");
+        if (pa->GetLevel() > niveau)
+            return Refus("a_niveau_superieur", "niveau_a=" + std::to_string(pa->GetLevel()));
+        if (pb->GetLevel() > niveau)
+            return Refus("b_niveau_superieur", "niveau_b=" + std::to_string(pb->GetLevel()));
+        // La reserve des humains : un bot qu'il faudrait monter ne doit pas etre le seul gladiateur de sa classe a
+        // son niveau ou en dessous (sinon un humain de ce niveau n'aurait plus cette classe). A et B sont exclus du
+        // compte tous les deux (meme classe montee deux fois). Niveau d'un absent : cache des personnages.
+        auto Reserve = [&](Player* bot) {
+            if (bot->GetLevel() >= niveau)
+                return true;
+            for (uint32 g : liste)
+            {
+                if (g == a || g == b)
+                    continue;
+                uint8 classe = 0, niv = 0;
+                if (Player* p = ObjectAccessor::FindPlayerByLowGUID(g))
+                {
+                    classe = p->getClass();
+                    niv = p->GetLevel();
+                }
+                else if (CharacterCacheEntry const* c =
+                             sCharacterCache->GetCharacterCacheByGuid(ObjectGuid::Create<HighGuid::Player>(g)))
+                {
+                    classe = c->Class;
+                    niv = c->Level;
+                }
+                if (classe == bot->getClass() && niv && niv <= bot->GetLevel())
+                    return true;
+            }
+            return false;
+        };
+        if (!Reserve(pa))
+            return Refus("a_reserve_niveau", "classe=" + std::to_string(pa->getClass()) + " niveau_a=" +
+                                                 std::to_string(pa->GetLevel()));
+        if (!Reserve(pb))
+            return Refus("b_reserve_niveau", "classe=" + std::to_string(pb->getClass()) + " niveau_b=" +
+                                                 std::to_string(pb->GetLevel()));
+
+        Battleground* bgt = sBattlegroundMgr->GetBattlegroundTemplate(BATTLEGROUND_AA);
+        if (!bgt)
+            return Refus("sans_modele");
+        PvPDifficultyEntry const* tranche = GetBattlegroundBracketByLevel(bgt->GetMapId(), niveau);
+        if (!tranche)
+            return Refus("tranche");
+        if (!PoserTables())
+            return Refus("file_indisponible");
+        GroupQueueInfo gi;
+        if (La1v1().GetPlayerGroupInfoData(pa->GetGUID(), &gi) || La1v1().GetPlayerGroupInfoData(pb->GetGUID(), &gi))
+            return Refus("deja_en_file");
+
+        uint32 idMatch;
+        {
+            std::lock_guard<std::mutex> garde(verrou);
+            idMatch = prochainId++;
+        }
+        LOG_INFO("playerbots", "coa arene1v1: inscription id={} joueur={} nom={} niveau={} origine=banc gladiateur={}"
+                 " nom_gladiateur={} classe={} choix=banc libres=-/{} tranche={} banc=1 classe_joueur={} cacheur={}"
+                 " niveau_banc={} faction_a={} faction_b={}", idMatch, a, pa->GetName(), uint32(pa->GetLevel()), b,
+                 pb->GetName(), uint32(pb->getClass()), liste.size(), uint32(tranche->GetBracketId()),
+                 uint32(pa->getClass()), cacheur == 1 ? "A" : cacheur == 2 ? "B" : "0", niveau,
+                 uint32(pa->GetTeamId()), uint32(pb->GetTeamId()));
+
+        // A d'abord, sans etalon ; B ensuite, son equipement rapproche de celui de A.
+        Preparer(pa, niveau, nullptr, idMatch);
+        Preparer(pb, niveau, pa, idMatch);
+
+        for (Player* p : {pa, pb})
+        {
+            PvPDifficultyEntry const* t = GetBattlegroundBracketByLevel(bgt->GetMapId(), p->GetLevel());
+            if (!p->IsInWorld() || !p->IsAlive() || p->InBattlegroundQueue() || !t ||
+                t->GetBracketId() != tranche->GetBracketId())
+                return Refus("non_pret", "id=" + std::to_string(idMatch) + " guid=" +
+                                             std::to_string(p->GetGUID().GetCounter()));
+        }
+        if (La1v1().GetPlayerGroupInfoData(pa->GetGUID(), &gi) || La1v1().GetPlayerGroupInfoData(pb->GetGUID(), &gi))
+            return Refus("deja_en_file", "id=" + std::to_string(idMatch));
+
+        La1v1().AddGroup(pa, nullptr, BATTLEGROUND_AA, tranche, TYPE_1V1, false, false, 0, 0, 0, 0);
+        uint32 const slotA = pa->AddBattlegroundQueueId(FILE_1V1);
+        La1v1().AddGroup(pb, nullptr, BATTLEGROUND_AA, tranche, TYPE_1V1, false, false, 0, 0, 0, 0);
+        pb->AddBattlegroundQueueId(FILE_1V1);
+        Proteger(pa, idMatch);
+        Proteger(pb, idMatch);
+
+        Match m;
+        m.id = idMatch;
+        m.joueur = a;
+        m.gladiateur = b;
+        m.nomJoueur = pa->GetName();
+        m.nomGladiateur = pb->GetName();
+        m.classe = pb->getClass();
+        m.classeJoueur = pa->getClass();
+        m.tranche = tranche->GetBracketId();
+        m.inscritS = Maintenant();
+        m.relanceS = m.inscritS;
+        m.banc = true;
+        m.cacheur = cacheur;
+        {
+            std::lock_guard<std::mutex> garde(verrou);
+            matchs.push_back(m);
+            nbMatchs.store(uint32(matchs.size()), std::memory_order_release);
+        }
+        sBattlegroundMgr->ScheduleQueueUpdate(0, TYPE_1V1, FILE_1V1, BATTLEGROUND_AA, tranche->GetBracketId());
+        LOG_INFO("playerbots", "coa arene1v1: mise_en_file id={} joueur={} gladiateur={} file={} type={} tranche={} slot_joueur={}"
+                 " banc=1", idMatch, a, b, CoaArene1v1::FILE_ARENE, uint32(TYPE_1V1), uint32(m.tranche), slotA);
+        handler->PSendSysMessage("coa arene banc: inscrit id={} a={} b={} classe_a={} classe_b={} niveau={} cacheur={}",
+                                 idMatch, a, b, uint32(m.classeJoueur), uint32(m.classe), niveau,
+                                 cacheur == 1 ? "A" : cacheur == 2 ? "B" : "0");
+        return true;
     }
 };
 }  // namespace
