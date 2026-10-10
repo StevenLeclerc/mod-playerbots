@@ -66,6 +66,9 @@ constexpr uint32 CoaAreneReculReessaiMs = 1500;
 constexpr uint32 CoaAreneOuvertureReessaiMs = 3 * IN_MILLISECONDS;
 constexpr uint32 CoaAreneOuvertureApprocheMs = IN_MILLISECONDS;
 constexpr uint32 CoaAreneOuvertureApresSuccesMs = 10 * IN_MILLISECONDS;
+// L'ouverture ne tente ses sorts qu'a cette distance (centre a centre) ET en vue ; au-dela, ou hors de vue, c'est le
+// retour qui mene le bot (banc du 10/10 22:56 Paris, voir CoaAreneOuvertureDansSaFenetre).
+constexpr float CoaAreneOuvertureDistanceMax = 40.0f;
 constexpr uint32 CoaArenePreparationReessaiMs = 5 * IN_MILLISECONDS;
 // La cible ne peut pas suivre si elle court a 70 % de la vitesse du bot ou moins (Dazed : 50 %).
 constexpr float CoaAreneVitesseRelative = 0.7f;
@@ -145,12 +148,19 @@ bool CoaAreneRetourArme(Player* bot)
     return bg && bg->isArena() && bg->GetArenaType() == CoaArene1v1::TYPE_ARENE;
 }
 
-// Distance « de combat » : celle que le coeur compare aux portees des sorts (IsWithinCombatRange), rayons de
-// combat deduits. Le journal, lui, ecrit la distance de centre a centre, celle de sonde-combat-pvp.py.
+// Distance « de combat » : celle que le coeur compare aux portees des sorts (Unit::IsWithinCombatRange, appele par
+// Spell::CheckRange), rayons de combat deduits. EN 3D, comme le coeur (dx, dy ET dz) : en 2D, un denivele (tombe,
+// rampe, pont) faisait croire le bot a portee alors que le coeur refusait OUT_OF_RANGE. Le journal, lui, ecrit la
+// distance de centre a centre en 2D, celle de sonde-combat-pvp.py.
 float CoaAreneDistanceCombat(Unit const* a, Unit const* b)
 {
-    return std::max(0.0f, a->GetExactDist2d(b) - a->GetCombatReach() - b->GetCombatReach());
+    return std::max(0.0f, a->GetExactDist(b) - a->GetCombatReach() - b->GetCombatReach());
 }
+
+// Banc du 10/10 (Paris) : le Ranger se plantait au bord (plante jusqu'a haut - 1, 29 yd de combat) et ses premiers
+// tirs partaient refuses OUT_OF_RANGE a 33,3 yd de centre a centre (30 + 2 x 1,5 de rayon = 33 yd pour le coeur) :
+// l'adversaire n'a qu'a faire un pas. Plante, et retour vers la portee, visent desormais haut - 3.
+constexpr float CoaArenePlanteMarge = 3.0f;
 
 // La plage de tir du bot, lue sur ses propres sorts de DEGATS a distance (25 yd et plus) : [plus grande portee
 // minimale, plus petite portee maximale]. Repli 5-30 (Quick Shot) si le kit n'en dit rien.
@@ -405,6 +415,35 @@ void CoaAreneCloreRecul(Player* bot, CoaAreneEtat& etat, Unit* adversaire, char 
 // L2 : suivi d'une cachette en cours (defini plus bas, apres CoaAreneSortPret).
 void CoaArenePilierSuivre(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* adv, bool engage, uint32 maintenant);
 
+// Cloture d'un engagement : recul et cachette en cours clos, bilan ecrit (les deux bras), etat desarme. `fin` dit
+// pourquoi : « grace » (10 s sans engagement vu) ou « nouvelle_instance » (une autre arene, ou le passage
+// arene <-> duel/monde, avant la fin de la grace). Champ ajoute EN FIN de ligne (outils/banc-arene.py lit cle=valeur).
+void CoaAreneClore(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* adv, uint32 maintenant, char const* fin)
+{
+    if (etat.reculFinMs)
+        CoaAreneCloreRecul(bot, etat, adv, "fin_engagement");
+    if (etat.pilierDebutMs)
+        CoaArenePilierSuivre(botAI, bot, etat, nullptr, false, maintenant);
+    etat.retourEnCours = false;
+    uint32 const n = std::max<uint32>(etat.echantillons, 1);
+    CoaAreneJournal(bot, etat, "bilan", -1.0f, -1.0f,
+                    Acore::StringFormat(" duree_s={} echantillons={} contact_pct={} plage_pct={} reculs={} "
+                                        "reculs_reussis={} ruptures={} bursts={} ouvertures={} pv_min={:.0f} "
+                                        "retours={} piliers={} pilier_cumul_ms={}",
+                                        getMSTimeDiff(etat.debutMs, maintenant) / IN_MILLISECONDS, etat.echantillons,
+                                        etat.auContact * 100 / n, etat.dansLaPlage * 100 / n, etat.reculs,
+                                        etat.reculsReussis, etat.ruptures, etat.bursts, etat.ouvertures, etat.pvMin,
+                                        etat.retours, etat.piliers, etat.pilierCumulMs) +
+                    (etat.cacheurOui ? Acore::StringFormat(" cacheur=1 cacheur_caches={} cacheur_tirs={} "
+                                                           "cacheur_aucun={} cacheur_vu={}", etat.cacheurCaches,
+                                                           etat.cacheurTirs, etat.cacheurAucun, etat.cacheurVu)
+                                     : std::string()) +
+                    Acore::StringFormat(" instance={} fin={}", etat.instance, fin));
+    etat.actif = false;
+    etat.cacheurEnRouteMs = 0;
+    etat.reculFinMs = 0;
+}
+
 /*
  * L'etat du tick : engagement ouvert, tire, suivi, clos. Une seule mise a jour par tick (CoaAreneMajMs).
  *
@@ -422,6 +461,22 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
     bool preparation = false;
     Unit* adversaire = nullptr;
     uint8 const cadre = CoaAreneDetecter(botAI, bot, preparation, adversaire);
+    // L'instance d'arene de l'engagement vu a ce tick (0 : duel, monde ouvert, ou aucun). CoaAreneDetecter a deja lu
+    // GetBattleground() pour COA_ARENE_ARENE : non nul ici.
+    Battleground const* bgVu = cadre == COA_ARENE_ARENE ? bot->GetBattleground() : nullptr;
+    uint32 const instanceVue = bgVu ? bgVu->GetInstanceID() : 0;
+
+    // Banc du 10/10/2026 22:55-23:00 (Paris) : 2617 enchaine les matchs 1 et 3 a moins de 10 s (le delai de grace) ;
+    // l'engagement restait ouvert et un seul bilan de 246 s couvrait les deux. Un engagement est desormais propre a
+    // UNE instance d'arene : une autre instance (ou le passage arene <-> duel/monde) pendant la grace clot l'ancien,
+    // bilan ecrit, et le bloc suivant en ouvre un neuf au meme tick.
+    if (etat.actif && cadre != COA_ARENE_AUCUN && instanceVue != etat.instance)
+    {
+        Unit* ancien = etat.adversaire ? ObjectAccessor::GetUnit(*bot, etat.adversaire) : nullptr;
+        if (ancien && !ancien->IsInWorld())
+            ancien = nullptr;
+        CoaAreneClore(botAI, bot, etat, ancien, maintenant, "nouvelle_instance");
+    }
 
     if (cadre != COA_ARENE_AUCUN && !etat.actif)
     {
@@ -434,6 +489,7 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
         etat.majMs = maintenant ? maintenant : 1;
         etat.actif = true;
         etat.cadre = cadre;
+        etat.instance = instanceVue;
         etat.bras = tirage >= 100 || (tirage > 0 && urand(1, 100) <= tirage);
         etat.debutMs = maintenant;
         etat.dernierContactMs = maintenant;
@@ -544,27 +600,7 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
 
     if (cadre == COA_ARENE_AUCUN && getMSTimeDiff(etat.dernierContactMs, maintenant) > CoaAreneGraceMs)
     {
-        if (etat.reculFinMs)
-            CoaAreneCloreRecul(bot, etat, adv, "fin_engagement");
-        if (etat.pilierDebutMs)
-            CoaArenePilierSuivre(botAI, bot, etat, nullptr, false, maintenant);
-        etat.retourEnCours = false;
-        uint32 const n = std::max<uint32>(etat.echantillons, 1);
-        CoaAreneJournal(bot, etat, "bilan", -1.0f, -1.0f,
-                        Acore::StringFormat(" duree_s={} echantillons={} contact_pct={} plage_pct={} reculs={} "
-                                            "reculs_reussis={} ruptures={} bursts={} ouvertures={} pv_min={:.0f} "
-                                            "retours={} piliers={} pilier_cumul_ms={}",
-                                            getMSTimeDiff(etat.debutMs, maintenant) / IN_MILLISECONDS, etat.echantillons,
-                                            etat.auContact * 100 / n, etat.dansLaPlage * 100 / n, etat.reculs,
-                                            etat.reculsReussis, etat.ruptures, etat.bursts, etat.ouvertures, etat.pvMin,
-                                            etat.retours, etat.piliers, etat.pilierCumulMs) +
-                        (etat.cacheurOui ? Acore::StringFormat(" cacheur=1 cacheur_caches={} cacheur_tirs={} "
-                                                               "cacheur_aucun={} cacheur_vu={}", etat.cacheurCaches,
-                                                               etat.cacheurTirs, etat.cacheurAucun, etat.cacheurVu)
-                                         : std::string()));
-        etat.actif = false;
-        etat.cacheurEnRouteMs = 0;
-        etat.reculFinMs = 0;
+        CoaAreneClore(botAI, bot, etat, adv, maintenant, "grace");
         return etat;
     }
 
@@ -728,13 +764,9 @@ bool CoaAreneSortPret(PlayerbotAI* botAI, Player* bot, Usable const& spell)
     SpellInfo const* info = EffectiveSpell(bot, spell.info);
     if (bot->HasSpellCooldown(info->Id) || IsBenched(banc, spell.info->Id, maintenant) || IsBenched(banc, info->Id, maintenant))
         return false;
-    if (info->PowerType < MAX_POWERS && info->PowerType != POWER_HEALTH)
-    {
-        int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
-        if (cout > 0 && bot->GetPower(Powers(info->PowerType)) < uint32(cout))
-            return false;
-    }
-    return true;
+    // Memes tests que CastFirst (ressource, forme, arme : CoaPeutPayer, CoaRefuseParFormeOuArme) : un sort qu'il
+    // ecarte ne compte pas comme pret.
+    return CoaPeutPayer(bot, info) && !CoaRefuseParFormeOuArme(bot, info);
 }
 
 CoaAreneBurst CoaAreneOrdonnerBurst(PlayerbotAI* botAI, Player* bot, Unit* cible, std::vector<Usable>& usable)
@@ -1022,6 +1054,30 @@ bool CoaAreneLibreDeBouger(PlayerbotAI* botAI, Player* bot)
            !bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL) && !bot->IsNonMeleeSpellCast(false, false, true);  // revue D1 : le tir automatique ne fige pas
 }
 
+/*
+ * Banc du 10/10/2026, 22:56-22:58 (Paris), matchs 1 et 2 : 150 s chacun, 0 sort, 0 retour. Les deux chasseurs etaient
+ * des Rangers furtifs (Elude pris pendant la preparation, « coa arene preparation »). Or le retour se taisait pour un
+ * Ranger furtif (« l'ouverture s'approche deja elle-meme »), et l'ouverture ne s'approche qu'en LIGNE DROITE : un point
+ * a (portee - 5) yd de l'adversaire sur la droite adversaire -> bot, borne par le lancer de rayon de
+ * CheckCollisionAndGetValidCoords. Derriere un pilier (562, match 2 : 682 a 31-49 yd, vue_adv=0 pendant 138 s), ce point
+ * reste hors de vue ; contre un relief (572, match 1 : 2617 fige a 79,4 yd, vue_adv=1, bouge=0), le rayon s'arrete au
+ * bot. Les matchs 3 et 4 se sont battus : 559 est degagee (ligne droite libre), et le chasseur du 4 n'est pas un Ranger.
+ *
+ * Partage desormais : l'ouverture garde le bot quand elle peut tirer (adversaire en vue a 40 yd au plus) et que son
+ * delai est ecoule ; partout ailleurs (hors de vue, trop loin, ouverture en attente apres une approche ratee), le
+ * retour, qui suit un CHEMIN (MoveTo, PathGenerator) et s'arrete en vue a portee (CoaAreneMaj).
+ */
+bool CoaAreneOuvertureDansSaFenetre(Player* bot, Unit* adv)
+{
+    return adv && bot->GetExactDist2d(adv) <= CoaAreneOuvertureDistanceMax && bot->IsWithinLOSInMap(adv);
+}
+
+// L'ouverture attend (approche faite, ou essai rate) : son prochain essai est dans le futur.
+bool CoaAreneOuvertureEnAttente(CoaAreneEtat const& etat)
+{
+    return etat.prochaineOuvertureMs && getMSTimeDiff(etat.prochaineOuvertureMs, getMSTime()) >= 0x80000000u;
+}
+
 // Un sort de degats du bot est pret (recharge, banc, ressource) ; portee et ligne de vue mises a part.
 bool CoaAreneUnTirPret(PlayerbotAI* botAI, Player* bot)
 {
@@ -1085,7 +1141,7 @@ uint8 CoaAreneRetourRaison(PlayerbotAI* botAI, Player* bot, Unit* adv)
         return COA_RETOUR_AUCUN;
     float bas = 0.0f, haut = 0.0f;
     CoaArenePlage(botAI, bot, bas, haut);
-    if (CoaAreneDistanceCombat(bot, adv) > haut - 1.0f)
+    if (CoaAreneDistanceCombat(bot, adv) > haut - CoaArenePlanteMarge)
         return COA_RETOUR_PORTEE;
     return COA_RETOUR_AUCUN;
 }
@@ -1162,7 +1218,7 @@ bool CoaArenePlante(PlayerbotAI* botAI, Player* bot, CoaAreneEtat const& etat)
     if (!CoaArenePlage(botAI, bot, bas, haut))
         return false;
     float const d = CoaAreneDistanceCombat(bot, adv);
-    return d >= bas + 1.0f && d <= haut - 1.0f && bot->IsWithinLOSInMap(adv);
+    return d >= bas + 1.0f && d <= haut - CoaArenePlanteMarge && bot->IsWithinLOSInMap(adv);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1341,12 +1397,16 @@ public:
         // Un retour en cours se relance au plus une fois par seconde : la destination suit l'adversaire.
         if (etat.dernierRetourMs && getMSTimeDiff(etat.dernierRetourMs, getMSTime()) < CoaAreneRetourReessaiMs)
             return false;
-        // Un Ranger furtif (Elude) ouvre par « coa arene ouverture », qui s'approche deja lui-meme. Les autres classes
-        // n'ont pas cette ouverture : furtives, elles reviennent aussi (sans quoi elles resteraient plantees).
-        if ((bot->HasStealthAura() && CoaAreneEstRangerDistance(bot)) || !bot->IsAlive())
+        if (!bot->IsAlive())
             return false;
         Unit* adv = CoaAreneAdversaireVivant(bot, etat);
         if (!adv)
+            return false;
+        // Un Ranger furtif (Elude) ouvre par « coa arene ouverture » -- mais seulement quand elle peut tirer (en vue, a
+        // 40 yd au plus) et n'attend pas : ailleurs, c'est le retour qui le mene (CoaAreneOuvertureDansSaFenetre, banc
+        // du 10/10 22:56). Les autres classes n'ont pas cette ouverture : furtives, elles reviennent toujours.
+        if (bot->HasStealthAura() && CoaAreneEstRangerDistance(bot) && CoaAreneOuvertureDansSaFenetre(bot, adv) &&
+            !CoaAreneOuvertureEnAttente(etat))
             return false;
         uint8 const raison = CoaAreneRetourRaison(botAI, bot, adv);
         if (raison == COA_RETOUR_AUCUN)
@@ -1426,6 +1486,15 @@ public:
         // apres un sap, le bot est encore furtif, au contact d'une cible etourdie. C'est au recul de jouer d'abord ;
         // ouvrir la tout de suite romprait le sap au contact.
         Unit* adv = ObjectAccessor::GetUnit(*bot, etat.adversaire);
+        // Arene ou duel : hors de sa fenetre de tir (hors de vue, ou a plus de 40 yd), l'ouverture laisse le bot au
+        // retour, qui suit un chemin -- sa propre approche en ligne droite restait bloquee derriere un pilier ou contre
+        // un relief (banc du 10/10 22:56, voir CoaAreneOuvertureDansSaFenetre). Monde ouvert : inchange (pas de retour).
+        // Seulement si le retour a une raison d'agir : un adversaire furtif (CanSeeOrDetect faux) ne se poursuit pas
+        // par le retour, et l'ouverture garde alors son approche d'avant.
+        if (adv && adv->IsAlive() && (etat.cadre == COA_ARENE_ARENE || etat.cadre == COA_ARENE_DUEL) &&
+            CoaAreneRetourArme(bot) && !CoaAreneOuvertureDansSaFenetre(bot, adv) &&
+            CoaAreneRetourRaison(botAI, bot, adv) != COA_RETOUR_AUCUN)
+            return false;
         if (adv && adv->IsAlive() && CoaAreneFenetreDeRecul(bot, adv))
         {
             float bas = 0.0f, haut = 0.0f;
@@ -1547,7 +1616,7 @@ public:
         }
         // Temps pour creuser l'ecart, puis la distance que le bot parcourt pendant ce temps, comptee depuis la cible.
         float const tS = (vise - d0) / (vBot - vCible);
-        float const loin = std::min(d0 + vBot * tS, haut - CoaAreneMargePortee);
+        float const loin = std::min(d0 + vBot * tS, haut - CoaArenePlanteMarge);  // revue : aligne sur le seuil du retour (pas de va-et-vient d'1 yd)
         float const rayon = loin + rayons;
 
         bool doublon = false;
@@ -1564,7 +1633,7 @@ public:
             if (std::fabs(z - bot->GetPositionZ()) > 8.0f)
                 continue;
             float const atteinte = cible->GetExactDist2d(x, y) - rayons;
-            if (atteinte < std::max(vise - 4.0f, d0 + CoaAreneReculGainMin) || atteinte > haut - CoaAreneMargePortee + 0.5f)
+            if (atteinte < std::max(vise - 4.0f, d0 + CoaAreneReculGainMin) || atteinte > haut - CoaArenePlanteMarge + 0.5f)
                 continue;  // ramene contre un mur, ou hors de portee
             if (!cible->IsWithinLOS(x, y, z + 2.0f))
                 continue;
@@ -1704,7 +1773,7 @@ public:
  * seulement pendant que la raison tient. Sans obstacle dans le rayon (aucun point cache), il ne fait rien de
  * special ; une ligne « pilier_aucun » toutes les 10 s au plus.
  */
-// La recherche de point hors de vue, commune a la cachette L2 et au cacheur du banc (meme algorithme, memes bornes).
+// La recherche de point hors de vue, commune a la cachette L2 et au cacheur du banc.
 struct CoaAreneCachette
 {
     bool trouvee = false;
@@ -1712,7 +1781,111 @@ struct CoaAreneCachette
     float chemin = 0.0f;    // longueur du chemin retenu
     uint32 chemins = 0;     // chemins calcules (3 au plus)
     uint32 caches = 0;      // points hors de vue trouves
+    uint32 sondes = 0;      // points sondes (anneaux, puis points candidats de la carte)
+    uint32 candidats = 0;   // points candidats de la carte (precalcul), 0 si aucun ou non demande
+    bool parCandidat = false;  // le point retenu vient des candidats de la carte, pas des anneaux
 };
+
+/*
+ * Cacheur du banc, POINTS CANDIDATS d'une carte d'arene (banc du 10/10 22:55, 1422 sur la carte 572 : 224
+ * « cacheur_aucun », caches=0 chemins=0 a chaque fois, adversaire a 79-85 yd : tout point etait rejete par la borne
+ * des 45 yd de L2, et le rayon direct bot -> point s'arretait devant chaque obstacle, jamais derriere).
+ *
+ * Precalcul PARESSEUX, une fois par carte et par processus (la geometrie statique est la meme pour toutes les
+ * instances d'une carte) : une grille de 4 yd sur un disque autour du milieu des deux points de depart de l'arene
+ * (Battleground::GetTeamStartPosition), rayon = demi-ecart + 10 yd, borne 45-60 (CoaAreneDisque). Un point est candidat s'il a un sol
+ * (Map::GetHeight, vmaps comprises, sans les objets dynamiques) et si un obstacle STATIQUE le borde : au moins une des
+ * 8 visees de 4 yd a hauteur d'yeux (Map::isInLineOfSight, LINEOFSIGHT_CHECK_VMAP) est coupee, mais pas les 8 (point
+ * pris DANS un pilier ou un mur). Ce sont les pieds des piliers, de la tombe, des murs. Rien n'est ecrit a la main.
+ * Cout : 709 points au plus (rayon 60, 394 pour 45) x 9 requetes vmaps, une fois (duree journalisee : action=cacheur_candidats). Liste vide : nouvel
+ * essai 60 s plus tard au plus tot (grilles pas encore chargees), jamais mise en cache.
+ *
+ * FIL : appele dans la mise a jour d'IA du bot (fil de la carte d'arene). Ne lit que la carte du bot ; la table est
+ * partagee entre cartes, donc sous verrou court (aucune requete vmaps sous verrou). Les valeurs d'un unordered_map ne
+ * bougent pas a l'insertion : le pointeur rendu reste valide, et la liste n'est plus jamais modifiee.
+ */
+struct CoaArenePoint
+{
+    float x, y, z;
+};
+
+constexpr float CoaAreneCandidatPas = 4.0f;
+constexpr uint32 CoaAreneCandidatsMax = 400;
+constexpr uint32 CoaAreneCandidatsReessaiMs = 60 * IN_MILLISECONDS;
+
+// Le disque de l'arene du bot : milieu des deux points de depart, rayon = demi-ecart + 10 yd, borne 45-60 (618 : departs a 21 yd l un de l autre). Faux hors
+// arene ou sans points de depart. Sert au precalcul ET a borner les anneaux du cacheur : un point derriere le mur
+// d'enceinte est toujours « hors de vue », et brulerait les 3 chemins de la recherche sans jamais etre atteignable.
+bool CoaAreneDisque(Player* bot, float& cx, float& cy, float& zRef, float& rayon)
+{
+    Battleground* bg = bot->InArena() ? bot->GetBattleground() : nullptr;
+    Position const* depA = bg ? bg->GetTeamStartPosition(TEAM_ALLIANCE) : nullptr;
+    Position const* depH = bg ? bg->GetTeamStartPosition(TEAM_HORDE) : nullptr;
+    if (!depA || !depH)
+        return false;
+    cx = (depA->GetPositionX() + depH->GetPositionX()) / 2.0f;
+    cy = (depA->GetPositionY() + depH->GetPositionY()) / 2.0f;
+    zRef = std::max(depA->GetPositionZ(), depH->GetPositionZ());
+    rayon = std::clamp(depA->GetExactDist2d(depH) / 2.0f + 10.0f, 45.0f, 60.0f);
+    return true;
+}
+
+std::vector<CoaArenePoint> const* CoaAreneCandidatsDe(Player* bot)
+{
+    static std::mutex verrou;
+    static std::unordered_map<uint32, std::vector<CoaArenePoint>> cache;
+    static std::unordered_map<uint32, uint32> dernierEssai;
+
+    Map* carte = bot->GetMap();
+    float cx = 0.0f, cy = 0.0f, zRef = 0.0f, rayon = 0.0f;
+    if (!carte || !CoaAreneDisque(bot, cx, cy, zRef, rayon))
+        return nullptr;
+    uint32 const idCarte = bot->GetMapId();
+    uint32 const maintenant = getMSTime();
+    {
+        std::lock_guard<std::mutex> garde(verrou);
+        auto const trouve = cache.find(idCarte);
+        if (trouve != cache.end())
+            return &trouve->second;
+        auto const essai = dernierEssai.find(idCarte);
+        if (essai != dernierEssai.end() && getMSTimeDiff(essai->second, maintenant) < CoaAreneCandidatsReessaiMs)
+            return nullptr;
+        dernierEssai[idCarte] = maintenant;
+    }
+
+    std::vector<CoaArenePoint> points;
+    uint32 sondes = 0;
+    for (float dx = -rayon; dx <= rayon && points.size() < CoaAreneCandidatsMax; dx += CoaAreneCandidatPas)
+        for (float dy = -rayon; dy <= rayon && points.size() < CoaAreneCandidatsMax; dy += CoaAreneCandidatPas)
+        {
+            if (dx * dx + dy * dy > rayon * rayon)
+                continue;
+            ++sondes;
+            float const x = cx + dx, y = cy + dy;
+            float const z = carte->GetHeight(x, y, zRef + 5.0f, true, 40.0f);
+            if (z <= INVALID_HEIGHT)
+                continue;
+            uint8 coupees = 0;
+            for (uint8 i = 0; i < 8; ++i)
+            {
+                float const a = float(i) * float(M_PI) / 4.0f;
+                if (!carte->isInLineOfSight(x, y, z + 2.0f, x + std::cos(a) * 4.0f, y + std::sin(a) * 4.0f, z + 2.0f,
+                                            PHASEMASK_NORMAL, LINEOFSIGHT_CHECK_VMAP, VMAP::ModelIgnoreFlags::Nothing))
+                    ++coupees;
+            }
+            if (coupees > 0 && coupees < 8)
+                points.push_back({ x, y, z });
+        }
+
+    LOG_INFO("playerbots.coa", "coa arene ia: guid={} action=cacheur_candidats carte={} candidats={} sondes={} rayon={:.0f}"
+             " duree_ms={}", bot->GetGUID().GetCounter(), idCarte, points.size(), sondes, rayon,
+             GetMSTimeDiffToNow(maintenant));
+    if (points.empty())
+        return nullptr;
+    std::lock_guard<std::mutex> garde(verrou);
+    // Deux arenes de la meme carte ont pu calculer en meme temps : la premiere inseree reste (meme geometrie).
+    return &cache.emplace(idCarte, std::move(points)).first->second;
+}
 
 class CoaAreneCachetteAction : public MovementAction
 {
@@ -1720,51 +1893,125 @@ public:
     CoaAreneCachetteAction(PlayerbotAI* botAI, std::string const nom) : MovementAction(botAI, nom) {}
 
 protected:
-    // Cherche un point hors de vue de `adv` et y envoie le bot (MoveTo, priorite de combat). Voir le commentaire de
-    // CoaArenePilierAction pour les criteres.
-    CoaAreneCachette AllerHorsDeVue(Unit* adv)
+    // Un point hors de vue : chemin de navmesh complet, qui arrive bien au point (pas au polygone le plus proche
+    // d'un point pris dans un obstacle), de longueur <= `cheminMax`, puis MoveTo (priorite de combat).
+    // `exigerArrivee` : seulement pour les points pris au sol (cacheur), pas pour ceux de L2, deja au bout d'un rayon
+    // libre depuis le bot (L2 inchangee).
+    bool EssayerPoint(CoaAreneCachette& c, Unit* adv, float x, float y, float z, float cheminMax, bool exigerArrivee)
+    {
+        ++c.caches;
+        if (IsDuplicateMove(x, y, z))
+            return false;
+        ++c.chemins;
+        PathGenerator chemin(bot);
+        chemin.CalculatePath(x, y, z, false);
+        if ((chemin.GetPathType() & (PATHFIND_NOPATH | PATHFIND_INCOMPLETE | PATHFIND_SHORTCUT)) ||
+            chemin.getPathLength() > cheminMax)
+            return false;
+        if (exigerArrivee)
+        {
+            G3D::Vector3 const& fin = chemin.GetActualEndPosition();
+            if ((fin.x - x) * (fin.x - x) + (fin.y - y) * (fin.y - y) > 2.0f * 2.0f)
+                return false;
+        }
+        if (!MoveTo(bot->GetMapId(), x, y, z, false, false, true, false, MovementPriority::MOVEMENT_COMBAT, true, false))
+            return false;
+        c.trouvee = true;
+        c.dPoint = adv->GetExactDist2d(x, y);
+        c.chemin = chemin.getPathLength();
+        return true;
+    }
+
+    // Cherche un point hors de vue de `adv` et y envoie le bot. Voir le commentaire de CoaArenePilierAction pour
+    // les criteres de L2 (`loin` faux : bornes d'origine, inchangees).
+    // `loin` (cacheur du banc) : anneaux de 8 a 45 yd, aucune borne de distance a l'adversaire (le but est de casser
+    // la vue, pas de rester a portee), point pris AU SOL (Map::GetHeight) et non au bout du rayon direct bot -> point,
+    // qui s'arrete devant l'obstacle : seul le chemin de navmesh juge s'il est atteignable ; puis les points candidats
+    // de la carte (CoaAreneCandidatsDe), du plus proche au plus loin, dans 50 yd du bot. Cout borne par recherche :
+    // 48 points d'anneau + 24 candidats au plus en ligne de vue, 3 chemins au plus (une recherche toutes les 700 ms
+    // au plus, banc seulement).
+    CoaAreneCachette AllerHorsDeVue(Unit* adv, bool loin = false)
     {
         CoaAreneCachette c;
         float const bx = bot->GetPositionX(), by = bot->GetPositionY(), bz = bot->GetPositionZ();
         float const dAdv = bot->GetExactDist2d(adv);
         float const angle0 = adv->GetAngle(bot);
-        static constexpr float Rayons[] = { 8.0f, 14.0f, 20.0f };
+        static constexpr float RayonsL2[] = { 8.0f, 14.0f, 20.0f };
+        static constexpr float RayonsLoin[] = { 8.0f, 14.0f, 20.0f, 28.0f, 36.0f, 45.0f };
         static constexpr float Ecarts[] = { 0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 3.0f, -3.0f, 4.0f };  // x 45 degres
-        for (float const r : Rayons)
+        float cx = 0.0f, cy = 0.0f, zDisque = 0.0f, rDisque = 0.0f;
+        bool const disque = loin && CoaAreneDisque(bot, cx, cy, zDisque, rDisque);
+        float const* const rayons = loin ? RayonsLoin : RayonsL2;
+        size_t const nbRayons = loin ? std::size(RayonsLoin) : std::size(RayonsL2);
+        for (size_t ir = 0; ir < nbRayons; ++ir)
+        {
+            float const r = rayons[ir];
             for (float const ecart : Ecarts)
             {
                 if (c.chemins >= 3)
                     return c;
+                ++c.sondes;
                 float const angle = angle0 + ecart * float(M_PI) / 4.0f;
                 float x = bx + std::cos(angle) * r;
                 float y = by + std::sin(angle) * r;
                 float z = bz;
-                if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bx, by, bz, x, y, z, false))
-                    continue;
-                if (std::fabs(z - bz) > 5.0f || bot->GetExactDist2d(x, y) < r * 0.6f)
-                    continue;
+                if (loin)
+                {
+                    if (disque && (x - cx) * (x - cx) + (y - cy) * (y - cy) > rDisque * rDisque)
+                        continue;  // hors de l'enceinte
+                    z = bot->GetMap()->GetHeight(bot->GetPhaseMask(), x, y, bz + 5.0f, true, 15.0f);
+                    if (z <= INVALID_HEIGHT || std::fabs(z - bz) > 8.0f)
+                        continue;
+                }
+                else
+                {
+                    if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bx, by, bz, x, y, z, false))
+                        continue;
+                    if (std::fabs(z - bz) > 5.0f || bot->GetExactDist2d(x, y) < r * 0.6f)
+                        continue;
+                }
                 float const dPoint = adv->GetExactDist2d(x, y);
-                if (dPoint < std::min(dAdv, 8.0f) || dPoint > 45.0f)
+                if (dPoint < std::min(dAdv, 8.0f) || (!loin && dPoint > 45.0f))
                     continue;
                 if (adv->IsWithinLOS(x, y, z + 2.0f))
                     continue;  // visible : pas une cachette
-                ++c.caches;
-                if (IsDuplicateMove(x, y, z))
-                    continue;
-                ++c.chemins;
-                PathGenerator chemin(bot);
-                chemin.CalculatePath(x, y, z, false);
-                if ((chemin.GetPathType() & (PATHFIND_NOPATH | PATHFIND_INCOMPLETE | PATHFIND_SHORTCUT)) ||
-                    chemin.getPathLength() > r * 2.0f + 5.0f)
-                    continue;
-                if (!MoveTo(bot->GetMapId(), x, y, z, false, false, true, false, MovementPriority::MOVEMENT_COMBAT,
-                            true, false))
-                    continue;
-                c.trouvee = true;
-                c.dPoint = dPoint;
-                c.chemin = chemin.getPathLength();
+                if (EssayerPoint(c, adv, x, y, z, r * 2.0f + 5.0f, loin))
+                    return c;
+            }
+        }
+        if (!loin)
+            return c;
+
+        std::vector<CoaArenePoint> const* candidats = CoaAreneCandidatsDe(bot);
+        if (!candidats)
+            return c;
+        c.candidats = uint32(candidats->size());
+        // Les 24 plus proches du bot, dans 50 yd (tri partiel d'indices : la liste partagee n'est jamais touchee).
+        std::vector<std::pair<float, uint32>> proches;
+        proches.reserve(candidats->size());
+        for (uint32 i = 0; i < candidats->size(); ++i)
+        {
+            CoaArenePoint const& p = (*candidats)[i];
+            float const d = bot->GetExactDist2d(p.x, p.y);
+            if (d >= 3.0f && d <= 50.0f && std::fabs(p.z - bz) <= 15.0f)
+                proches.emplace_back(d, i);
+        }
+        size_t const n = std::min<size_t>(proches.size(), 24);
+        std::partial_sort(proches.begin(), proches.begin() + n, proches.end());
+        for (size_t k = 0; k < n; ++k)
+        {
+            if (c.chemins >= 3)
+                return c;
+            ++c.sondes;
+            CoaArenePoint const& p = (*candidats)[proches[k].second];
+            if (adv->GetExactDist2d(p.x, p.y) < std::min(dAdv, 8.0f) || adv->IsWithinLOS(p.x, p.y, p.z + 2.0f))
+                continue;
+            if (EssayerPoint(c, adv, p.x, p.y, p.z, proches[k].first * 2.0f + 10.0f, true))
+            {
+                c.parCandidat = true;
                 return c;
             }
+        }
         return c;
     }
 };
@@ -1821,8 +2068,8 @@ public:
 /*
  * Banc d'arene 1v1, mode CACHEUR (`.coa arene banc ... cacheur=A|B`). Le bot designe casse la ligne de vue le plus
  * possible pendant tout le match : des que l'adversaire le voit, il tire UN sort instantane s'il en a un pret et en
- * portee (puis pas d'autre tir avant 1,5 s), sinon il cherche un point hors de vue (la recherche de L2, sans seuil de
- * vie, recharge 700 ms) et y court. Coince (aucun point hors de vue, ou chemin refuse) : rien de special, la
+ * portee (puis pas d'autre tir avant 1,5 s), sinon il cherche un point hors de vue (AllerHorsDeVue en mode `loin` :
+ * anneaux de 8 a 45 yd puis points candidats de la carte ; sans seuil de vie, recharge 700 ms) et y court. Coince (aucun point hors de vue, ou chemin refuse) : rien de special, la
  * rotation ordinaire joue (et une ligne « cacheur_aucun » toutes les 10 s). Le multiplicateur lui retire tout ce qui
  * le ramenerait en vue. Journal : action=cacheur_debut, cacheur_tir, cacheur_cache, cacheur_arrive, cacheur_aucun.
  */
@@ -1873,15 +2120,16 @@ public:
         // 2. Se remettre hors de vue.
         if (!CoaAreneLibreDeBouger(botAI, bot) || IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
             return false;
-        CoaAreneCachette const c = AllerHorsDeVue(adv);
+        CoaAreneCachette const c = AllerHorsDeVue(adv, true);
         if (c.trouvee)
         {
             etat.cacheurEnRouteMs = maintenant ? maintenant : 1;
             etat.retourEnCours = false;
             ++etat.cacheurCaches;
             CoaAreneJournal(bot, etat, "cacheur_cache", dAdv, c.dPoint,
-                            Acore::StringFormat(" pv={:.0f} chemin={:.1f} carte={} essais={}", bot->GetHealthPct(),
-                                                c.chemin, bot->GetMapId(), c.chemins));
+                            Acore::StringFormat(" pv={:.0f} chemin={:.1f} carte={} essais={} sondes={} candidats={}"
+                                                " par_candidat={}", bot->GetHealthPct(), c.chemin, bot->GetMapId(),
+                                                c.chemins, c.sondes, c.candidats, c.parCandidat ? 1 : 0));
             return true;
         }
         ++etat.cacheurAucun;
@@ -1889,8 +2137,9 @@ public:
         {
             etat.cacheurJournalMs = maintenant ? maintenant : 1;
             CoaAreneJournal(bot, etat, "cacheur_aucun", dAdv, dAdv,
-                            Acore::StringFormat(" caches={} chemins={} carte={} total={}", c.caches, c.chemins,
-                                                bot->GetMapId(), etat.cacheurAucun));
+                            Acore::StringFormat(" caches={} chemins={} carte={} total={} sondes={} candidats={}",
+                                                c.caches, c.chemins, bot->GetMapId(), etat.cacheurAucun, c.sondes,
+                                                c.candidats));
         }
         return false;
     }
@@ -1937,7 +2186,7 @@ public:
         std::vector<Usable> const ouvertures = KnownAbilities(botAI, bot, [](uint16 kind) { return IsAttack(kind, false); });
 
         float const avant = bot->GetExactDist2d(adv);
-        if (avant <= 40.0f && bot->IsWithinLOSInMap(adv))
+        if (avant <= CoaAreneOuvertureDistanceMax && bot->IsWithinLOSInMap(adv))
         {
             if (!bot->HasInArc(static_cast<float>(M_PI), adv))
             {

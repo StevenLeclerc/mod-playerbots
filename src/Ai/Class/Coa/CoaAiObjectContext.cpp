@@ -586,6 +586,49 @@ bool CanHealOther(uint16 kind)
 
 SpellInfo const* EffectiveSpell(Player* bot, SpellInfo const* info);
 
+/*
+ * Refus CERTAINS du coeur, lus sur le lanceur seul, pour tous les bots CoA (banc d'arene du 10/10/2026 22:55-23:00
+ * Paris : ONLY_SHAPESHIFT x5, EQUIPPED_ITEM_CLASS x3, NO_POWER x20). StrictCheck les rendait deja tous : aucun de ces
+ * sorts ne partait. Mais ONLY_SHAPESHIFT et EQUIPPED_ITEM_CLASS sont des echecs « durables » (IsLastingFailure), mis au
+ * banc 20 s -- un sort de forme restait au banc 20 s apres la prise de la forme -- et NO_POWER au banc 5 s : le Ranger
+ * 2617 a sec a 20:59:20, 20:59:27 et 20:59:40 UTC perdait ses quatre tirs d'un coup, 5 s durant, alors que sa
+ * ressource revenait plus tot. Ecartes d'avance, SANS banc ni echec consigne (comme CasterAuraSpell), ils repartent
+ * des que la forme, l'arme ou la ressource est la.
+ *
+ * Chaque test est une RECOPIE du coeur, jamais plus stricte :
+ *   - forme : Spell::CheckCast (Spell.cpp:5802-5819), branche `strict` sans TRIGGERED_IGNORE_SHAPESHIFT, celle
+ *     qu'emprunte CastSpell (TRIGGERED_NONE) : aucune aura SPELL_AURA_MOD_IGNORE_SHAPESHIFT qui touche le sort, et
+ *     SpellInfo::CheckShapeshift(forme) != OK ;
+ *   - arme : Spell::CheckCast -> CheckItems (Spell.cpp:6109-6118, 7406-7411), sort non passif, sans objet lanceur ni
+ *     objet cible (CastFirst vise une unite) : Player::HasItemFitToSpellRequirements faux ;
+ *   - ressource : le pre-controle de StrictCheck, tel quel (CoaPeutPayer, que StrictCheck appelle desormais).
+ * Spell::CheckCast ne rend OK nulle part avant ces tests (lu, 5730-6120) : un sort qu'ils ecartent etait refuse.
+ */
+bool CoaPeutPayer(Player* bot, SpellInfo const* info)
+{
+    if (info->PowerType < MAX_POWERS && info->PowerType != POWER_HEALTH)
+    {
+        int32 const cost = info->CalcPowerCost(bot, info->GetSchoolMask());
+        if (cost > 0 && bot->GetPower(Powers(info->PowerType)) < cost)
+            return false;
+    }
+    return true;
+}
+
+bool CoaRefuseParFormeOuArme(Player* bot, SpellInfo const* info)
+{
+    bool verifierForme = true;
+    for (AuraEffect const* effet : bot->GetAuraEffectsByType(SPELL_AURA_MOD_IGNORE_SHAPESHIFT))
+        if (effet->IsAffectedOnSpell(info))
+        {
+            verifierForme = false;
+            break;
+        }
+    if (verifierForme && info->CheckShapeshift(bot->GetShapeshiftForm()) != SPELL_CAST_OK)
+        return true;
+    return !info->IsPassive() && !bot->HasItemFitToSpellRequirements(info);
+}
+
 // Whether a spell is still set aside. The bench is keyed by the id that was actually checked,
 // which is the replacement's id when a proc or a talent has swapped the listed spell (see
 // EffectiveSpell), so both ids have to be consulted before a spell is tried.
@@ -611,6 +654,9 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
         // Same CasterAuraSpell test as CastFirst (10/10 soir) : a spell CastFirst now skips must not count as ready.
         if (info->CasterAuraSpell && !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+            continue;
+        // Same form, weapon and resource tests as CastFirst (banc d'arene du 10/10) : skipped there, not ready here.
+        if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
             continue;
         if (!bot->HasSpellCooldown(info->Id) && !IsBenched(benched, spell.info->Id, now) &&
             !IsBenched(benched, info->Id, now))
@@ -688,12 +734,8 @@ SpellCastResult StrictCheck(Player* bot, SpellInfo const* info, Unit* target)
     // on its own therefore sees a spell that costs nothing and lets every spell through, however
     // empty the bot's mana or custom resource is. The cast then fails with SPELL_FAILED_NO_POWER -
     // 186 of the 210 refusals measured on 18/09. So pay for it here, before asking.
-    if (info->PowerType < MAX_POWERS && info->PowerType != POWER_HEALTH)
-    {
-        int32 const cost = info->CalcPowerCost(bot, info->GetSchoolMask());
-        if (cost > 0 && bot->GetPower(Powers(info->PowerType)) < cost)
-            return SPELL_FAILED_NO_POWER;
-    }
+    if (!CoaPeutPayer(bot, info))
+        return SPELL_FAILED_NO_POWER;
 
     Spell* spell = new Spell(bot, info, TRIGGERED_NONE);
     spell->m_targets.SetUnitTarget(target);
@@ -1083,6 +1125,12 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // que Spell::CheckCast (Spell.cpp:5856), sans banc : le sort repart des que l'aura est la.
         if (info->CasterAuraSpell &&
             !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+            continue;
+
+        // Banc d'arene du 10/10 (CoaRefuseParFormeOuArme, CoaPeutPayer) : forme absente, arme requise absente,
+        // ressource insuffisante -- refus certains du coeur, ecartes sans banc ni echec consigne : le sort repart des
+        // que la forme, l'arme ou la ressource est la (avant : banc de 20 s, 20 s et 5 s).
+        if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
             continue;
 
         // The global cooldown blocks every spell alike: try again on a later tick.

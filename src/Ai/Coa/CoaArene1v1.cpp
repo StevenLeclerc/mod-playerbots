@@ -82,14 +82,18 @@
 #include "PlayerbotFactory.h"
 #include "Playerbots.h"
 #include "Random.h"
+#include "RandomItemMgr.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
 #include "ScriptedGossip.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
@@ -520,6 +524,117 @@ void Reequiper(Player* bot, uint32 qualite)
     fabrique.InitAmmo();
 }
 
+/*
+ * L'arme A DISTANCE que les sorts du gladiateur exigent (banc du 10/10 22:58 Paris : 1422, classe 26, portait une
+ * baguette ; Moon Arrow 803921 et Huntress Shot 680587 refuses SPELL_FAILED_EQUIPPED_ITEM_CLASS, reequipe=0). Lu dans
+ * Spell.dbc : EquippedItemClass 2 (arme), SubClassMask 0x4000c (arc, fusil, arbalete) ; Quick Shot 0x40004. La
+ * fabrique (InitEquipment) choisit l'objet de l'emplacement a distance par ses statistiques, sans regarder ce que les
+ * sorts du bot exigent : une baguette d'Intelligence peut gagner.
+ *
+ * Ici : parmi les sorts ACTIFS, non passifs, connus du bot, ceux qui exigent une arme dont TOUTES les sous-classes
+ * admises sont a distance (arc, fusil, arbalete, arme de jet, baguette). La sous-classe qui en satisfait le plus est
+ * visee. Si l'objet porte la satisfait deja autant, rien ne change. Sinon, une arme de cette sous-classe, blanche ou
+ * verte (jamais mieux : l'alignement sur le joueur se fait par la qualite et l'emplacement a distance n'entre pas dans
+ * ScoreEquipement), du plus haut niveau requis <= niveau du bot, sur 10 niveaux au plus, que le bot peut porter
+ * (Player::CanEquipNewItem : competence, niveau, classe, race). L'ancien objet est detruit (le gladiateur est un bot
+ * reequipe par la fabrique a chaque preparation), puis munitions refaites (InitAmmo, arc/fusil/arbalete).
+ *
+ * N'est appele QUE par Preparer, donc pour un gladiateur ou un bot de banc : aucun autre bot n'est touche.
+ * FIL MONDE (comme Preparer). Rend l'id de l'objet pose, 0 si rien n'a change ; `requis` : le masque vise (0 : aucun
+ * sort n'exige d'arme a distance).
+ */
+uint32 ArmerADistance(Player* bot, uint32& requis)
+{
+    requis = 0;
+    uint32 const masqueDistance = ITEM_SUBCLASS_MASK_WEAPON_RANGED | (1u << ITEM_SUBCLASS_WEAPON_WAND);
+    std::array<uint32, MAX_ITEM_SUBCLASS_WEAPON> parSousClasse{};
+    uint32 exigeants = 0;
+    for (auto const& [idSort, ps] : bot->GetSpellMap())
+    {
+        if (!ps || ps->State == PLAYERSPELL_REMOVED || !ps->Active)
+            continue;
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(idSort);
+        if (!info || info->IsPassive() || info->EquippedItemClass != ITEM_CLASS_WEAPON)
+            continue;
+        uint32 const masque = uint32(info->EquippedItemSubClassMask);
+        if (!masque || (masque & ~masqueDistance))
+            continue;
+        ++exigeants;
+        for (uint32 sc = 0; sc < MAX_ITEM_SUBCLASS_WEAPON; ++sc)
+            if (masque & (1u << sc))
+                ++parSousClasse[sc];
+    }
+    if (!exigeants)
+        return 0;
+
+    // La sous-classe la plus demandee ; a egalite, l'ordre arc, arbalete, fusil, jet, baguette.
+    static constexpr uint32 Ordre[] = { ITEM_SUBCLASS_WEAPON_BOW, ITEM_SUBCLASS_WEAPON_CROSSBOW, ITEM_SUBCLASS_WEAPON_GUN,
+                                        ITEM_SUBCLASS_WEAPON_THROWN, ITEM_SUBCLASS_WEAPON_WAND };
+    uint32 visee = Ordre[0];
+    for (uint32 sc : Ordre)
+        if (parSousClasse[sc] > parSousClasse[visee])
+            visee = sc;
+    if (!parSousClasse[visee])
+        return 0;
+    requis = 1u << visee;
+
+    Item* porte = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
+    ItemTemplate const* protoPorte = porte ? porte->GetTemplate() : nullptr;
+    if (protoPorte && protoPorte->Class == ITEM_CLASS_WEAPON && protoPorte->SubClass < MAX_ITEM_SUBCLASS_WEAPON &&
+        parSousClasse[protoPorte->SubClass] >= parSousClasse[visee])
+        return 0;
+
+    uint32 const niveau = bot->GetLevel();
+    uint32 choisi = 0;
+    for (uint32 requisNiveau = niveau; !choisi && requisNiveau + 10 > niveau; --requisNiveau)
+    {
+        uint32 meilleurIlvl = 0;
+        for (InventoryType type : { INVTYPE_RANGED, INVTYPE_RANGEDRIGHT, INVTYPE_THROWN })
+            for (uint32 id : sRandomItemMgr.GetEquipmentNew(requisNiveau, type))
+            {
+                ItemTemplate const* proto = sObjectMgr->GetItemTemplate(id);
+                if (!proto || proto->Class != ITEM_CLASS_WEAPON || proto->SubClass != visee ||
+                    proto->Quality < ITEM_QUALITY_NORMAL || proto->Quality > ITEM_QUALITY_UNCOMMON ||
+                    proto->RequiredLevel > niveau || proto->Duration ||
+                    proto->ItemLevel <= meilleurIlvl)
+                    continue;
+                uint16 dest = 0;
+                // swap = vrai : l'emplacement est peut-etre occupe (baguette) ; le reste des tests vaut.
+                if (bot->CanEquipNewItem(EQUIPMENT_SLOT_RANGED, dest, id, true) != EQUIP_ERR_OK)
+                    continue;
+                choisi = id;
+                meilleurIlvl = proto->ItemLevel;
+            }
+        if (!requisNiveau)
+            break;
+    }
+    if (!choisi)
+    {
+        LOG_INFO("playerbots", "coa arene1v1: arme_distance gladiateur={} classe={} niveau={} requis=0x{:x} exigeants={}"
+                 " porte={} pose=0 raison=aucun_objet", bot->GetGUID().GetCounter(), uint32(bot->getClass()), niveau,
+                 requis, exigeants, protoPorte ? protoPorte->ItemId : 0);
+        return 0;
+    }
+
+    if (porte)
+        bot->DestroyItem(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED, true);
+    uint16 dest = 0;
+    if (bot->CanEquipNewItem(EQUIPMENT_SLOT_RANGED, dest, choisi, false) != EQUIP_ERR_OK ||
+        !bot->EquipNewItem(dest, choisi, true))
+    {
+        LOG_INFO("playerbots", "coa arene1v1: arme_distance gladiateur={} classe={} niveau={} requis=0x{:x} exigeants={}"
+                 " porte={} pose=0 raison=equipement_refuse objet={}", bot->GetGUID().GetCounter(),
+                 uint32(bot->getClass()), niveau, requis, exigeants, protoPorte ? protoPorte->ItemId : 0, choisi);
+        return 0;
+    }
+    PlayerbotFactory fabrique(bot, niveau);
+    fabrique.InitAmmo();
+    LOG_INFO("playerbots", "coa arene1v1: arme_distance gladiateur={} classe={} niveau={} requis=0x{:x} exigeants={}"
+             " porte={} pose={}", bot->GetGUID().GetCounter(), uint32(bot->getClass()), niveau, requis, exigeants,
+             protoPorte ? protoPorte->ItemId : 0, choisi);
+    return choisi;
+}
+
 // FIL MONDE, AUCUN verrou tenu (Randomize -> ResetStrategies -> fabrique, qui prend le
 // verrou partage du Directeur). La recette de la reserve du Directeur
 // (CoaDirecteur.cpp, preparation `P-`) : PlayerbotFactory::Randomize(false) au niveau
@@ -563,6 +678,10 @@ void Preparer(Player* bot, uint32 niveau, Player* reference, uint32 idMatch)
         reequipe = qualite;
         scoreApres = ScoreEquipement(bot, bot->GetLevel());
     }
+    // APRES tout reequipement (qui detruit et refait l'emplacement a distance) : l'arme que ses sorts exigent passe
+    // avant la regle d'alignement (elle n'entre pas dans ScoreEquipement, et reste blanche ou verte).
+    uint32 armeRequise = 0;
+    uint32 const armeDistance = ArmerADistance(bot, armeRequise);
     // Pas de re-randomisation par RandomPlayerbotMgr (evenement « randomize ») entre la
     // preparation et l'arene : meme geste que `.coa niveau` (CoaDuelCommandScript.cpp).
     sRandomPlayerbotMgr.SetValue(bot, "randomize", 1);
@@ -579,9 +698,10 @@ void Preparer(Player* bot, uint32 niveau, Player* reference, uint32 idMatch)
         bot->SetPower(POWER_MANA, bot->GetMaxPower(POWER_MANA));
     LOG_INFO("playerbots", "coa arene1v1: preparation id={} gladiateur={} niveau_avant={} niveau_apres={} niveau_joueur={}"
              " score_joueur={} score_avant={} score_apres={} reequipe={} classe={} specialisation={} spe_changee={}"
-             " duree_ms={}", idMatch, bot->GetGUID().GetCounter(), avant, uint32(bot->GetLevel()), niveau, scoreJoueur,
-             scoreAvant, scoreApres, reequipe, uint32(bot->getClass()), GetAscensionActiveSpecialization(bot),
-             specialisation ? 1 : 0, GetMSTimeDiffToNow(debutMs));
+             " duree_ms={} arme_distance={} arme_requise=0x{:x}", idMatch, bot->GetGUID().GetCounter(), avant,
+             uint32(bot->GetLevel()), niveau, scoreJoueur, scoreAvant, scoreApres, reequipe, uint32(bot->getClass()),
+             GetAscensionActiveSpecialization(bot), specialisation ? 1 : 0, GetMSTimeDiffToNow(debutMs), armeDistance,
+             armeRequise);
 }
 
 // ------------------------------------------------------------------ defis CoA

@@ -48,6 +48,9 @@ struct CoaAreneEtat
     bool vuCeTick = false;         // l'engagement est vu au tick courant (hors grace) : condition de L1
     bool actif = false;            // engagement en cours, delai de grace compris
     bool bras = false;             // tire a l'ouverture de l'engagement : IA appliquee ou non
+    // Instance d'arene de l'engagement (0 : duel ou monde ouvert). Une autre instance vue pendant le delai de grace
+    // clot l'engagement (bilan) et en ouvre un neuf (banc du 10/10 : deux matchs a < 10 s fusionnes en un bilan).
+    uint32 instance = 0;
     uint32 debutMs = 0;
     uint32 dernierContactMs = 0;   // dernier tick ou l'engagement a ete vu (hors preparation)
     ObjectGuid adversaire;
