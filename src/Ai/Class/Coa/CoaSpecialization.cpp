@@ -6,8 +6,10 @@
 
 #include "CoaSpecialization.h"
 #include "CoaLevelBuildData.h"
+#include "CoaLevelBuildDataKami.h"
 #include "CoaSpecStrategies.h"
 
+#include "Config.h"
 #include "Group.h"
 #include "GroupMgr.h"
 #include "ItemTemplate.h"
@@ -511,6 +513,96 @@ bool EnsureCoaSpecialization(Player* bot)
     return true;
 }
 
+namespace
+{
+
+// Which level build table random bots follow (AiPlayerbot.Coa.BuildSource, read on every call so
+// ".reload config" switches it without a rebuild):
+//   0 = CoaLevelBuildData, exactly as before this option existed: ranks are only ever raised;
+//   1 = CoaLevelBuildDataKami (the trees the top players play, kami-labs.fr, 2026-10-10), and the
+//       tree is brought back to it: what either table bought and the build does not want is removed;
+//   2 = CoaLevelBuildData with that same bringing back: the way back from 1, which undoes the kami
+//       trees (0 alone would leave them in place, under the original picks).
+// Once 1 has been used, never go back to 0: a bot that bought kami picks would keep them under the
+// original ones (two trees). Use 2 instead, for good. For the same reason an invalid value falls
+// back to 2, not 0, and says so once.
+uint32 CoaBuildSource()
+{
+    uint32 const source = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.BuildSource", 0, false);
+    if (source <= 2)
+        return source;
+
+    static std::once_flag warned;
+    std::call_once(warned, [source]()
+    {
+        LOG_WARN("playerbots", "coa build: AiPlayerbot.Coa.BuildSource = {} is not 0, 1 or 2; using 2", source);
+    });
+    return 2;
+}
+
+// Entries that must never be lowered for a (class, specialization): lowering them took a rank away
+// from an entry the build wants, because two Character Advancement entries share a spell (measured:
+// 503748 is rank 1 of 7131 and the only rank of 12264). Without this, such an entry would be
+// lowered and raised back on every call. Learned at run time, so no list to keep up to date.
+std::set<uint64> aliasedEntries;
+std::mutex aliasedEntriesLock;
+
+uint64 AliasKey(uint8 classId, uint32 specializationId, uint32 entryId)
+{
+    return (uint64(classId) << 56) | (uint64(specializationId & 0xFFFFFFu) << 32) | entryId;
+}
+
+bool IsAliasedEntry(uint8 classId, uint32 specializationId, uint32 entryId)
+{
+    std::lock_guard<std::mutex> guard(aliasedEntriesLock);
+    return aliasedEntries.count(AliasKey(classId, specializationId, entryId)) != 0;
+}
+
+bool MarkAliasedEntry(uint8 classId, uint32 specializationId, uint32 entryId)
+{
+    std::lock_guard<std::mutex> guard(aliasedEntriesLock);
+    return aliasedEntries.insert(AliasKey(classId, specializationId, entryId)).second;
+}
+
+// Rank each entry should hold at `level`: the table's picks for (class, spec) up to that level.
+// `buildTop` is the highest level the table covers for this (class, spec).
+template <std::size_t N>
+void CollectWantedRanks(std::array<CoaLevelBuildData::Pick, N> const& table, uint8 classId, uint32 specializationId,
+                        uint8 level, std::vector<std::pair<uint32, uint8>>& wanted, uint8& buildTop)
+{
+    for (CoaLevelBuildData::Pick const& pick : table)
+    {
+        if (pick.ClassId != classId || pick.SpecId != specializationId)
+            continue;
+
+        buildTop = std::max(buildTop, pick.Level);
+        if (pick.Level > level)
+            continue;
+
+        auto itr = std::find_if(wanted.begin(), wanted.end(),
+            [&pick](std::pair<uint32, uint8> const& w) { return w.first == pick.EntryId; });
+        if (itr == wanted.end())
+            wanted.emplace_back(pick.EntryId, pick.Rank);
+        else if (itr->second < pick.Rank)
+            itr->second = pick.Rank;
+    }
+}
+
+// Entries a table may have bought for a bot of this class now in `specializationId`: every
+// class-tree entry of the class, whatever the specialization it was bought for (a bot can switch),
+// and the specialization-tree entries of `specializationId` only. Another specialization's tree is
+// left alone: it is not the active tree.
+template <std::size_t N>
+void CollectManagedEntries(std::array<CoaLevelBuildData::Pick, N> const& table, uint8 classId,
+                           uint32 specializationId, std::set<uint32>& managed)
+{
+    for (CoaLevelBuildData::Pick const& pick : table)
+        if (pick.ClassId == classId && (pick.Tree == 0 || pick.SpecId == specializationId))
+            managed.insert(pick.EntryId);
+}
+
+}  // namespace
+
 uint32 ApplyCoaTalents(Player* bot)
 {
     if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel ||
@@ -521,27 +613,75 @@ uint32 ApplyCoaTalents(Player* bot)
     if (!specializationId)
         return 0;
 
+    uint32 const source = CoaBuildSource();
+    uint8 const classId = bot->getClass();
+
     // Rank each entry should hold at the bot's level: the build's picks up to that level.
     // `buildTop` is the highest level the table covers for this (class, spec), whether or not
     // the bot has reached it: past it, this function has nothing left to spend, for ever.
     std::vector<std::pair<uint32, uint8>> wanted;
     uint8 buildTop = 0;
-    for (CoaLevelBuildData::Pick const& pick : CoaLevelBuildData::Picks)
+    if (source == 1)
+        CollectWantedRanks(CoaLevelBuildDataKami::Picks, classId, specializationId, bot->GetLevel(), wanted, buildTop);
+    else
+        CollectWantedRanks(CoaLevelBuildData::Picks, classId, specializationId, bot->GetLevel(), wanted, buildTop);
+
+    // Bring the tree back to the build before spending (sources 1 and 2 only). SetAscensionTalentRank
+    // does not count essence, so a bot that bought from one table and is now told to follow the
+    // other would keep both trees. Every entry either table may have bought is held to the wanted
+    // rank, 0 when the build does not want it.
+    std::set<uint32> managed;
+    if (source != 0)
     {
-        if (pick.ClassId != bot->getClass() || pick.SpecId != specializationId)
+        CollectManagedEntries(CoaLevelBuildDataKami::Picks, classId, specializationId, managed);
+        CollectManagedEntries(CoaLevelBuildData::Picks, classId, specializationId, managed);
+    }
+
+    uint32 lowered = 0, lowerRefused = 0;
+    for (uint32 const entryId : managed)
+    {
+        if (IsAliasedEntry(classId, specializationId, entryId))
             continue;
 
-        buildTop = std::max(buildTop, pick.Level);
-        if (pick.Level > bot->GetLevel())
+        uint32 const heldRank = GetAscensionTalentRank(bot, entryId);
+        if (!heldRank)
             continue;
 
         auto itr = std::find_if(wanted.begin(), wanted.end(),
-            [&pick](std::pair<uint32, uint8> const& w) { return w.first == pick.EntryId; });
-        if (itr == wanted.end())
-            wanted.emplace_back(pick.EntryId, pick.Rank);
-        else if (itr->second < pick.Rank)
-            itr->second = pick.Rank;
+            [entryId](std::pair<uint32, uint8> const& w) { return w.first == entryId; });
+        uint32 const wantedRank = itr == wanted.end() ? 0 : itr->second;
+        if (heldRank <= wantedRank)
+            continue;
+
+        // Ranks the build wants, as held before this lowering: if one drops, the two entries share a
+        // spell. The rank comes back in the raising loop below; the entry is never lowered again.
+        std::vector<uint32> before;
+        before.reserve(wanted.size());
+        for (auto const& w : wanted)
+            before.push_back(GetAscensionTalentRank(bot, w.first));
+
+        if (!SetAscensionTalentRank(bot, entryId, wantedRank))
+        {
+            ++lowerRefused;
+            continue;
+        }
+        ++lowered;
+
+        for (std::size_t i = 0; i < wanted.size(); ++i)
+            if (wanted[i].first != entryId && GetAscensionTalentRank(bot, wanted[i].first) < before[i])
+            {
+                if (MarkAliasedEntry(classId, specializationId, entryId))
+                    LOG_INFO("playerbots", "coa build: class {}, specialization {}: entry {} shares a spell with "
+                             "wanted entry {}; it will not be lowered again", classId, specializationId, entryId,
+                             wanted[i].first);
+                break;
+            }
     }
+
+    if (lowered || lowerRefused)
+        LOG_INFO("playerbots", "coa: {} (class {}, level {}, specialization {}) brought back to build table {}: "
+                 "{} entries lowered, {} refused",
+                 bot->GetName(), classId, bot->GetLevel(), specializationId, source, lowered, lowerRefused);
 
     // The three outcomes are counted apart. The old code kept only `raised` and threw the
     // boolean of SetAscensionTalentRank away, which has six distinct refusal causes: a bot
@@ -560,8 +700,8 @@ uint32 ApplyCoaTalents(Player* bot)
 
     if (raised)
         LOG_INFO("playerbots", "coa: {} (class {}, level {}, specialization {}) raised {} talent entries "
-                 "({} already held, {} refused)",
-                 bot->GetName(), bot->getClass(), bot->GetLevel(), specializationId, raised, held, refused);
+                 "({} already held, {} refused, build table {})",
+                 bot->GetName(), bot->getClass(), bot->GetLevel(), specializationId, raised, held, refused, source);
 
     // No line at all for this (class, spec) at this level, or an entry the core refused: once
     // per (class, spec, level), because the hole belongs to the table, not to this bot.

@@ -1956,6 +1956,21 @@ AiPlayerbot.PermanentlyInWorldTime = 31104000
 #                                 #
 ###################################
 
+#    AiPlayerbot.Coa.BuildSource
+#        Description: Level build table random bots of the CoA custom classes follow when they spend
+#                     Character Advancement points (one point per level from 10 to 60). Read on every
+#                     use: ".reload config" switches it; bots catch up at their next login or level up.
+#                     0 - CoaLevelBuildData.h, as before this option existed: ranks are only raised.
+#                     1 - CoaLevelBuildDataKami.h, the trees the top players play (kami-labs.fr),
+#                         and the tree is brought back to it: picks of either table the build does
+#                         not want are removed.
+#                     2 - CoaLevelBuildData.h, with that same bringing back: the way back from 1.
+#                     Once 1 has been used, NEVER go back to 0 (bots would keep both trees): use 2,
+#                     for good. An invalid value is logged once and treated as 2.
+#        Default:     0
+
+AiPlayerbot.Coa.BuildSource = 0
+
 ####################################################################################################
 # INFORMATION
 #
