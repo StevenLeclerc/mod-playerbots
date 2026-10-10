@@ -3720,7 +3720,8 @@ AiPlayerbot.Directeur.EvenementGardien = 0
 #        Ligne `coa directeur evenement: id= sous_action=meca joueur= valeur= motif=palier|bouclier_*`.
 #        0 : `meca<k>` refuse `meca_eteint`. Lue a chaque commande dans la conf chargee : `.reload config` suffit.
 #        Ne la mettre a 1 qu'APRES les migrations et le binaire qui la porte (le service n'emet `meca` que si elle
-#        vaut 1 dans le fichier).
+#        vaut 1 dans le fichier ; refuse `meca_eteint` ou `texte`, il reemet le chef une fois sans `meca`).
+#        Retour arriere ATOMIQUE : 0 ICI ET les -RETOUR.sql ; a 0 sans eux, les chefs perdent leurs routines retirees.
 #        Default: 0
 AiPlayerbot.Directeur.EvenementMecaniques = 0
 

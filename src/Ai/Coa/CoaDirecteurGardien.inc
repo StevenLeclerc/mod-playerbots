@@ -541,10 +541,13 @@ public:
     void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage, SpellInfo const* spellInfo) override
     {
         // Chefs a mecaniques (10/10, CoaDirecteurBoss.inc) : un sort de la table lance par un chef arme frappe en % des
-        // PV max de la cible, AVANT la dose (qui l'abaisse ensuite, seul).
+        // PV max de la cible, AVANT la dose (qui l'abaisse ensuite, seul). Relecture : SpellDamageBonusTaken a deja ete
+        // applique a l'ancienne valeur (SpellEffects.cpp:970) ; le % le repasse, sans quoi Mur protecteur, Suppression
+        // de la douleur et les reductions Ascension seraient ignores (cette fonction n'appelle aucun crochet).
         uint8 mp = 0;
         if (target && spellInfo && damage > 0 && PctMeca(attacker, spellInfo->Id, false, mp))
-            damage = int32(target->CountPctFromMaxHealth(mp));
+            damage = int32(target->SpellDamageBonusTaken(attacker, spellInfo, target->CountPctFromMaxHealth(mp),
+                                                         SPELL_DIRECT_DAMAGE));
         uint32 const pct = DegatsDoses(attacker);
         if (pct < 100 && damage > 0)
             damage = int32(int64(damage) * pct / 100);

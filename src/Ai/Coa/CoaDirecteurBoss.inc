@@ -7,7 +7,7 @@
 //
 // Demande du commanditaire (10/10, Maree d'orage v2) : « Toujours un peu decevant, le boss final, qui n'est finalement
 // juste qu'un gros sac a points de vie ». Les mecaniques elles-memes (annonces, phases, coups) sont de la DONNEE
-// (smart_scripts / creature_text, migrations exploitation/directeur/sql/2026_10_11_0*_evenement_boss_*.sql engendrees
+// (smart_scripts / creature_text, migrations exploitation/directeur/sql/2026_10_10_10_evenement_boss_*.sql engendrees
 // par outils/generer-boss-meca.py) ; ce fragment porte ce que SmartAI ne sait pas faire :
 //
 // TOUT EST ETEINT tant que AiPlayerbot.Directeur.EvenementMecaniques = 0 (lue a chaque commande dans la conf CHARGEE,
@@ -36,9 +36,24 @@
 //      EV_MECA_PCT lance par un chef ARME frappe `pct` % des PV max de la cible (coup direct ou tic), quel que soit le
 //      niveau 10-80 (Rate.Creature.*.SpellDamage = 1 : les degats DBC plafonnent au niveau 60 ou sont fixes). Les
 //      monstres des vagues qui lancent les memes sorts (Geant 9100211 : Thunderclap ; Ame 9100311 : Cry of the Dead) ne
-//      portent pas la marque : inchanges.
+//      portent pas la marque : inchanges. Relecture du 10/10, LU dans le coeur :
+//        - coup direct : SpellDamageBonusTaken est applique AVANT le crochet (SpellEffects.cpp:970 puis Unit.cpp:1512) ;
+//          le % l'ecrasait (Mur protecteur, Suppression de la douleur ignores). Le crochet REPASSE donc le % par
+//          SpellDamageBonusTaken (qui n'appelle aucun crochet : pas de recursion) ; armure, absorptions, resistances et
+//          CRITIQUE viennent apres (Unit.cpp:1520-1570) ;
+//        - tic : le crochet passe AVANT SpellDamageBonusDone (aure de dynobj seulement) et SpellDamageBonusTaken
+//          (SpellAuraEffects.cpp:6497-6509) : les reductions de la cible comptent ; les bonus du chef ne comptent que
+//          s'il porte un MOD_DAMAGE_PERCENT_DONE de l'ecole du tic (Frenzy 8269 : physique seul, les tics de la table
+//          sont nature, givre, ombre -- l'epreuve le tient) ;
+//        - le critique (x 1,5 magie, x 2 melee/distance) vient APRES : la table est donc bornee au pire cas
+//          (boss_meca.POURCENTAGES : 13 % magie, 10 % Boulder).
 //   5. CIBLE DES BOTS : CibleDEvenement et AssaillantsDEvenement ecartent un invoque INSENSIBLE (immunise aux degats
-//      physiques ET magiques) tant qu'un autre invoque de l'evenement est valide (CoaDirecteur.cpp).
+//      physiques ET magiques) tant qu'un autre invoque de l'evenement est valide A PORTEE (CoaDirecteur.cpp).
+//   6. EVASION (relecture du 10/10, ReprendrePaliers, chaque seconde avant DeclencherPaliers) : un chef arme revenu
+//      hors combat (evasion finie) apres au moins un palier repart du debut -- paliersFaits et bouclier remis a zero,
+//      SetData(1, k) rejoue (ses lignes DATA_SET remettent le debut du bloc). Cote donnees, les seuils n'ont plus
+//      DONT_RESET (OnReset les rearme) et une ligne RESET par bloc remet le debut du bloc : sans cela le combat suivant
+//      n'avait plus ni transition, ni cri, ni renforts, ni bouclier, ni frenesie (SmartScript.cpp:131-150).
 // Les crochets de degats (fils de carte) ne lisent que l'attaquant (son CustomData, ecrit une fois a la pose) et une
 // table constexpr : aucun verrou. Le registre est au FIL MONDE seul (P-137).
 
@@ -102,17 +117,23 @@ struct PctMecaSort
     uint8 tic;
 };
 constexpr PctMecaSort EV_MECA_PCT[] = {
-    {8293, 12, 6},    // Lightning Cloud : impact, tic de 5 s
-    {8147, 15, 0},    // Thunderclap
-    {21071, 20, 0},   // Boulder
-    {32938, 12, 0},   // Cry of the Dead
-    {16340, 15, 0},   // Frost Breath
-    {8364, 0, 5},     // Blizzard : tic de 2 s
-    {37615, 10, 3},   // Toxic Slime : impact, tic de 3 s
-    {9081, 12, 0},    // Shadow Bolt Volley
-    {12058, 10, 0},   // Chain Lightning (Haute-sirene ; routine de la Matriarche et du Seigneur)
+    // Pire cas, critique compris (relecture du 10/10) : coup <= 13 % (magie, x 1,5), <= 10 % (melee/distance, x 2).
+    {8293, 12, 6},    // Lightning Cloud (Gardien) : impact, tic de 5 s
+    {8147, 13, 0},    // Thunderclap (Gardien)
+    {21071, 10, 0},   // Boulder (Seigneur) : DefenseType 3, critique x 2
+    {32938, 12, 0},   // Cry of the Dead (Sonneur)
+    {37788, 0, 4},    // Death and Decay (Sonneur) : tic de 2 s
+    {16340, 13, 0},   // Frost Breath (Commandant)
+    {8364, 0, 5},     // Blizzard (Val'kyr) : tic de 2 s
+    {37615, 10, 3},   // Toxic Slime (Boucher) : impact, tic de 3 s
+    {9081, 12, 0},    // Shadow Bolt Volley (Val'kyr)
     {15117, 10, 0},   // Chain Lightning (Drake)
+    {57784, 12, 0},   // Thunderstorm (Drake)
+    {38623, 10, 0},   // Water Bolt Volley (Haute-sirene)
+    {37730, 13, 0},   // Tidal Wave (Haute-sirene)
+    {28459, 12, 0},   // Wail of Souls (Dame pleureuse)
     // Routines gardees (relecture : 23-30 % des PV nus d'un mage aux niveaux 10-37 au DBC, 2-5 % au niveau 80).
+    {12058, 10, 0},   // Chain Lightning (routine de la Haute-sirene, de la Matriarche et du Seigneur)
     {20627, 8, 0},    // Lightning Breath (Drake)
     {12548, 8, 0},    // Frost Shock (Commandant)
     {16583, 6, 0},    // Shadow Shock (Dame pleureuse, Commandant)
@@ -296,6 +317,37 @@ uint32 PoserRenfortsMeca(EvInvoque const& parent, Creature* chef, uint32 entree,
             s->AI()->AttackStart(cible);
     }
     return poses;
+}
+
+// Evasion (fil monde, chaque seconde, AVANT DeclencherPaliers) : un chef arme sorti de combat et revenu de son evasion
+// (hors combat, UNIT_STATE_EVADE leve), apres au moins un palier ou avec un bouclier suivi, repart du debut -- comme
+// ses donnees, que OnReset remet au debut du bloc quels que soient ses PV (une creature ne quitte le combat qu'en
+// s'evadant). Sans exiger les PV pleins : repris a 60 %, il refranchit 75 % aussitot, cote donnees ET cote renforts.
+// Ses renforts deja poses restent (ils disparaissent hors combat : TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT) ; ceux du
+// prochain combat seront reposes.
+void ReprendrePaliers()
+{
+    for (EvInvoque& v : evInvoques)
+    {
+        if (!v.meca || v.mort || v.retraitDepuisS || (!v.paliersFaits && !v.bouclierActif))
+            continue;
+        Creature* chef = CreatureInvoquee(v);
+        if (!chef || !chef->IsAlive() || !chef->IsInWorld() || chef->IsInCombat() || chef->IsInEvadeMode())
+            continue;
+        uint8 const avant = v.paliersFaits;
+        v.paliersFaits = 0;
+        if (v.bouclierActif)
+        {
+            v.bouclierActif = false;
+            if (RegleMecaChef const* regle = RegleMeca(v.entree))
+                if (regle->bouclier && chef->HasAura(regle->bouclier))
+                    chef->RemoveAurasDueToSpell(regle->bouclier);
+        }
+        if (chef->AI())
+            chef->AI()->SetData(EV_MECA_DATA_ID, std::clamp<uint8>(v.meca, 1, EV_MECA_PUBLICS));
+        LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=meca joueur={} valeur={} motif=reprise"
+                 " paliers_avant={} public={}", v.id, v.joueur, v.entree, uint32(avant), uint32(v.meca));
+    }
 }
 
 // Les renforts a paliers (fil monde, chaque seconde, depuis SuivreInvoques apres DeclencherRenforts, AVANT les fins de

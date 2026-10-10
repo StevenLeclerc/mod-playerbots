@@ -4951,6 +4951,7 @@ void DeclencherRenforts();
 // Chefs a mecaniques (CoaDirecteurBoss.inc) : gardes de `meca<k>`, armement, paliers, bouclier lie, degats en %.
 char const* RefusMeca(EvAppLu const& lu, uint32 entree);
 void ArmerMeca(Creature* cr, uint8 public_);
+void ReprendrePaliers();
 void DeclencherPaliers();
 void SuivreBoucliers();
 bool PctMeca(Unit const* attaquant, uint32 sort, bool tic, uint8& pct);
@@ -5447,6 +5448,7 @@ void SuivreInvoques()
     // 2 bis. Lot G : renforts a mi-vie (avant les fins de lot : le lot du Gardien reste ouvert).
     DeclencherRenforts();
     // 2 ter. Chefs a mecaniques (10/10) : renforts a paliers 75/50/25 et bouclier lie (meme place que le mi-vie).
+    ReprendrePaliers();     // relecture : evasion -> paliers et bouclier remis au debut
     DeclencherPaliers();
     SuivreBoucliers();
 
@@ -6660,10 +6662,13 @@ void CoaDirecteur::AssaillantsDEvenement(Player* bot, std::vector<Unit*>& sortie
             aPortee.push_back(cr);
     }
     // Chefs a mecaniques (10/10) : un invoque INSENSIBLE (bouclier du chef) quitte les trois listes tant qu'un autre
-    // invoque de l'evenement est vivant et visible ici -- les bots frappent les renforts qui portent le bouclier.
-    // Aucun autre : il reste (la regle d'origine).
+    // invoque de l'evenement, SENSIBLE, figure dans l'une d'elles (a portee, ou en defense) -- les bots frappent les
+    // renforts qui portent le bouclier. Relecture : un renfort sensible mais loin (hors laisse, egare) ne compte pas,
+    // sinon le chef sortait des listes sans autre cible a portee. Aucun : il reste (la regle d'origine).
     auto const sensible = [](Unit* u) { return !Insensible(u); };
-    if (std::any_of(autres.begin(), autres.end(), sensible) || std::any_of(defense.begin(), defense.end(), sensible))
+    if (std::any_of(defense.begin(), defense.end(), sensible) ||
+        std::any_of(defenseInscrits.begin(), defenseInscrits.end(), sensible) ||
+        std::any_of(aPortee.begin(), aPortee.end(), sensible))
     {
         for (std::vector<Unit*>* liste : {&defense, &defenseInscrits, &aPortee})
             liste->erase(std::remove_if(liste->begin(), liste->end(), [](Unit* u) { return Insensible(u); }),
