@@ -29,6 +29,7 @@
 #include <array>
 #include <mutex>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -564,6 +565,58 @@ bool MarkAliasedEntry(uint8 classId, uint32 specializationId, uint32 entryId)
     return aliasedEntries.insert(AliasKey(classId, specializationId, entryId)).second;
 }
 
+// Lowerings that do not hold, per bot. Measured on 2026-10-10: on 7 bots out of 649, lowering a
+// class-tree entry from rank 2 to rank 1 succeeds, then the rank 2 spell comes back (cause not
+// found: neither spell_ranks nor SkillLineAbility), and the lowering was replayed at every login
+// and level up. A lowering of (bot, entry, rank) that has to be done a second time, or that does
+// not hold right after the call, is not tried again: the bot keeps the higher rank. In memory
+// only, so a restart of the world server gives every lowering one more chance.
+//
+// A lowering may LEGITIMATELY be needed again: the hunters' reserve takes bots down in level, a
+// specialization switch brings a stored class tree back (RestoreBuilds), BuildSource goes 1 -> 2
+// -> 1. Hence the key carries the specialization and the table, and whenever this code raises an
+// entry, every remembered lowering of that (bot, entry) is forgotten: the next one is legitimate.
+// Key: guid, entry, specialization, build table, wanted rank.
+using LoweringKey = std::tuple<uint32, uint32, uint32, uint32, uint32>;
+std::set<LoweringKey> loweringsDone;
+std::set<LoweringKey> loweringsThatDoNotHold;
+std::mutex loweringsLock;
+
+bool LoweringDoesNotHold(LoweringKey const& key)
+{
+    std::lock_guard<std::mutex> guard(loweringsLock);
+    return loweringsThatDoNotHold.count(key) != 0;
+}
+
+// True when the same lowering was already done once and has to be done again: it did not hold.
+// It is then filed as such.
+bool LoweringAlreadyDone(LoweringKey const& key)
+{
+    std::lock_guard<std::mutex> guard(loweringsLock);
+    if (!loweringsDone.count(key))
+        return false;
+    loweringsThatDoNotHold.insert(key);
+    return true;
+}
+
+void RecordLowering(LoweringKey const& key, bool holds)
+{
+    std::lock_guard<std::mutex> guard(loweringsLock);
+    loweringsDone.insert(key);
+    if (!holds)
+        loweringsThatDoNotHold.insert(key);
+}
+
+// This code just raised `entryId` on `guid`: whatever was remembered about lowering it is stale.
+void ForgetLowerings(uint32 guid, uint32 entryId)
+{
+    LoweringKey const from(guid, entryId, 0, 0, 0);
+    LoweringKey const to(guid, entryId + 1, 0, 0, 0);
+    std::lock_guard<std::mutex> guard(loweringsLock);
+    loweringsDone.erase(loweringsDone.lower_bound(from), loweringsDone.lower_bound(to));
+    loweringsThatDoNotHold.erase(loweringsThatDoNotHold.lower_bound(from), loweringsThatDoNotHold.lower_bound(to));
+}
+
 // Rank each entry should hold at `level`: the table's picks for (class, spec) up to that level.
 // `buildTop` is the highest level the table covers for this (class, spec).
 template <std::size_t N>
@@ -653,6 +706,17 @@ uint32 ApplyCoaTalents(Player* bot)
         if (heldRank <= wantedRank)
             continue;
 
+        LoweringKey const loweringKey(bot->GetGUID().GetCounter(), entryId, specializationId, source, wantedRank);
+        if (LoweringDoesNotHold(loweringKey))
+            continue;
+        if (LoweringAlreadyDone(loweringKey))
+        {
+            LOG_INFO("playerbots", "coa build: {} (class {}, specialization {}): entry {} back at rank {} after "
+                     "being lowered to {}; it keeps that rank and will not be lowered again",
+                     bot->GetName(), classId, specializationId, entryId, heldRank, wantedRank);
+            continue;
+        }
+
         // Ranks the build wants, as held before this lowering: if one drops, the two entries share a
         // spell. The rank comes back in the raising loop below; the entry is never lowered again.
         std::vector<uint32> before;
@@ -666,6 +730,17 @@ uint32 ApplyCoaTalents(Player* bot)
             continue;
         }
         ++lowered;
+
+        // Recorded only once SetAscensionTalentRank succeeded: a refusal stays a refusal, counted
+        // and retried, never mistaken for a lowering that did not hold.
+        uint32 const after = GetAscensionTalentRank(bot, entryId);
+        RecordLowering(loweringKey, after <= wantedRank);
+        if (after > wantedRank)
+        {
+            LOG_INFO("playerbots", "coa build: {} (class {}, specialization {}): entry {} still at rank {} right "
+                     "after being lowered to {}; it keeps that rank and will not be lowered again",
+                     bot->GetName(), classId, specializationId, entryId, after, wantedRank);
+        }
 
         for (std::size_t i = 0; i < wanted.size(); ++i)
             if (wanted[i].first != entryId && GetAscensionTalentRank(bot, wanted[i].first) < before[i])
@@ -693,7 +768,10 @@ uint32 ApplyCoaTalents(Player* bot)
         if (GetAscensionTalentRank(bot, entryId) >= rank)
             ++held;
         else if (SetAscensionTalentRank(bot, entryId, rank))
+        {
             ++raised;
+            ForgetLowerings(bot->GetGUID().GetCounter(), entryId);
+        }
         else
             ++refused;
     }
