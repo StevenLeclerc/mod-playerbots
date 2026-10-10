@@ -69,6 +69,30 @@ constexpr uint32 CoaAreneOuvertureApresSuccesMs = 10 * IN_MILLISECONDS;
 constexpr uint32 CoaArenePreparationReessaiMs = 5 * IN_MILLISECONDS;
 // La cible ne peut pas suivre si elle court a 70 % de la vitesse du bot ou moins (Dazed : 50 %).
 constexpr float CoaAreneVitesseRelative = 0.7f;
+// Recul et retour ne visent jamais au-dela de la portee maximale moins cette marge (incident du 10/10 19:21 :
+// un recul fini a 32,2 yd, hors de portee et derriere la tombe, puis 106 s sans rien faire).
+constexpr float CoaAreneMargePortee = 2.0f;
+// Un recul ne vaut la peine que s'il sort le bot de la portee minimale avec cette avance.
+constexpr float CoaAreneReculGainMin = 3.0f;
+// Duree de fenetre supposee quand l'aura qui ralentit n'a pas de duree lisible.
+constexpr uint32 CoaAreneFenetreParDefautMs = 2 * IN_MILLISECONDS;
+// Retour a portee et en vue : un essai par seconde au plus, une ligne de journal toutes les 5 s au plus.
+constexpr uint32 CoaAreneRetourReessaiMs = IN_MILLISECONDS;
+constexpr uint32 CoaAreneRetourJournalMs = 5 * IN_MILLISECONDS;
+// Burst a pile pleine (revue du 10/10 soir) : seulement cible ralentie/controlee ou sous 60 % ; au-dela de 8 s
+// de pile pleine sans fenetre, chaque generateur est perdu (pas de 6e charge) : on depense quand meme.
+constexpr float CoaAreneBurstPvCible = 60.0f;
+constexpr uint32 CoaArenePileTenueMaxMs = 8 * IN_MILLISECONDS;
+// L2, piliers : seuil de vie, duree max d'une cachette, pause entre deux, cumul par engagement, frequence des
+// recherches et debit du journal.
+constexpr float CoaArenePilierPvBot = 40.0f;
+constexpr uint32 CoaArenePilierMaxMs = 8 * IN_MILLISECONDS;
+constexpr uint32 CoaArenePilierPauseMs = 10 * IN_MILLISECONDS;
+constexpr uint32 CoaArenePilierCumulMaxMs = 30 * IN_MILLISECONDS;
+constexpr uint32 CoaArenePilierEssaiMs = 1500;
+constexpr uint32 CoaArenePilierJournalMs = 10 * IN_MILLISECONDS;
+constexpr uint8 COA_PILIER_PV = 1;
+constexpr uint8 COA_PILIER_RECHARGE = 2;
 
 CoaAreneEtat& CoaAreneEtatDe(PlayerbotAI* botAI)
 {
@@ -136,6 +160,47 @@ bool CoaAreneFenetreDeRecul(Player* bot, Unit* cible)
         return true;
     float const vBot = bot->GetSpeed(MOVE_RUN);
     return vBot > 0.0f && cible->GetSpeed(MOVE_RUN) <= vBot * CoaAreneVitesseRelative;
+}
+
+// La vitesse a laquelle la cible peut suivre : 0 si elle est immobilisee ou neutralisee.
+float CoaAreneVitesseSuivie(Unit* cible)
+{
+    if (cible->HasUnitState(UNIT_STATE_ROOT | UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED | UNIT_STATE_FLEEING) ||
+        cible->isFrozen() || cible->HasRootAura())
+        return 0.0f;
+    return cible->GetSpeed(MOVE_RUN);
+}
+
+// Ce qui reste de la fenetre : la plus longue duree restante des auras qui ralentissent, enracinent ou
+// neutralisent la cible. Une aura sans duree lisible (permanente, ou duree inconnue) compte pour 2 s.
+uint32 CoaAreneDureeFenetreMs(Unit* cible)
+{
+    int32 reste = 0;
+    bool trouve = false;
+    for (AuraType const type : { SPELL_AURA_MOD_DECREASE_SPEED, SPELL_AURA_MOD_ROOT, SPELL_AURA_MOD_STUN,
+                                 SPELL_AURA_MOD_CONFUSE, SPELL_AURA_MOD_FEAR })
+        for (AuraEffect const* effet : cible->GetAuraEffectsByType(type))
+        {
+            Aura const* aura = effet ? effet->GetBase() : nullptr;
+            if (!aura)
+                continue;
+            trouve = true;
+            int32 const d = aura->GetDuration();
+            reste = std::max(reste, d > 0 ? d : int32(CoaAreneFenetreParDefautMs));
+        }
+    return trouve ? uint32(reste) : CoaAreneFenetreParDefautMs;
+}
+
+// La distance de combat qu'un recul peut atteindre avant la fin de la fenetre : la cible suit a vCible, le bot
+// court a vBot. C'est la PHYSIQUE du recul : a vitesse egale on ne creuse aucun ecart (d'ou la rupture), et un
+// Dazed (-50 %) de 4 s ne fait gagner que (7 - 3,5) x 4 = 14 yd. Le 10/10 a 19:15, 8,8 -> 17,5 yd (visee 23).
+float CoaAreneReculAtteignable(Player* bot, Unit* cible, float d0)
+{
+    float const vBot = std::max(bot->GetSpeed(MOVE_RUN), 1.0f);
+    float const vCible = CoaAreneVitesseSuivie(cible);
+    if (vCible >= vBot)
+        return d0;
+    return d0 + (vBot - vCible) * float(CoaAreneDureeFenetreMs(cible)) / float(IN_MILLISECONDS);
 }
 
 // Un sort qui CREE de la distance : il ralentit, enracine ou neutralise la cible, par ses propres effets ou par
@@ -248,17 +313,25 @@ void CoaAreneJournal(Player* bot, CoaAreneEtat const& etat, char const* action, 
              bot->GetGUID().GetCounter(), action, CoaAreneCadreNom(etat.cadre), etat.bras ? 1 : 0, avant, apres, suite);
 }
 
-// Fin d'un recul : la distance atteinte se lit a l'arrivee, pas a la decision.
-void CoaAreneCloreRecul(Player* bot, CoaAreneEtat& etat, Unit* adversaire)
+// Fin d'un recul : la distance atteinte se lit a l'arrivee, pas a la decision. `vise` est la distance que la
+// fenetre permettait d'atteindre (<= `vise_max`, la distance de confort) ; le succes se juge contre elle.
+// `arreter` : le bot court encore (ecart atteint, ou fenetre close) -- il s'arrete pour se retourner et tirer.
+void CoaAreneCloreRecul(Player* bot, CoaAreneEtat& etat, Unit* adversaire, char const* raison, bool arreter = false)
 {
+    if (arreter && bot->isMoving())
+        bot->StopMoving();
     float const apres = adversaire ? bot->GetExactDist2d(adversaire) : -1.0f;
-    bool const reussi = adversaire && CoaAreneDistanceCombat(bot, adversaire) >= etat.reculVise - 5.0f;
+    bool const reussi = adversaire && CoaAreneDistanceCombat(bot, adversaire) >= etat.reculVise - 2.0f;
     etat.reculsReussis += reussi ? 1 : 0;
     CoaAreneJournal(bot, etat, "recul", etat.reculDistAvant, apres,
-                    Acore::StringFormat(" vise={:.1f} reussi={} duree_ms={}", etat.reculVise, reussi ? 1 : 0,
-                                        getMSTimeDiff(etat.reculDebutMs, getMSTime())));
+                    Acore::StringFormat(" vise={:.1f} vise_max={:.1f} reussi={} duree_ms={} fin={}", etat.reculVise,
+                                        etat.reculViseMax, reussi ? 1 : 0, getMSTimeDiff(etat.reculDebutMs, getMSTime()),
+                                        raison));
     etat.reculFinMs = 0;
 }
+
+// L2 : suivi d'une cachette en cours (defini plus bas, apres CoaAreneSortPret).
+void CoaArenePilierSuivre(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* adv, bool engage, uint32 maintenant);
 
 /*
  * L'etat du tick : engagement ouvert, tire, suivi, clos. Une seule mise a jour par tick (CoaAreneMajMs).
@@ -298,6 +371,9 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
         return etat;
 
     etat.vuCeTick = cadre != COA_ARENE_AUCUN && !preparation;
+    // La pile tenue ne se compte que pendant l'engagement vu (sinon une pile pleine d'avant ferait partir le burst).
+    if (!etat.vuCeTick)
+        etat.pilePleineDepuisMs = 0;
     if (cadre != COA_ARENE_AUCUN)
     {
         etat.cadre = cadre;
@@ -314,23 +390,64 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
     if (adv && !adv->IsInWorld())
         adv = nullptr;
 
-    // Recul en cours : clos a l'echeance, ou quand le bot s'est arrete (arrive, ou retenu).
-    if (etat.reculFinMs &&
-        (getMSTimeDiff(etat.reculDebutMs, maintenant) >= getMSTimeDiff(etat.reculDebutMs, etat.reculFinMs) ||
-         (!bot->isMoving() && getMSTimeDiff(etat.reculDebutMs, maintenant) > 300)))
-        CoaAreneCloreRecul(bot, etat, adv);
+    // Recul en cours : clos quand l'ecart vise est atteint (le bot s'arrete : courir plus loin le sortirait de
+    // portee si la cible cesse de suivre), quand la cible peut de nouveau suivre (a vitesse egale, courir ne
+    // creuse plus rien et lui tourne le dos), a l'echeance, ou quand le bot s'est arrete (arrive, ou retenu).
+    if (etat.reculFinMs)
+    {
+        uint32 const depuis = getMSTimeDiff(etat.reculDebutMs, maintenant);
+        bool const vivante = adv && adv->IsAlive() && bot->IsAlive();
+        if (vivante && depuis > 300 && CoaAreneDistanceCombat(bot, adv) >= etat.reculVise)
+            CoaAreneCloreRecul(bot, etat, adv, "atteint", true);
+        else if (vivante && depuis > 300 && !CoaAreneFenetreDeRecul(bot, adv))
+            CoaAreneCloreRecul(bot, etat, adv, "fenetre_close", true);
+        else if (depuis >= getMSTimeDiff(etat.reculDebutMs, etat.reculFinMs))
+            CoaAreneCloreRecul(bot, etat, adv, "echeance");
+        else if (!bot->isMoving() && depuis > 300)
+            CoaAreneCloreRecul(bot, etat, adv, "arret");
+    }
+
+    // Retour en cours (L1) : le bot court vers la cible ; il s'arrete des qu'il la voit et qu'elle est a portee
+    // confortable, au lieu d'aller au contact (un tireur au contact ne tire plus).
+    if (etat.retourEnCours)
+    {
+        float bas = 0.0f, haut = 0.0f;
+        if (!adv || !adv->IsAlive() || !bot->IsAlive())
+            etat.retourEnCours = false;
+        else
+        {
+            CoaArenePlage(botAI, bot, bas, haut);
+            if (bot->IsWithinLOSInMap(adv) && CoaAreneDistanceCombat(bot, adv) <= haut - CoaAreneMargePortee - 2.0f)
+            {
+                if (bot->isMoving())
+                    bot->StopMoving();
+                etat.retourEnCours = false;
+            }
+            else if (!bot->isMoving() && etat.dernierRetourMs && getMSTimeDiff(etat.dernierRetourMs, maintenant) > 500)
+                etat.retourEnCours = false;  // arrive, ou mouvement repris par autre chose : le declencheur jugera
+        }
+    }
+
+    // L2, cachette en cours : sortie (voir CoaArenePilierSortie, plus bas).
+    if (etat.pilierDebutMs)
+        CoaArenePilierSuivre(botAI, bot, etat, adv, cadre != COA_ARENE_AUCUN && !preparation, maintenant);
 
     if (cadre == COA_ARENE_AUCUN && getMSTimeDiff(etat.dernierContactMs, maintenant) > CoaAreneGraceMs)
     {
         if (etat.reculFinMs)
-            CoaAreneCloreRecul(bot, etat, adv);
+            CoaAreneCloreRecul(bot, etat, adv, "fin_engagement");
+        if (etat.pilierDebutMs)
+            CoaArenePilierSuivre(botAI, bot, etat, nullptr, false, maintenant);
+        etat.retourEnCours = false;
         uint32 const n = std::max<uint32>(etat.echantillons, 1);
         CoaAreneJournal(bot, etat, "bilan", -1.0f, -1.0f,
                         Acore::StringFormat(" duree_s={} echantillons={} contact_pct={} plage_pct={} reculs={} "
-                                            "reculs_reussis={} ruptures={} bursts={} ouvertures={} pv_min={:.0f}",
+                                            "reculs_reussis={} ruptures={} bursts={} ouvertures={} pv_min={:.0f} "
+                                            "retours={} piliers={} pilier_cumul_ms={}",
                                             getMSTimeDiff(etat.debutMs, maintenant) / IN_MILLISECONDS, etat.echantillons,
                                             etat.auContact * 100 / n, etat.dansLaPlage * 100 / n, etat.reculs,
-                                            etat.reculsReussis, etat.ruptures, etat.bursts, etat.ouvertures, etat.pvMin));
+                                            etat.reculsReussis, etat.ruptures, etat.bursts, etat.ouvertures, etat.pvMin,
+                                            etat.retours, etat.piliers, etat.pilierCumulMs));
         etat.actif = false;
         etat.reculFinMs = 0;
         return etat;
@@ -531,14 +648,29 @@ CoaAreneBurst CoaAreneOrdonnerBurst(PlayerbotAI* botAI, Player* bot, Unit* cible
     SpellInfo const* auraInfo = sSpellMgr->GetSpellInfo(burst.aura);
     uint8 const plafond = auraInfo ? uint8(auraInfo->StackAmount) : 0;
 
-    if (burst.pile && plafond && burst.pile >= plafond)
-        burst.raison = "pile";
-    else if (burst.pile && cible->GetHealthPct() <= 30.0f)
+    // Revue du 10/10 soir : la pile pleine seule n'ouvre plus la fenetre (Skullpiercer a pile 5 sur une cible a
+    // 100 %, en ouverture, a 19:15). A pile pleine, il faut aussi une cible ralentie, enracinee ou controlee
+    // (le recul et les tirs suivants la punissent), ou sous 60 %. Mais au plafond chaque generateur de plus est
+    // perdu (pas de 6e charge) : apres 8 s de pile pleine sans fenetre, on depense quand meme (« pile_tenue »).
+    bool const pleine = burst.pile && plafond && burst.pile >= plafond;
+    uint32 const maintenant = getMSTime();
+    if (!pleine)
+        etat.pilePleineDepuisMs = 0;
+    else if (!etat.pilePleineDepuisMs)
+        etat.pilePleineDepuisMs = maintenant ? maintenant : 1;
+
+    if (burst.pile && cible->GetHealthPct() <= 30.0f)
         burst.raison = "vie_cible";
     else if (burst.pile && cible->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED | UNIT_STATE_FLEEING))
         burst.raison = "controle";
     else if (burst.pile && bot->GetHealthPct() <= 35.0f)
         burst.raison = "vie_bot";
+    else if (pleine && CoaAreneFenetreDeRecul(bot, cible))
+        burst.raison = "pile_ralentie";
+    else if (pleine && cible->GetHealthPct() < CoaAreneBurstPvCible)
+        burst.raison = "pile_pv60";
+    else if (pleine && getMSTimeDiff(etat.pilePleineDepuisMs, maintenant) >= CoaArenePileTenueMaxMs)
+        burst.raison = "pile_tenue";
     burst.fenetre = *burst.raison != '\0';
 
     auto consommateur = [bot](Usable const& spell) { return CoaAreneAuraConsommee(bot, spell.info) != 0; };
@@ -593,6 +725,148 @@ std::vector<Usable> CoaAreneRuptures(PlayerbotAI* botAI, Player* bot, Unit* cibl
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Retour (L1) et cachette (L2) : l'etat partage par les declencheurs, actions et le suivi de CoaAreneMaj.
+// ---------------------------------------------------------------------------------------------------------------
+bool CoaAreneCachetteEnCours(CoaAreneEtat const& etat)
+{
+    return etat.pilierDebutMs != 0;
+}
+
+// L'adversaire de l'engagement, s'il est la, vivant et sur la carte du bot.
+Unit* CoaAreneAdversaireVivant(Player* bot, CoaAreneEtat const& etat)
+{
+    Unit* adv = etat.adversaire ? ObjectAccessor::GetUnit(*bot, etat.adversaire) : nullptr;
+    if (!adv || !adv->IsInWorld() || !adv->IsAlive() || adv->GetMapId() != bot->GetMapId())
+        return nullptr;
+    return adv;
+}
+
+// Le bot peut se deplacer de lui-meme a ce tick.
+bool CoaAreneLibreDeBouger(PlayerbotAI* botAI, Player* bot)
+{
+    return !bot->IsRooted() && !bot->HasUnitState(UNIT_STATE_ROOT | UNIT_STATE_LOST_CONTROL) && botAI->CanMove() &&
+           !bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+}
+
+// Un sort de degats du bot est pret (recharge, banc, ressource) ; portee et ligne de vue mises a part.
+bool CoaAreneUnTirPret(PlayerbotAI* botAI, Player* bot)
+{
+    for (Usable const& spell : KnownAbilities(botAI, bot,
+             [](uint16 kind) { return IsAttack(kind, false) && (kind & KIND_DAMAGE); }))
+        if (CoaAreneSortPret(botAI, bot, spell))
+            return true;
+    return false;
+}
+
+/*
+ * Pourquoi le retour existe (incident du 10/10 a 19:21 Paris, gladiateur 2596, carte 572) : apres un recul fini a
+ * 32,2 yd, derriere la tombe, plus une ligne pendant 106 s, et le joueur a du venir au bot. Lu dans le code :
+ * hors de vue, « invalid target » (InvalidTargetValue.cpp:25, AttackersValue::IsValidTarget exige la ligne de
+ * vue) -> « drop target » (99) : cible effacee, moteur non-combat. Aucune valeur de cible ne retient un joueur
+ * hors de vue (« possible targets » filtre IsWithinLOSInMap), donc « reach spell » n'a rien a rejoindre ; et
+ * ArenaTactics, en combat, ne se replace que sur GetVictim(), vide pour un tireur sans cible. Le bot attend que
+ * le joueur reapparaisse. Meme boucle au combat id=3 (17:28, plage_pct=2) : le bot restait hors de portee.
+ *
+ * Le retour : l'engagement connait l'adversaire (etat.adversaire, relu a chaque tick, meme si le joueur entre
+ * apres le bot) ; s'il est hors de vue ou hors de portee, le bot va vers lui par un chemin, et s'arrete des
+ * qu'il le voit a portee confortable (CoaAreneMaj) ; s'il le voit a portee sans l'avoir pour cible, il le
+ * reprend pour cible et repasse en moteur de combat.
+ */
+enum CoaAreneRetourRaison : uint8
+{
+    COA_RETOUR_AUCUN = 0,
+    COA_RETOUR_VUE = 1,
+    COA_RETOUR_PORTEE = 2,
+    COA_RETOUR_CIBLE = 3
+};
+
+char const* CoaAreneRetourNom(uint8 raison)
+{
+    switch (raison)
+    {
+        case COA_RETOUR_VUE: return "vue";
+        case COA_RETOUR_PORTEE: return "portee";
+        case COA_RETOUR_CIBLE: return "cible";
+        default: return "aucun";
+    }
+}
+
+uint8 CoaAreneRetourRaison(PlayerbotAI* botAI, Player* bot, Unit* adv)
+{
+    if (!bot->CanSeeOrDetect(adv) || !bot->IsValidAttackTarget(adv))
+        return COA_RETOUR_AUCUN;  // furtif, ou plus attaquable : rien a poursuivre
+    if (!bot->IsWithinLOSInMap(adv))
+        return COA_RETOUR_VUE;
+    float bas = 0.0f, haut = 0.0f;
+    CoaArenePlage(botAI, bot, bas, haut);
+    if (CoaAreneDistanceCombat(bot, adv) > haut - 1.0f)
+        return COA_RETOUR_PORTEE;
+    Unit* cible = botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
+    // Meme test que « invalid target » (InvalidTargetValue.cpp:25) : sans lui, une cible que le moteur refuse
+    // (immunite totale, zone sans JcJ...) serait reprise puis lachee chaque seconde.
+    if (cible != adv && AttackersValue::IsValidTarget(adv, bot))
+        return COA_RETOUR_CIBLE;
+    return COA_RETOUR_AUCUN;
+}
+
+// L2 : pourquoi se cacher maintenant (0 : pas de raison). Vie basse et cible au contact ou qui incante, ou
+// aucun tir pret.
+uint8 CoaArenePilierRaison(PlayerbotAI* botAI, Player* bot, Unit* adv)
+{
+    float bas = 0.0f, haut = 0.0f;
+    CoaArenePlage(botAI, bot, bas, haut);
+    if (bot->GetHealthPct() < CoaArenePilierPvBot &&
+        (CoaAreneDistanceCombat(bot, adv) < bas + 3.0f || adv->IsNonMeleeSpellCast(false)))
+        return COA_PILIER_PV;
+    if (!CoaAreneUnTirPret(botAI, bot))
+        return COA_PILIER_RECHARGE;
+    return 0;
+}
+
+void CoaArenePilierSortie(Player* bot, CoaAreneEtat& etat, Unit* adv, char const* raison, uint32 maintenant)
+{
+    uint32 const duree = getMSTimeDiff(etat.pilierDebutMs, maintenant);
+    etat.pilierCumulMs += duree;
+    etat.pilierDebutMs = 0;
+    etat.derniereSortiePilierMs = maintenant ? maintenant : 1;
+    float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
+    CoaAreneJournal(bot, etat, "sortie_pilier", d, d,
+                    Acore::StringFormat(" raison={} duree_ms={} cumul_ms={}", raison, duree, etat.pilierCumulMs));
+}
+
+// Cachette en cours : sortie bornee (8 s au plus), des que l'adversaire voit le bot une fois arrive (la cachette
+// a echoue : il a contourne), ou des qu'un tir est pret (et, pour la vie basse, que la cible n'est ni au contact
+// ni en train d'incanter). Le retour ramene ensuite le bot en vue et a portee. Pas de nouvelle cachette avant
+// 10 s : c'est ce qui empeche l'oscillation cachette <-> sortie.
+void CoaArenePilierSuivre(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* adv, bool engage, uint32 maintenant)
+{
+    if (!engage || !adv || !adv->IsAlive() || !bot->IsAlive())
+    {
+        CoaArenePilierSortie(bot, etat, adv, "fin", maintenant);
+        return;
+    }
+    uint32 const depuis = getMSTimeDiff(etat.pilierDebutMs, maintenant);
+    if (depuis >= CoaArenePilierMaxMs)
+    {
+        CoaArenePilierSortie(bot, etat, adv, "duree", maintenant);
+        return;
+    }
+    if (depuis > 1500 && !bot->isMoving() && adv->IsWithinLOSInMap(bot))
+    {
+        CoaArenePilierSortie(bot, etat, adv, "vu", maintenant);
+        return;
+    }
+    if (depuis > IN_MILLISECONDS && CoaAreneUnTirPret(botAI, bot))
+    {
+        float bas = 0.0f, haut = 0.0f;
+        CoaArenePlage(botAI, bot, bas, haut);
+        bool const menace = CoaAreneDistanceCombat(bot, adv) < bas + 3.0f || adv->IsNonMeleeSpellCast(false);
+        if (etat.pilierRaison == COA_PILIER_RECHARGE || (depuis > 3 * IN_MILLISECONDS && !menace))
+            CoaArenePilierSortie(bot, etat, adv, "pret", maintenant);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Multiplicateur : L0 (repas, boisson, suggestions, monture) et, pour le Ranger, la fuite amont et ce qui
 // casserait un recul en cours.
 // ---------------------------------------------------------------------------------------------------------------
@@ -629,6 +903,14 @@ public:
             // lancer un sort a incantation (CastFirst arrete le bot) le figeraient au contact.
             if (CoaAreneReculEnCours(etat) && (nom == "set facing" || nom == "coa attack" || nom == "coa aoe"))
                 return 0.0f;
+            // L2 : pendant une cachette, rien ne doit ramener le bot vers la cible -- ni « reach spell »/« reach
+            // melee », ni ArenaTactics (qui fonce sur la victime hors de vue, BattleGroundTactics.cpp:4280-4294),
+            // ni la fuite amont, ni « set facing » (qui l'arreterait en chemin). Sans cachette (IaPiliers = 0, ou
+            // aucune en cours), rien n'est touche.
+            if (CoaAreneCachetteEnCours(etat) &&
+                (nom == "reach spell" || nom == "reach melee" || nom == "arena tactics" || nom == "flee" ||
+                 nom == "set facing"))
+                return 0.0f;
         }
         return 1.0f;
     }
@@ -649,7 +931,7 @@ public:
         if (!CoaAreneEstRangerDistance(bot))
             return false;
         CoaAreneEtat const& etat = CoaAreneMaj(botAI, bot);
-        if (!CoaAreneL1Actif(etat) || CoaAreneReculEnCours(etat))
+        if (!CoaAreneL1Actif(etat) || CoaAreneReculEnCours(etat) || CoaAreneCachetteEnCours(etat))
             return false;
         Unit* cible = AI_VALUE(Unit*, "current target");
         if (!cible || !cible->IsAlive() || !CoaAreneEstAdversaire(etat, cible) || CoaAreneFenetreDeRecul(bot, cible))
@@ -673,7 +955,7 @@ public:
         if (!CoaAreneEstRangerDistance(bot))
             return false;
         CoaAreneEtat const& etat = CoaAreneMaj(botAI, bot);
-        if (!CoaAreneL1Actif(etat) || CoaAreneReculEnCours(etat))
+        if (!CoaAreneL1Actif(etat) || CoaAreneReculEnCours(etat) || CoaAreneCachetteEnCours(etat))
             return false;
         if (etat.dernierEssaiReculMs && getMSTimeDiff(etat.dernierEssaiReculMs, getMSTime()) < CoaAreneReculReessaiMs)
             return false;
@@ -685,6 +967,65 @@ public:
         float bas = 0.0f, haut = 0.0f;
         CoaArenePlage(botAI, bot, bas, haut);
         return CoaAreneDistanceCombat(bot, cible) < bas + 1.0f;
+    }
+};
+
+// L1, arene ou duel : l'adversaire est hors de vue, hors de portee, ou n'est pas la cible courante.
+class CoaAreneRetourTrigger : public Trigger
+{
+public:
+    CoaAreneRetourTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa arene retour") {}
+
+    bool IsActive() override
+    {
+        if (!CoaAreneEstRangerDistance(bot))
+            return false;
+        CoaAreneEtat const& etat = CoaAreneMaj(botAI, bot);
+        if (!CoaAreneL1Actif(etat) || (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL) ||
+            CoaAreneReculEnCours(etat) || CoaAreneCachetteEnCours(etat))
+            return false;
+        // Un retour en cours se relance au plus une fois par seconde : la destination suit l'adversaire.
+        if (etat.dernierRetourMs && getMSTimeDiff(etat.dernierRetourMs, getMSTime()) < CoaAreneRetourReessaiMs)
+            return false;
+        // Un bot furtif (Elude) ouvre par « coa arene ouverture », qui s'approche deja lui-meme.
+        if (bot->HasStealthAura() || !bot->IsAlive())
+            return false;
+        Unit* adv = CoaAreneAdversaireVivant(bot, etat);
+        if (!adv)
+            return false;
+        uint8 const raison = CoaAreneRetourRaison(botAI, bot, adv);
+        if (raison == COA_RETOUR_AUCUN)
+            return false;
+        return raison == COA_RETOUR_CIBLE || CoaAreneLibreDeBouger(botAI, bot);
+    }
+};
+
+// L2 (CoaArene.IaPiliers, arene seulement) : se mettre hors de vue de l'adversaire.
+class CoaArenePilierTrigger : public Trigger
+{
+public:
+    CoaArenePilierTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa arene pilier") {}
+
+    bool IsActive() override
+    {
+        if (!sPlayerbotAIConfig.coaAreneIaPiliers || !CoaAreneEstRangerDistance(bot))
+            return false;
+        CoaAreneEtat const& etat = CoaAreneMaj(botAI, bot);
+        if (!CoaAreneL1Actif(etat) || etat.cadre != COA_ARENE_ARENE || CoaAreneReculEnCours(etat) ||
+            CoaAreneCachetteEnCours(etat) || etat.pilierCumulMs >= CoaArenePilierCumulMaxMs)
+            return false;
+        uint32 const maintenant = getMSTime();
+        if (etat.derniereSortiePilierMs && getMSTimeDiff(etat.derniereSortiePilierMs, maintenant) < CoaArenePilierPauseMs)
+            return false;
+        if (etat.dernierEssaiPilierMs && getMSTimeDiff(etat.dernierEssaiPilierMs, maintenant) < CoaArenePilierEssaiMs)
+            return false;
+        if (bot->HasStealthAura() || !CoaAreneLibreDeBouger(botAI, bot))
+            return false;
+        Unit* adv = CoaAreneAdversaireVivant(bot, etat);
+        // Deja hors de vue : rien a casser (et le retour s'en occupe).
+        if (!adv || !adv->IsWithinLOSInMap(bot))
+            return false;
+        return CoaArenePilierRaison(botAI, bot, adv) != 0;
     }
 };
 
@@ -755,6 +1096,8 @@ public:
             return false;
         CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
         ++etat.ruptures;
+        // Le recul part au tick suivant, tant que la cible est ralentie : la fenetre (Dazed 4 s) se consume vite.
+        etat.dernierEssaiReculMs = 0;
         float const d = bot->GetExactDist2d(cible);
         CoaAreneJournal(bot, etat, "rupture", d, d, Acore::StringFormat(" sort={}", cast->Id));
         return true;
@@ -762,12 +1105,13 @@ public:
 };
 
 /*
- * Le recul. Un point a la distance visee DE LA CIBLE, dans la direction qui l'eloigne, puis a +/-30, 60 et
- * 90 degres si la premiere est fermee. Un point n'est retenu que :
+ * Le recul. Un point dans la direction qui eloigne de la cible, assez loin pour compenser sa poursuite ralentie
+ * mais jamais au-dela de la portee maximale moins 2 yd, puis a +/-30, 60 et 90 degres si la premiere est
+ * fermee. Un point n'est retenu que :
  *   - s'il a un sol et un chemin (Map::CheckCollisionAndGetValidCoords, sans echec sur collision : il ramene le
  *     point contre le mur, d'ou le controle de distance qui suit -- c'est ce qui ecarte le mur et le vide) ;
  *   - sans denivele de plus de 8 yd (ni falaise ni corniche) ;
- *   - a au moins (visee - 6) yd de la cible et sans depasser la portee maximale des tirs ;
+ *   - a au moins (vise - 4) yd de la cible et sans depasser la portee maximale moins la marge ;
  *   - en ligne de vue de la cible (pas derriere un pilier : on recule pour tirer) ;
  *   - et si MovementAction::MoveTo accepte d'y aller (chemin calcule, priorite de combat).
  * Le bot COURT (pas a reculons, 4,5 yd/s contre 7) : il se retournera a l'arrivee (« set facing »).
@@ -794,11 +1138,39 @@ public:
 
         float bas = 0.0f, haut = 0.0f;
         CoaArenePlage(botAI, bot, bas, haut);
-        float const visee = CoaAreneDistanceVisee(bas, haut);
+        float const viseeMax = CoaAreneDistanceVisee(bas, haut);
         float const rayons = bot->GetCombatReach() + cible->GetCombatReach();
-        float const rayon = visee + rayons;
         float const avant = bot->GetExactDist2d(cible);
+        float const d0 = CoaAreneDistanceCombat(bot, cible);
         float const angle0 = cible->GetAngle(bot);
+
+        // Revue du 10/10 soir (3 reculs sur 3 rates a 19:15, 8,8 -> 17,5 yd pour 23 vises). DEFAUT : le point etait
+        // pris a 23 yd de la position de la cible AU DEPART ; une cible ralentie (Dazed, -50 %) SUIT, et le bot
+        // s'arretait a 23 yd d'un point qu'elle avait quitte. PHYSIQUE : l'ecart ne se creuse que de
+        // (vBot - vCible) x (duree restante de la fenetre) -- 14 yd au mieux pour un Dazed de 4 s.
+        // D'ou : la visee est ramenee a ce que la fenetre permet (`vise`), le point est pousse plus loin pour
+        // compenser la poursuite, mais jamais au-dela de la portee maximale moins la marge (si la cible cesse de
+        // suivre, le bot doit rester a portee : incident de 19:21, recul fini a 32,2 yd, hors de portee) ; le bot
+        // s'arrete des que l'ecart vise est atteint (CoaAreneMaj).
+        float const vBot = std::max(bot->GetSpeed(MOVE_RUN), 1.0f);
+        float const vCible = std::min(CoaAreneVitesseSuivie(cible), vBot - 0.1f);
+        float const vise = std::min(viseeMax, CoaAreneReculAtteignable(bot, cible, d0));
+        if (vise < bas + CoaAreneReculGainMin || vise < d0 + CoaAreneReculGainMin)
+        {
+            // Rien a gagner : la fenetre est trop courte, ou la cible presque aussi rapide. On reste et on frappe.
+            if (!etat.dernierImpossibleMs || getMSTimeDiff(etat.dernierImpossibleMs, maintenant) >= CoaAreneTenirJournalMs)
+            {
+                etat.dernierImpossibleMs = maintenant ? maintenant : 1;
+                CoaAreneJournal(bot, etat, "recul_inutile", avant, avant,
+                                Acore::StringFormat(" vise={:.1f} vise_max={:.1f} v_cible={:.1f} fenetre_ms={}", vise,
+                                                    viseeMax, CoaAreneVitesseSuivie(cible), CoaAreneDureeFenetreMs(cible)));
+            }
+            return false;
+        }
+        // Temps pour creuser l'ecart, puis la distance que le bot parcourt pendant ce temps, comptee depuis la cible.
+        float const tS = (vise - d0) / (vBot - vCible);
+        float const loin = std::min(d0 + vBot * tS, haut - CoaAreneMargePortee);
+        float const rayon = loin + rayons;
 
         bool doublon = false;
         static constexpr float Ecarts[] = { 0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 3.0f, -3.0f };  // x 30 degres
@@ -814,7 +1186,7 @@ public:
             if (std::fabs(z - bot->GetPositionZ()) > 8.0f)
                 continue;
             float const atteinte = cible->GetExactDist2d(x, y) - rayons;
-            if (atteinte < visee - 6.0f || atteinte > haut - 1.0f)
+            if (atteinte < std::max(vise - 4.0f, d0 + CoaAreneReculGainMin) || atteinte > haut - CoaAreneMargePortee + 0.5f)
                 continue;  // ramene contre un mur, ou hors de portee
             if (!cible->IsWithinLOS(x, y, z + 2.0f))
                 continue;
@@ -828,12 +1200,16 @@ public:
                         false))
                 continue;
 
-            float const vitesse = std::max(bot->GetSpeed(MOVE_RUN), 1.0f);
-            uint32 const trajetMs = uint32(bot->GetExactDist2d(x, y) / vitesse * IN_MILLISECONDS) + 500;
+            // Echeance : le trajet en ligne droite, plus 1 s pour un chemin qui contourne ; bornee a 6 s. Le recul
+            // se clot d'ordinaire avant (ecart atteint, fenetre close, arret).
+            uint32 const trajetMs = std::min<uint32>(uint32(bot->GetExactDist2d(x, y) / vBot * IN_MILLISECONDS) + 1000,
+                                                     6 * IN_MILLISECONDS);
             etat.reculDebutMs = maintenant;
             etat.reculFinMs = (maintenant + trajetMs) ? maintenant + trajetMs : 1;
             etat.reculDistAvant = avant;
-            etat.reculVise = visee;
+            etat.reculVise = vise;
+            etat.reculViseMax = viseeMax;
+            etat.retourEnCours = false;
             ++etat.reculs;
             return true;
         }
@@ -842,7 +1218,187 @@ public:
             (!etat.dernierImpossibleMs || getMSTimeDiff(etat.dernierImpossibleMs, maintenant) >= CoaAreneTenirJournalMs))
         {
             etat.dernierImpossibleMs = maintenant ? maintenant : 1;
-            CoaAreneJournal(bot, etat, "recul_impossible", avant, avant, Acore::StringFormat(" vise={:.1f}", visee));
+            CoaAreneJournal(bot, etat, "recul_impossible", avant, avant, Acore::StringFormat(" vise={:.1f}", vise));
+        }
+        return false;
+    }
+
+    bool isUseful() override { return IsMovingAllowed(); }
+};
+
+// Le retour (voir le commentaire de CoaAreneRetourRaison) : reprendre la cible si elle est en vue et a portee ;
+// sinon courir vers elle -- a portee confortable si on la voit, jusqu'a elle (par un chemin) sinon.
+class CoaAreneRetourAction : public MovementAction
+{
+public:
+    CoaAreneRetourAction(PlayerbotAI* botAI) : MovementAction(botAI, "coa arene retour") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+        uint32 const maintenant = getMSTime();
+        etat.dernierRetourMs = maintenant ? maintenant : 1;
+        Unit* adv = CoaAreneAdversaireVivant(bot, etat);
+        if (!adv || !bot->GetMap())
+            return false;
+        uint8 const raison = CoaAreneRetourRaison(botAI, bot, adv);
+        if (raison == COA_RETOUR_AUCUN)
+            return false;
+
+        float const avant = bot->GetExactDist2d(adv);
+        auto Noter = [&](char const* suite)
+        {
+            if (etat.dernierJournalRetourMs && getMSTimeDiff(etat.dernierJournalRetourMs, maintenant) < CoaAreneRetourJournalMs)
+                return;
+            etat.dernierJournalRetourMs = maintenant ? maintenant : 1;
+            CoaAreneJournal(bot, etat, "retour", avant, avant,
+                            Acore::StringFormat(" raison={} vue={} cible_courante={}{}", CoaAreneRetourNom(raison),
+                                                bot->IsWithinLOSInMap(adv) ? 1 : 0,
+                                                AI_VALUE(Unit*, "current target") ? 1 : 0, suite));
+        };
+
+        if (raison == COA_RETOUR_CIBLE)
+        {
+            // En vue et a portee : la reprendre pour cible et repasser en combat (comme l'ouverture).
+            context->GetValue<Unit*>("current target")->Set(adv);
+            bot->SetSelection(adv->GetGUID());
+            if (botAI->GetState() != BOT_STATE_COMBAT)
+                botAI->ChangeEngine(BOT_STATE_COMBAT);
+            ++etat.retours;
+            Noter("");
+            return true;
+        }
+
+        if (IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+            return false;
+
+        float x = adv->GetPositionX();
+        float y = adv->GetPositionY();
+        float z = adv->GetPositionZ();
+        if (raison == COA_RETOUR_PORTEE)
+        {
+            // En vue mais trop loin : un point a (portee max - 4) yd de la cible, sur la droite cible -> bot, en
+            // vue de la cible ; sinon droit sur elle (le suivi de CoaAreneMaj arrete le bot a portee).
+            float bas = 0.0f, haut = 0.0f;
+            CoaArenePlage(botAI, bot, bas, haut);
+            float const rayon = std::max(bas + 3.0f, haut - CoaAreneMargePortee - 2.0f) + bot->GetCombatReach() +
+                                adv->GetCombatReach();
+            float const angle = adv->GetAngle(bot);
+            float px = adv->GetPositionX() + std::cos(angle) * rayon;
+            float py = adv->GetPositionY() + std::sin(angle) * rayon;
+            float pz = bot->GetPositionZ();
+            if (bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
+                                                               bot->GetPositionZ(), px, py, pz, false) &&
+                adv->IsWithinLOS(px, py, pz + 2.0f) && adv->GetExactDist2d(px, py) < avant)
+            {
+                x = px;
+                y = py;
+                z = pz;
+            }
+        }
+        if (IsDuplicateMove(x, y, z))
+            return false;
+        if (!MoveTo(bot->GetMapId(), x, y, z, false, false, true, false, MovementPriority::MOVEMENT_COMBAT, true, false))
+        {
+            Noter(" bouge=0");
+            return false;
+        }
+        if (!etat.retourEnCours)
+            ++etat.retours;
+        etat.retourEnCours = true;
+        Noter(" bouge=1");
+        return true;
+    }
+
+    bool isUseful() override { return IsMovingAllowed(); }
+};
+
+/*
+ * L2, la cachette (CoaArene.IaPiliers). Autour du BOT, au plus 3 rayons (8, 14, 20 yd) x 8 directions (en
+ * commencant par celle qui l'eloigne de l'adversaire) : 24 points, dont on retient le premier qui
+ *   - a un sol et un chemin direct (CheckCollisionAndGetValidCoords) sans etre ramene contre un mur, sans
+ *     denivele de plus de 5 yd ;
+ *   - ne rapproche pas le bot de l'adversaire sous 8 yd et reste a moins de 45 yd de lui ;
+ *   - est HORS de la ligne de vue de l'adversaire (Map::isInLineOfSight par WorldObject::IsWithinLOS, toutes
+ *     verifications : vmaps statiques ET modeles des objets de jeu, CheckGameObjectLoS = 1) ;
+ *   - a un chemin de navmesh complet de moins de 2 x rayon + 5 yd (PathGenerator, 3 calculs au plus).
+ * Cout borne : 24 lancers de rayon et 3 chemins au plus par recherche, une recherche toutes les 1,5 s au plus,
+ * seulement pendant que la raison tient. Sans obstacle dans le rayon (aucun point cache), il ne fait rien de
+ * special ; une ligne « pilier_aucun » toutes les 10 s au plus.
+ */
+class CoaArenePilierAction : public MovementAction
+{
+public:
+    CoaArenePilierAction(PlayerbotAI* botAI) : MovementAction(botAI, "coa arene pilier") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+        uint32 const maintenant = getMSTime();
+        etat.dernierEssaiPilierMs = maintenant ? maintenant : 1;
+        Unit* adv = CoaAreneAdversaireVivant(bot, etat);
+        if (!adv || !bot->GetMap())
+            return false;
+        if (IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+            return false;
+        uint8 const raison = CoaArenePilierRaison(botAI, bot, adv);
+        if (!raison)
+            return false;
+
+        float const bx = bot->GetPositionX(), by = bot->GetPositionY(), bz = bot->GetPositionZ();
+        float const dAdv = bot->GetExactDist2d(adv);
+        float const angle0 = adv->GetAngle(bot);
+        static constexpr float Rayons[] = { 8.0f, 14.0f, 20.0f };
+        static constexpr float Ecarts[] = { 0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 3.0f, -3.0f, 4.0f };  // x 45 degres
+        uint32 chemins = 0, caches = 0;
+        for (float const r : Rayons)
+            for (float const ecart : Ecarts)
+            {
+                if (chemins >= 3)
+                    break;
+                float const angle = angle0 + ecart * float(M_PI) / 4.0f;
+                float x = bx + std::cos(angle) * r;
+                float y = by + std::sin(angle) * r;
+                float z = bz;
+                if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bx, by, bz, x, y, z, false))
+                    continue;
+                if (std::fabs(z - bz) > 5.0f || bot->GetExactDist2d(x, y) < r * 0.6f)
+                    continue;
+                float const dPoint = adv->GetExactDist2d(x, y);
+                if (dPoint < std::min(dAdv, 8.0f) || dPoint > 45.0f)
+                    continue;
+                if (adv->IsWithinLOS(x, y, z + 2.0f))
+                    continue;  // visible : pas une cachette
+                ++caches;
+                if (IsDuplicateMove(x, y, z))
+                    continue;
+                ++chemins;
+                PathGenerator chemin(bot);
+                chemin.CalculatePath(x, y, z, false);
+                if ((chemin.GetPathType() & (PATHFIND_NOPATH | PATHFIND_INCOMPLETE | PATHFIND_SHORTCUT)) ||
+                    chemin.getPathLength() > r * 2.0f + 5.0f)
+                    continue;
+                if (!MoveTo(bot->GetMapId(), x, y, z, false, false, true, false, MovementPriority::MOVEMENT_COMBAT,
+                            true, false))
+                    continue;
+                etat.pilierDebutMs = maintenant ? maintenant : 1;
+                etat.pilierRaison = raison;
+                etat.retourEnCours = false;
+                ++etat.piliers;
+                CoaAreneJournal(bot, etat, "pilier", dAdv, dPoint,
+                                Acore::StringFormat(" raison={} pv={:.0f} chemin={:.1f} carte={} essais={}",
+                                                    raison == COA_PILIER_PV ? "pv" : "recharge", bot->GetHealthPct(),
+                                                    chemin.getPathLength(), bot->GetMapId(), chemins));
+                return true;
+            }
+
+        if (!etat.dernierJournalPilierMs || getMSTimeDiff(etat.dernierJournalPilierMs, maintenant) >= CoaArenePilierJournalMs)
+        {
+            etat.dernierJournalPilierMs = maintenant ? maintenant : 1;
+            CoaAreneJournal(bot, etat, "pilier_aucun", dAdv, dAdv,
+                            Acore::StringFormat(" raison={} caches={} chemins={} carte={}",
+                                                raison == COA_PILIER_PV ? "pv" : "recharge", caches, chemins,
+                                                bot->GetMapId()));
         }
         return false;
     }
@@ -988,6 +1544,10 @@ public:
 constexpr float CoaAreneOuverturePriority = AmbushPriority + 1.0f;
 constexpr float CoaAreneReculPriority = ACTION_MOVE + 8.0f;
 constexpr float CoaAreneRupturePriority = ACTION_MOVE + 6.0f;
+// Retour 37,5 : devant « set facing » (37, inutile sans cible en vue), « reach spell » (20) et ArenaTactics (1) ;
+// sous le recul (38). Pilier 39 : devant le recul et le retour, sous les interruptions (40).
+constexpr float CoaAreneRetourPriority = ACTION_MOVE + 7.5f;
+constexpr float CoaArenePilierPriority = ACTION_MOVE + 9.0f;
 
 class CoaAreneStrategy : public Strategy
 {
@@ -1007,6 +1567,8 @@ public:
         triggers.push_back(new TriggerNode("coa arene preparation", { NextAction("coa arene preparation", CoaAreneOuverturePriority) }));
         triggers.push_back(new TriggerNode("coa arene recul", { NextAction("coa arene recul", CoaAreneReculPriority) }));
         triggers.push_back(new TriggerNode("coa arene rupture", { NextAction("coa arene rupture", CoaAreneRupturePriority) }));
+        triggers.push_back(new TriggerNode("coa arene retour", { NextAction("coa arene retour", CoaAreneRetourPriority) }));
+        triggers.push_back(new TriggerNode("coa arene pilier", { NextAction("coa arene pilier", CoaArenePilierPriority) }));
     }
 };
 
@@ -1028,6 +1590,8 @@ public:
         creators["coa arene recul"] = &CoaAreneActionFactoryInternal::recul;
         creators["coa arene ouverture"] = &CoaAreneActionFactoryInternal::ouverture;
         creators["coa arene preparation"] = &CoaAreneActionFactoryInternal::preparation;
+        creators["coa arene retour"] = &CoaAreneActionFactoryInternal::retour;
+        creators["coa arene pilier"] = &CoaAreneActionFactoryInternal::pilier;
     }
 
 private:
@@ -1035,6 +1599,8 @@ private:
     static Action* recul(PlayerbotAI* botAI) { return new CoaAreneReculAction(botAI); }
     static Action* ouverture(PlayerbotAI* botAI) { return new CoaAreneOuvertureAction(botAI); }
     static Action* preparation(PlayerbotAI* botAI) { return new CoaArenePreparationAction(botAI); }
+    static Action* retour(PlayerbotAI* botAI) { return new CoaAreneRetourAction(botAI); }
+    static Action* pilier(PlayerbotAI* botAI) { return new CoaArenePilierAction(botAI); }
 };
 
 class CoaAreneTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -1046,6 +1612,8 @@ public:
         creators["coa arene recul"] = &CoaAreneTriggerFactoryInternal::recul;
         creators["coa arene ouverture"] = &CoaAreneTriggerFactoryInternal::ouverture;
         creators["coa arene preparation"] = &CoaAreneTriggerFactoryInternal::preparation;
+        creators["coa arene retour"] = &CoaAreneTriggerFactoryInternal::retour;
+        creators["coa arene pilier"] = &CoaAreneTriggerFactoryInternal::pilier;
     }
 
 private:
@@ -1053,4 +1621,6 @@ private:
     static Trigger* recul(PlayerbotAI* botAI) { return new CoaAreneReculTrigger(botAI); }
     static Trigger* ouverture(PlayerbotAI* botAI) { return new CoaAreneOuvertureTrigger(botAI); }
     static Trigger* preparation(PlayerbotAI* botAI) { return new CoaArenePreparationTrigger(botAI); }
+    static Trigger* retour(PlayerbotAI* botAI) { return new CoaAreneRetourTrigger(botAI); }
+    static Trigger* pilier(PlayerbotAI* botAI) { return new CoaArenePilierTrigger(botAI); }
 };

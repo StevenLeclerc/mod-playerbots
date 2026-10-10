@@ -56,6 +56,7 @@
 #include "CoaArene1v1.h"
 
 #include "ArenaTeam.h"
+#include "BattleGroundJoinAction.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "BattlegroundQueue.h"
@@ -148,6 +149,12 @@ struct Match
     bool strategieVue = false;
     uint32 essaisEntree = 0;  // entrees forcees du gladiateur tentees
     Etat etat = Etat::EN_FILE;
+    // Apres la fin (FINI) : le match reste dans la table tant que le gladiateur est dans
+    // l'arene, pour retenir son depart (RetenirDepart) puis le faire partir.
+    uint32 finS = 0;          // Maintenant() a la fin (OnBattlegroundEnd / Destroy)
+    bool departLibre = false; // ecrit au FIL MONDE sous `verrou`, lu par RetenirDepart
+    uint32 essaisDepart = 0;  // LeaveBG tentes par le suivi
+    bool apaise = false;      // UNIT_FLAG_IMMUNE_TO_PC pose pendant la retenue (Apaiser)
 };
 
 std::mutex verrou;               // matchs, prochainId
@@ -194,6 +201,27 @@ void Liberer(uint32 guid, uint32 idMatch, char const* raison)
     }
     LOG_INFO("playerbots", "coa arene1v1: protection id={} gladiateur={} levee=1 raison={} en_ligne={}", idMatch, guid,
              raison, bot ? 1 : 0);
+}
+
+// Retenue apres la fin (FIL MONDE) : les deux restent hostiles dans l'arene, et l'IA generique
+// relancerait l'attaque au corps a corps. A chaque tick de retenue : combat arrete, et
+// UNIT_FLAG_IMMUNE_TO_PC (non sauvegarde ; InitStatsForLevel l'efface au rechargement).
+void Apaiser(Player* g)
+{
+    if (!g)
+        return;
+    g->AttackStop();
+    g->CombatStop(true);
+    g->SetUnitFlag(UNIT_FLAG_IMMUNE_TO_PC);
+}
+
+// Leve le drapeau de la retenue, sauf si la protection de file l'a repris entre-temps (nouveau match).
+void Desapaiser(uint32 guid)
+{
+    if (proteges.count(guid))
+        return;
+    if (Player* g = ObjectAccessor::FindPlayerByLowGUID(guid))
+        g->RemoveUnitFlag(UNIT_FLAG_IMMUNE_TO_PC);
 }
 
 uint32 Maintenant() { return static_cast<uint32>(GameTime::GetGameTime().count()); }
@@ -292,8 +320,10 @@ std::vector<uint32> Gladiateurs()
 bool DejaEngage(uint32 guid)
 {
     std::lock_guard<std::mutex> garde(verrou);
+    // Un match FINI ne garde que le depart differe du gladiateur : il n'engage plus personne
+    // (un gladiateur encore dans l'arene est de toute facon refuse par `file_ou_champ`).
     for (Match const& m : matchs)
-        if (m.joueur == guid || m.gladiateur == guid)
+        if (m.etat != Etat::FINI && (m.joueur == guid || m.gladiateur == guid))
             return true;
     return false;
 }
@@ -726,6 +756,24 @@ bool CoaArene1v1::GladiateurEngage(uint32 guidLow)
     return false;
 }
 
+bool CoaArene1v1::RetenirDepart(Player* bot)
+{
+    if (!bot || !nbMatchs.load(std::memory_order_acquire) || !sPlayerbotAIConfig.arene1v1DelaiDepartS)
+        return false;
+    // Lit l'arene du bot depuis son propre fil (celui de sa carte) ou le fil monde, comme
+    // ArenaTactics et LeaveBG le font deja ; aucune ecriture.
+    Battleground* bg = bot->GetBattleground();
+    if (!EstArene1v1(bg) || bg->GetStatus() != STATUS_WAIT_LEAVE)
+        return false;
+    uint32 const guid = bot->GetGUID().GetCounter();
+    uint32 const instance = bg->GetInstanceID();
+    std::lock_guard<std::mutex> garde(verrou);
+    for (Match const& m : matchs)
+        if (m.gladiateur == guid && m.etat == Etat::FINI && m.instance == instance)
+            return !m.departLibre;
+    return false;
+}
+
 namespace
 {
 // ------------------------------------------------------------------ suivi (fil monde)
@@ -796,7 +844,60 @@ Verdict Examiner(Match m, uint32 maintenant)
     if (m.etat == Etat::FINI)
     {
         Liberer(m.gladiateur, m.id, "fin");
-        v.retirer = true;
+        // Depart differe (AiPlayerbot.Arene1v1.DelaiDepartS) : le gladiateur reste visible (le
+        // coeur a ressuscite tout le monde a la fin, Battleground.cpp:882-885) tant que le joueur
+        // est dans l'arene et que le delai court : pas de disparition brutale. Le match reste dans
+        // la table jusqu'a ce que le gladiateur soit sorti de CETTE arene.
+        Battleground* bg = m.instance ? sBattlegroundMgr->GetBattleground(m.instance, BATTLEGROUND_TYPE_NONE) : nullptr;
+        bool const gDedans = g && bg && g->GetBattleground() == bg;
+        uint32 const delai = sPlayerbotAIConfig.arene1v1DelaiDepartS;
+        uint32 const ecoule = m.finS && maintenant >= m.finS ? maintenant - m.finS : 0;
+        // Filet : le coeur expulse a TIME_TO_AUTOREMOVE (120 s) ; au-dela du delai + 20 s, on oublie
+        // le match sans plus rien retenir (RetenirDepart ne trouve plus rien).
+        if (!gDedans || ecoule > delai + 20)
+        {
+            if (gDedans)
+                LOG_INFO("playerbots", "coa arene1v1: depart id={} gladiateur={} raison=oubli essais={} ecoule_s={}", m.id,
+                         m.gladiateur, m.essaisDepart, ecoule);
+            // Sortie, oubli ou deconnexion : le drapeau de la retenue tombe (hors ligne : rien a lever).
+            if (m.apaise)
+                Desapaiser(m.gladiateur);
+            v.retirer = true;
+            return v;
+        }
+        bool const jDedans = j && j->GetBattleground() == bg;
+        bool const echu = !delai || ecoule >= delai;
+        if (bg->GetStatus() == STATUS_WAIT_LEAVE && !echu && jDedans)
+        {
+            Apaiser(g);
+            m.apaise = true;
+        }
+        if (bg->GetStatus() == STATUS_WAIT_LEAVE && (echu || !jDedans))
+        {
+            // D'abord rendre le depart libre (sous verrou : RetenirDepart le lit), PUIS appeler
+            // LeaveBG, qui consulte RetenirDepart. Fil monde : CMSG_LEAVE_BATTLEFIELD est
+            // PROCESS_THREADUNSAFE (Opcodes.cpp:868), c'est son fil ordinaire.
+            {
+                std::lock_guard<std::mutex> garde(verrou);
+                for (Match& x : matchs)
+                    if (x.id == m.id)
+                        x.departLibre = true;
+            }
+            m.departLibre = true;
+            ++m.essaisDepart;
+            if (m.apaise)
+            {
+                Desapaiser(m.gladiateur);
+                m.apaise = false;
+            }
+            if (PlayerbotAI* ia = GET_PLAYERBOT_AI(g))
+                BGStatusAction::LeaveBG(ia);
+            if (m.essaisDepart == 1 || m.essaisDepart % 10 == 0)
+                LOG_INFO("playerbots", "coa arene1v1: depart id={} gladiateur={} raison={} vivant={} ecoule_s={} essai={}"
+                         " sorti={}", m.id, m.gladiateur, echu ? "delai" : "joueur_parti", g->IsAlive() ? 1 : 0, ecoule,
+                         m.essaisDepart, g->GetBattleground() == bg ? 0 : 1);
+        }
+        v.maj = m;
         return v;
     }
 
@@ -954,7 +1055,15 @@ public:
             // Ce que les crochets ont pu ecrire entre la copie et ici (entree, debut, fin)
             // l'emporte : on ne recopie que les champs du suivi.
             if (it->etat == Etat::FINI)
+            {
+                // Seuls les champs du depart differe (departLibre est deja pose sous verrou).
+                if (v.maj.etat == Etat::FINI)
+                {
+                    it->essaisDepart = v.maj.essaisDepart;
+                    it->apaise = v.maj.apaise;
+                }
                 continue;
+            }
             if (v.maj.etat > it->etat)
                 it->etat = v.maj.etat;
             if (!it->instance)
@@ -1111,6 +1220,7 @@ public:
                      qui, vainqueur, m.joueur, m.nomJoueur, m.gladiateur, m.nomGladiateur, forfait ? 1 : 0,
                      m.debutCombatS ? maintenant - m.debutCombatS : 0, maintenant - m.inscritS);
             m.etat = Etat::FINI;
+            m.finS = maintenant;
         }
     }
 
@@ -1125,6 +1235,7 @@ public:
                 LOG_INFO("playerbots", "coa arene1v1: fin id={} instance={} vainqueur=aucun raison=arene_detruite", m.id,
                          m.instance);
                 m.etat = Etat::FINI;
+                m.finS = Maintenant();
             }
     }
 };

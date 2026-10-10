@@ -717,6 +717,7 @@ public:
     bool coaAreneIaRanger;       // L1 : Ranger a distance
     bool coaAreneMondeOuvert;    // etend L0/L1 au un contre un JcJ du monde ouvert (banc)
     uint32 coaAreneTirage;       // % d'engagements ou l'IA s'applique (tirage par engagement)
+    bool coaAreneIaPiliers;      // L2 : Ranger en ARENE, casser la ligne de vue derriere un obstacle (defaut faux)
     // --- fin CoaArene IA
     uint32 lootLogMinQuality;
     bool autoDoQuests;
@@ -858,6 +859,9 @@ public:
     // (un morceau mal forme, vide compris : AUCUN gladiateur). Lue au FIL MONDE seul.
     std::string arene1v1Gladiateurs;
     bool arene1v1MaintenirEnLigne;         // reconnecter un gladiateur hors ligne (toutes les 5 min)
+    // Secondes pendant lesquelles le gladiateur reste visible dans l'arene apres la fin tant
+    // que le joueur y est (defaut 30, 0 = depart immediat, borne a 110 : le coeur expulse a 120 s).
+    uint32 arene1v1DelaiDepartS;
 
 private:
     PlayerbotAIConfig() = default;

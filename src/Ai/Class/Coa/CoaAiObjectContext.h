@@ -61,9 +61,25 @@ struct CoaAreneEtat
     uint32 prochainePreparationMs = 0;
     uint32 dernierTenirMs = 0;
     uint32 dernierImpossibleMs = 0;
+    // Recul (revue du 10/10 soir) : distance que la poursuite ralentie permet d'atteindre, et la visee d'origine.
+    float reculViseMax = 0.0f;
+    // Retour a portee et en vue (L1, 10/10 soir) : dernier essai, journal, mouvement en cours.
+    uint32 dernierRetourMs = 0;
+    uint32 dernierJournalRetourMs = 0;
+    bool retourEnCours = false;
+    // Burst : depuis quand la pile est pleine sans fenetre (0 : pas pleine).
+    uint32 pilePleineDepuisMs = 0;
+    // L2, ligne de vue (CoaArene.IaPiliers) : cachette en cours, raison, pauses et cumul.
+    uint32 pilierDebutMs = 0;      // 0 : aucune cachette en cours
+    uint8 pilierRaison = 0;        // 1 : vie basse ; 2 : sorts en recharge
+    uint32 derniereSortiePilierMs = 0;
+    uint32 dernierEssaiPilierMs = 0;
+    uint32 dernierJournalPilierMs = 0;
+    uint32 pilierCumulMs = 0;
     // Bilan de l'engagement, ecrit a sa cloture.
     uint32 echantillons = 0, auContact = 0, dansLaPlage = 0;
     uint32 reculs = 0, reculsReussis = 0, ruptures = 0, bursts = 0, ouvertures = 0;
+    uint32 retours = 0, piliers = 0;
     float pvMin = 100.0f;
 };
 

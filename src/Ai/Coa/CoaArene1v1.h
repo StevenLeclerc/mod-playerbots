@@ -36,6 +36,15 @@ bool Inscrire(Player* joueur, std::string const& origine, std::string& refus);
 // affecter, preparer ni deplacer un gladiateur engage. Aucun match : un chargement
 // atomique.
 bool GladiateurEngage(uint32 guidLow);
+
+// Fil de l'IA du bot (fil de carte de l'arene) ou fil monde. Vrai : `bot` est le gladiateur
+// d'une arene 1v1 TERMINEE (STATUS_WAIT_LEAVE) dont le depart est encore retenu
+// (AiPlayerbot.Arene1v1.DelaiDepartS, joueur encore present). Lu par
+// BGStatusAction::LeaveBG et BGLeaveAction : le gladiateur reste visible apres la fin (le coeur
+// ressuscite tout le monde a EndBattleground), sans disparition brutale, immunise aux joueurs.
+// C'est le suivi de CoaArene1v1 (fil monde) qui libere le depart et fait partir le bot a
+// l'echeance ; faux dans tout autre cas (rien n'est retenu hors de ce match).
+bool RetenirDepart(Player* bot);
 }  // namespace CoaArene1v1
 
 void AddSC_coa_arene1v1();

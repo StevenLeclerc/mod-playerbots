@@ -997,6 +997,7 @@ bool PlayerbotAIConfig::Initialize()
     coaAreneIaRanger = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaRanger", false);
     coaAreneMondeOuvert = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.MondeOuvert", false);
     coaAreneTirage = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaArene.Tirage", 100), 100);
+    coaAreneIaPiliers = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaPiliers", false);
     // --- fin CoaArene IA
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
@@ -1032,6 +1033,8 @@ bool PlayerbotAIConfig::Initialize()
     arene1v1NiveauMin = sConfigMgr->GetOption<uint32>("AiPlayerbot.Arene1v1.NiveauMin", 10);
     arene1v1Gladiateurs = sConfigMgr->GetOption<std::string>("AiPlayerbot.Arene1v1.Gladiateurs", "");
     arene1v1MaintenirEnLigne = sConfigMgr->GetOption<bool>("AiPlayerbot.Arene1v1.MaintenirEnLigne", true);
+    // TIME_TO_AUTOREMOVE (Battleground.h) vaut 120 s : au-dela, le coeur expulse de lui-meme.
+    arene1v1DelaiDepartS = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Arene1v1.DelaiDepartS", 30), 110);
     // Sous 10, PvPDifficulty.dbc n'a pas de tranche d'arene (premiere tranche 10-14).
     if (arene1v1NiveauMin < 10)
         arene1v1NiveauMin = 10;

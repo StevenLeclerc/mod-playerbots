@@ -8,6 +8,7 @@
 #include "ArenaTeam.h"
 #include "ArenaTeamMgr.h"
 #include "BattlegroundMgr.h"
+#include "CoaArene1v1.h"  // CoA (10/10/2026) depart differe du gladiateur d'arene 1v1
 #include "Event.h"
 #include "GroupMgr.h"
 #include "PlayerbotAI.h"
@@ -644,6 +645,11 @@ bool BGLeaveAction::Execute(Event /*event*/)
     if (!(bot->InBattlegroundQueue() || bot->InBattleground()))
         return false;
 
+    // CoA (10/10/2026) : gladiateur d'arene 1v1 retenu apres la fin. Sans ce retour, l'echec de
+    // LeaveBG ci-dessous enverrait un CMSG_BATTLEFIELD_PORT « quitter » sur la file 0.
+    if (CoaArene1v1::RetenirDepart(bot))
+        return false;
+
     // botAI->ChangeStrategy("-bg", BOT_STATE_NON_COMBAT);
 
     if (BGStatusAction::LeaveBG(botAI))
@@ -693,6 +699,12 @@ bool BGStatusAction::LeaveBG(PlayerbotAI* botAI)
     Player* bot = botAI->GetBot();
     Battleground* bg = bot->GetBattleground();
     if (!bg)
+        return false;
+    // CoA (10/10/2026) : le gladiateur d'une arene 1v1 terminee reste visible (ressuscite par le coeur),
+    // AiPlayerbot.Arene1v1.DelaiDepartS secondes (tous les chemins de depart passent ici :
+    // TIME_TO_AUTOREMOVE, ArenaTactics, BGTactics, BGLeaveAction). CoaArene1v1 le fait
+    // partir lui-meme a l'echeance, ou des que le joueur a quitte l'arene.
+    if (CoaArene1v1::RetenirDepart(bot))
         return false;
     bool isArena = bg->isArena();
     bool isRandomBot = sRandomPlayerbotMgr.IsRandomBot(bot);
