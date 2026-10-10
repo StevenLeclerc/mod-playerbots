@@ -348,7 +348,8 @@ namespace
         ArtisanatBlanc,     // class 7, qualite 1
         ArtisanatVertBleu,  // class 7, qualite 2-3
         EquipementVert,     // class 2/4, qualite 2
-        EquipementBleu      // class 2/4, qualite 3
+        EquipementBleu,     // class 2/4, qualite 3
+        Recette             // class 9, qualite 1-3 (ajout du 10/10, commanditaire)
     };
 
     Categorie Classer(ItemTemplate const* t)
@@ -368,6 +369,11 @@ namespace
             if (t->Quality == ITEM_QUALITY_RARE)
                 return Categorie::EquipementBleu;
         }
+        if (t->Class == ITEM_CLASS_RECIPE)
+        {
+            if (t->Quality >= ITEM_QUALITY_NORMAL && t->Quality <= ITEM_QUALITY_RARE)
+                return Categorie::Recette;
+        }
         return Categorie::Aucune;
     }
 
@@ -380,6 +386,7 @@ namespace
             case Categorie::ArtisanatVertBleu: mini = k.coaHvCoefArtisanatQ23Min; maxi = k.coaHvCoefArtisanatQ23Max; break;
             case Categorie::EquipementVert:    mini = k.coaHvCoefEquipVertMin;    maxi = k.coaHvCoefEquipVertMax;    break;
             case Categorie::EquipementBleu:    mini = k.coaHvCoefEquipBleuMin;    maxi = k.coaHvCoefEquipBleuMax;    break;
+            case Categorie::Recette:           mini = k.coaHvCoefRecetteMin;      maxi = k.coaHvCoefRecetteMax;      break;
             default:                           mini = 0.0f; maxi = 0.0f; break;
         }
     }
@@ -509,7 +516,12 @@ namespace
         PlayerbotAIConfig const& cfg = sPlayerbotAIConfig;
         // Tout en double puis en uint64 : SellPrice (uint32) x coefficient x
         // pile depasse uint32 bien avant MAX_MONEY_AMOUNT.
-        double const vente = double(k.tpl->SellPrice);
+        // Recettes : certaines ont un SellPrice symbolique (livres class 9/0, ex. Libram of
+        // Tenacity 11734 : SellPrice 1, BuyPrice 3000) ; la base devient alors BuyPrice / 6,
+        // le rapport mesure sur le reste du jeu (BuyPrice ~ 6 x SellPrice).
+        double vente = double(k.tpl->SellPrice);
+        if (k.cat == Categorie::Recette && k.tpl->BuyPrice > 0)
+            vente = std::max(vente, double(k.tpl->BuyPrice) / 6.0);
         double const n = double(k.n);
 
         float coefMin, coefMax;
