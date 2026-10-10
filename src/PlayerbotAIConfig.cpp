@@ -746,6 +746,59 @@ bool PlayerbotAIConfig::Initialize()
     wildPvpDecrochagePct = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.DecrochagePct", 30);
     wildPvpIndexProies = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.IndexProies", false);
 
+    // Hotel des ventes des bots, lots 1 a 3. Eteint par defaut ; allume, il
+    // reste en simulation tant que Simulation n'est pas mis a 0.
+    coaHvEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.Enable", false);
+    coaHvSimulation = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.Simulation", true);
+    coaHvCourrier = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.Courrier", false);
+    coaHvCourrierMaxParPasse = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.CourrierMaxParPasse", 30);
+    coaHvMaxParMinute = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MaxParMinute", 60);
+    {
+        // Grille validee le 2026-10-10. Un min > max est remis dans l'ordre :
+        // frand() fait ASSERT(max >= min), une conf inversee ferait tomber le
+        // serveur au premier tirage. Un coefficient negatif est ramene a 0.
+        auto lireBornes = [](char const* cleMin, char const* cleMax, float defMin, float defMax, float& mini,
+                             float& maxi)
+        {
+            mini = std::max(0.0f, sConfigMgr->GetOption<float>(cleMin, defMin));
+            maxi = std::max(0.0f, sConfigMgr->GetOption<float>(cleMax, defMax));
+            if (mini > maxi)
+                std::swap(mini, maxi);
+        };
+        lireBornes("AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ1Min", "AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ1Max",
+                   3.0f, 5.0f, coaHvCoefArtisanatQ1Min, coaHvCoefArtisanatQ1Max);
+        lireBornes("AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ23Min", "AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ23Max",
+                   4.0f, 6.0f, coaHvCoefArtisanatQ23Min, coaHvCoefArtisanatQ23Max);
+        lireBornes("AiPlayerbot.Coa.HotelDesVentes.CoefEquipementVertMin", "AiPlayerbot.Coa.HotelDesVentes.CoefEquipementVertMax",
+                   3.0f, 4.0f, coaHvCoefEquipVertMin, coaHvCoefEquipVertMax);
+        lireBornes("AiPlayerbot.Coa.HotelDesVentes.CoefEquipementBleuMin", "AiPlayerbot.Coa.HotelDesVentes.CoefEquipementBleuMax",
+                   5.0f, 7.0f, coaHvCoefEquipBleuMin, coaHvCoefEquipBleuMax);
+
+        coaHvMiseMinPct = std::min<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MiseAPrixMinPct", 70));
+        coaHvMiseMaxPct = std::min<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MiseAPrixMaxPct", 85));
+        if (coaHvMiseMinPct > coaHvMiseMaxPct)
+            std::swap(coaHvMiseMinPct, coaHvMiseMaxPct);
+        // Au-dela de 99 % le bruit pourrait rendre le prix negatif.
+        coaHvBruitPct = std::min<uint32>(99, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.BruitPct", 15));
+        coaHvSousEnchereMinPct = std::min<uint32>(99, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.SousEnchereMinPct", 1));
+        coaHvSousEnchereMaxPct = std::min<uint32>(99, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.SousEnchereMaxPct", 5));
+        if (coaHvSousEnchereMinPct > coaHvSousEnchereMaxPct)
+            std::swap(coaHvSousEnchereMinPct, coaHvSousEnchereMaxPct);
+        coaHvPlancherCoef = std::max(0.0f, sConfigMgr->GetOption<float>("AiPlayerbot.Coa.HotelDesVentes.PlancherCoef", 1.5f));
+
+        coaHvMaxParBotParPassage = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MaxParBotParPassage", 5);
+        coaHvMaxParPasse = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MaxParPasse", 20);
+        coaHvMaxActivesParBot = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MaxActivesParBot", 12);
+        coaHvMaxParMaison = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MaxParMaison", 300);
+        coaHvMaxParModele = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.MaxParModele", 15);
+        coaHvBilanSecondes = sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.BilanSecondes", 600);
+
+        // Lot 4, volet visible : eteint par defaut.
+        coaHvTeleportVisible = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.TeleportVisible", false);
+        coaHvTeleportVisiblePct =
+            std::min<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.TeleportVisiblePct", 100));
+    }
+
     // Directeur, lot D2a : inerte par defaut (SPEC-directeur-D2.md § 2.3).
     directeurBus = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Bus", false);
     directeurVerbes = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.Verbes", "");
@@ -939,6 +992,12 @@ bool PlayerbotAIConfig::Initialize()
     coaSpecRotations = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaSpecRotations", false);
     coaHealerManaReserve = sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaHealerManaReserve", 35);
     coaCasterManaReserve = sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCasterManaReserve", 15);
+    // --- CoaArene IA (10/10/2026) : inerte par defaut.
+    coaAreneIaCommune = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaCommune", false);
+    coaAreneIaRanger = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaRanger", false);
+    coaAreneMondeOuvert = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.MondeOuvert", false);
+    coaAreneTirage = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaArene.Tirage", 100), 100);
+    // --- fin CoaArene IA
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
     autoTeleportForLevel = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoTeleportForLevel", false);
@@ -967,7 +1026,17 @@ bool PlayerbotAIConfig::Initialize()
     randomBotArenaTeamMaxRating = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeamMaxRating", 2000);
     randomBotArenaTeamMinRating = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeamMinRating", 1000);
 
-    selfBotLevel = sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
+    // ------------------------------------------------------------ Arene1v1
+    // CoA (10/10/2026, Ai/Coa/CoaArene1v1.cpp) : inerte par defaut (Enabled = 0).
+    arene1v1Enabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Arene1v1.Enabled", false);
+    arene1v1NiveauMin = sConfigMgr->GetOption<uint32>("AiPlayerbot.Arene1v1.NiveauMin", 10);
+    arene1v1Gladiateurs = sConfigMgr->GetOption<std::string>("AiPlayerbot.Arene1v1.Gladiateurs", "");
+    arene1v1MaintenirEnLigne = sConfigMgr->GetOption<bool>("AiPlayerbot.Arene1v1.MaintenirEnLigne", true);
+    // Sous 10, PvPDifficulty.dbc n'a pas de tranche d'arene (premiere tranche 10-14).
+    if (arene1v1NiveauMin < 10)
+        arene1v1NiveauMin = 10;
+
+    selfBotLevel =sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
     botTextLocale = sConfigMgr->GetOption<int32>("AiPlayerbot.BotTextLocale", -1);
 
     RandomPlayerbotFactory::CreateRandomBots();

@@ -414,6 +414,42 @@ public:
     // l'index. Le laisser a 1 dans ce cas ne coute que le remplissage.
     bool wildPvpIndexProies;
 
+    // Hotel des ventes des bots (Ai/Coa/CoaHotelDesVentes.cpp, lots 1 a 3).
+    // FAISABILITE-bots-hotel-des-ventes.md § 6-7. Eteint par defaut. Lues par
+    // le fil monde seul (RandomPlayerbotMgr::UpdateAIInternal), comme le
+    // `.reload config` qui les ecrit -- SAUF coaHvEnable, coaHvCourrier et
+    // coaHvTeleportVisible, lus aussi depuis un fil de carte (testes avant le
+    // garde de fil ; le dernier par DestinationsCommissaire, que
+    // AutoMaintenanceOnLevelupAction atteint via RandomTeleportForLevel) : sans
+    // course, car l'ecriture (Initialize) se fait fils de carte a l'arret.
+    bool coaHvEnable;                  // 0 : AvantDestruction et ReleverCourrier sortent aussitot
+    bool coaHvSimulation;              // 1 : journal seul ; 0 : depot REEL (lot 2)
+    bool coaHvCourrier;                // lot 3 : releve des courriers d'HV des bots (exige Enable)
+    uint32 coaHvCourrierMaxParPasse;   // courriers effaces au plus par passe
+    uint32 coaHvMaxParMinute;          // depots (simules ou reels) au plus par minute ; 0 = aucun
+    float coaHvCoefArtisanatQ1Min;     // class 7, qualite 1 : prix = SellPrice x [min ; max]
+    float coaHvCoefArtisanatQ1Max;
+    float coaHvCoefArtisanatQ23Min;    // class 7, qualite 2-3
+    float coaHvCoefArtisanatQ23Max;
+    float coaHvCoefEquipVertMin;       // class 2/4, qualite 2
+    float coaHvCoefEquipVertMax;
+    float coaHvCoefEquipBleuMin;       // class 2/4, qualite 3
+    float coaHvCoefEquipBleuMax;
+    uint32 coaHvMiseMinPct;            // mise a prix, en % du prix d'achat immediat
+    uint32 coaHvMiseMaxPct;
+    uint32 coaHvBruitPct;              // +/- sur le prix unitaire
+    uint32 coaHvSousEnchereMinPct;     // sous le plus bas des bots du meme modele
+    uint32 coaHvSousEnchereMaxPct;
+    float coaHvPlancherCoef;           // prix unitaire >= SellPrice x ce coefficient
+    uint32 coaHvMaxParBotParPassage;
+    uint32 coaHvMaxParPasse;           // budget global par passe de UpdateAIInternal
+    uint32 coaHvMaxActivesParBot;
+    uint32 coaHvMaxParMaison;          // encheres de BOTS par maison (les humaines a part)
+    uint32 coaHvMaxParModele;          // encheres de bots par modele et par maison
+    uint32 coaHvBilanSecondes;         // periode de la ligne `coa hv:` ; 0 = jamais
+    bool coaHvTeleportVisible;         // lot 4 : apres un depot reel, branche ville -> commissaire-priseur
+    uint32 coaHvTeleportVisiblePct;    // lot 4 : part (0-100) des bots marques envoyes au commissaire
+
     // Directeur, lot D2a (Ai/Coa/CoaDirecteur.cpp, SPEC-directeur-D2.md § 2.3).
     // TOUT EST ETEINT PAR DEFAUT : absentes de la conf en service, ces options
     // valent leur defaut et le bus ne lit rien. Lues par le fil monde seul.
@@ -675,6 +711,13 @@ public:
     bool coaSpecRotations;
     uint32 coaHealerManaReserve;
     uint32 coaCasterManaReserve;
+    // --- CoaArene IA (10/10/2026, Ai/Class/Coa/CoaAreneIa.inc) : tout a 0/faux par
+    // defaut, la strategie « coa arene » n'est alors meme pas composee.
+    bool coaAreneIaCommune;      // L0 : toutes classes CoA, en arene et en duel
+    bool coaAreneIaRanger;       // L1 : Ranger a distance
+    bool coaAreneMondeOuvert;    // etend L0/L1 au un contre un JcJ du monde ouvert (banc)
+    uint32 coaAreneTirage;       // % d'engagements ou l'IA s'applique (tirage par engagement)
+    // --- fin CoaArene IA
     uint32 lootLogMinQuality;
     bool autoDoQuests;
     bool enableNewRpgStrategy;
@@ -803,6 +846,18 @@ public:
     uint32 resetBotLevelPlayedTimeCheckFrequency;
     bool resetBotLevelIgnoreGuildWithRealPlayers;
     std::vector<std::string> resetBotLevelExcludeNames;
+
+    // ------------------------------------------------------------ Arene1v1
+    // CoA (10/10/2026, coa-project/docs/CONCEPTION-arene-1v1.md ; Ai/Coa/CoaArene1v1.cpp) :
+    // escarmouche 1 contre 1 non classee, un humain contre un bot Ranger « gladiateur »
+    // mis a son niveau. Tout est inerte tant que arene1v1Enabled est faux (defaut) : ni
+    // file 11, ni option de dialogue, ni maintien en ligne.
+    bool arene1v1Enabled;
+    uint32 arene1v1NiveauMin;              // niveau minimal du joueur (defaut 10)
+    // Guids bas des gladiateurs, separes par des virgules ("4242,4243"). Lecture STRICTE
+    // (un morceau mal forme, vide compris : AUCUN gladiateur). Lue au FIL MONDE seul.
+    std::string arene1v1Gladiateurs;
+    bool arene1v1MaintenirEnLigne;         // reconnecter un gladiateur hors ligne (toutes les 5 min)
 
 private:
     PlayerbotAIConfig() = default;

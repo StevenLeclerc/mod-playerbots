@@ -12,6 +12,7 @@
 #include "CellImpl.h"
 #include "ChannelMgr.h"
 #include "CoaDirecteur.h"
+#include "CoaHotelDesVentes.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
 #include "DatabaseEnv.h"
@@ -287,6 +288,15 @@ void RandomPlayerbotMgr::LogPlayerLocation()
 
 void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
 {
+    // CoA -- hotel des ventes des bots (CoaHotelDesVentes.h). Ce garde AFFIRME
+    // « ce fil est le fil monde » : UpdateAIInternal n'a que deux appelants,
+    // PlayerbotsWorldScript::OnUpdate (Playerbots.cpp, OnWorldUpdate) et la
+    // commande `.playerbots rndbot update` (CMSG_MESSAGECHAT en
+    // PROCESS_THREADUNSAFE, ou console : fil monde aussi). Ne JAMAIS le
+    // recopier ailleurs, et surtout pas dans ProcessBot(Player*), qu'une action
+    // de bot appelle depuis un fil de carte (RandomBotUpdateAction).
+    CoaHotelDesVentes::PasseMonde coaHvPasseMonde;
+
     if (totalPmo)
         totalPmo->finish();
 
@@ -1480,6 +1490,11 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
 
      uint32 botId = bot->GetGUID().GetCounter();
 
+    // CoA -- hotel des ventes, lot 3 : releve du courrier d'HV du bot. Meme
+    // garde de fil que AvantDestruction plus bas (CoaHotelDesVentes.h) : appele
+    // ici depuis un fil de carte (RandomBotUpdateAction), il ne fait rien.
+    CoaHotelDesVentes::ReleverCourrier(bot);
+
     // if death revive
     if (bot->isDead())
     {
@@ -1496,6 +1511,12 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
 
         if (!GetEventValue(botId, "revive"))
         {
+            // CoA -- NE PAS DEPLACER dans Revive() : Revive() a un appelant sur
+            // un fil de carte (ReviveFromCorpseAction.cpp), et l'HV n'a aucun
+            // verrou. Ici meme, ProcessBot(Player*) peut tourner sur un fil de
+            // carte (RandomBotUpdateAction) : AvantDestruction ne fait alors
+            // rien, faute du garde PasseMonde de UpdateAIInternal.
+            CoaHotelDesVentes::AvantDestruction(bot, "revive");
             Revive(bot);
             return true;
         }
@@ -1559,6 +1580,9 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
             // }
             // if (randomiser)
             // {
+            // CoA -- NE PAS DEPLACER dans Randomize() : meme garde de fil que
+            // pour Revive ci-dessus (CoaHotelDesVentes.h).
+            CoaHotelDesVentes::AvantDestruction(bot, "randomize");
             Randomize(bot);
             LOG_DEBUG("playerbots", "Bot #{} {}:{} <{}>: randomized", botId,
                       bot->GetTeamId() == TEAM_ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName());
@@ -1580,6 +1604,10 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
         if (!teleport)
         {
             LOG_DEBUG("playerbots", "Bot #{} <{}>: teleport for level and refresh", botId, bot->GetName());
+            // CoA -- NE PAS DEPLACER dans Refresh() : Refresh() est appele par
+            // Revive(), donc depuis un fil de carte (ReviveFromCorpseAction.cpp).
+            // Meme garde de fil que pour Revive ci-dessus (CoaHotelDesVentes.h).
+            CoaHotelDesVentes::AvantDestruction(bot, "refresh");
             Refresh(bot);
             RandomTeleportForLevel(bot);
             uint32 time = urand(sPlayerbotAIConfig.minRandomBotTeleportInterval,
@@ -1834,7 +1862,12 @@ void RandomPlayerbotMgr::RandomTeleportForLevel(Player* bot)
 
     if (bot->GetLevel() >= 10 && urand(0, 100) < sPlayerbotAIConfig.probTeleToBankers * 100)
     {
-        std::vector<WorldLocation> locs = sTravelMgr.GetCityLocations(bot);
+        // CoA -- hotel des ventes, lot 4 (TeleportVisible) : un bot qui vient
+        // de deposer dans cette passe va devant un commissaire-priseur de son
+        // camp plutot qu'un banquier. Inerte par defaut, et hors fil monde.
+        std::vector<WorldLocation> locs;
+        if (!CoaHotelDesVentes::DestinationsCommissaire(bot, locs))
+            locs = sTravelMgr.GetCityLocations(bot);
         if (!locs.empty())
         {
             RandomTeleport(bot, locs, true);

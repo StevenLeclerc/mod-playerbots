@@ -1535,6 +1535,48 @@ AiPlayerbot.CoaHealerManaReserve = 35
 # Default: 15
 AiPlayerbot.CoaCasterManaReserve = 15
 
+# --- CoaArene IA (lots L0 et L1, 10/10/2026, Ai/Class/Coa/CoaAreneIa.inc) -----------
+# Comportement de combat JcJ des bots de classe CoA, en ARENE (partie en cours) et en
+# DUEL (duel en cours). Tout est a 0 par defaut : la strategie « coa arene » n'est
+# alors meme pas composee, et le jeu est identique a ce qu'il etait.
+#
+# ARMER DEMANDE UNE RECOMPOSITION. La strategie est posee a la composition de l'IA du
+# bot (reconnexion, entree en arene, reset de ses strategies). « .reload config »
+# puis « playerbots rndbot reload » suffisent pour COUPER (chaque test relit les
+# options) ; pour ARMER sur des bots deja en jeu, il faut les recomposer : commande
+# de chat « reset botAI » adressee au bot (ChatCommandHandlerStrategy), ou
+# reconnexion du bot. Les gladiateurs d'arene sont recomposes a l'entree en arene.
+# Preuve d'armement : la commande « strategy » du port 8888 rend « coa arene ».
+#
+# L0 (toutes classes CoA) : pendant l'engagement, jamais « food », « drink »,
+# « suggest what to do », « mount » ni « check mount state » (sauf pour descendre de
+# monture) ; et aucun sort CoA tente alors que le bot est etourdi, en fuite, desoriente,
+# reduit au silence ou pacifie et que le sort ne le permet pas (le coeur le refuserait).
+# Default: 0
+AiPlayerbot.CoaArene.IaCommune = 0
+
+# L1 (Ranger, classe 21, specialisation a distance) : rupture (Dust Toss, ou tout sort
+# qui ralentit, enracine ou neutralise la cible) quand la cible est au contact ; recul
+# reel vers ~23 yd quand la cible ne peut pas suivre ; ouverture depuis Elude sans perdre
+# la cible ; Skullpiercer garde pour une fenetre (pile d'Advantage pleine, cible sous
+# 30 %, cible controlee, ou bot sous 35 %).
+# Default: 0
+AiPlayerbot.CoaArene.IaRanger = 0
+
+# Etend L0 et L1 au un contre un JcJ du MONDE OUVERT (bot hors groupe, hors instance, en
+# combat contre un joueur), avec un delai de grace de 10 s. Necessaire au banc de duels
+# appaires (outils/banc-duels.py), qui fait se battre des mercenaires en FFA et non en
+# duel. A laisser a 0 en service tant que le commanditaire n'en a pas decide.
+# Default: 0
+AiPlayerbot.CoaArene.MondeOuvert = 0
+
+# Part des engagements (en %) ou l'IA s'applique. Le bras est tire a l'ouverture de
+# chaque engagement, pour chaque bot, et ecrit dans CoaBots.log (« coa arene ia: ...
+# action=engagement bras=0|1 »). 50 pour une mesure appariee ; 100 en service.
+# Default: 100
+AiPlayerbot.CoaArene.Tirage = 100
+# --- fin CoaArene IA ------------------------------------------------------------------
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
@@ -1884,6 +1926,35 @@ AiPlayerbot.RandomBotArenaTeamMinRating = 1000
 # no new randombot arena teams are created or joined. Set back to 0 and restart the
 # server to resume normal randombot arena team assignment.
 AiPlayerbot.DeleteRandomBotArenaTeams = 0
+
+# ---------------------------------------------------------------------------- Arene1v1 (CoA)
+# Escarmouche 1 contre 1 NON classee : un joueur humain contre un bot Ranger (classe 21),
+# le « gladiateur », mis a son niveau (niveau, sorts, talents, equipement) a l'inscription.
+# Inscription par l'option de dialogue « Arene 1 contre 1 » des maitres de bataille
+# d'arene, ou par `.coa arene1v1 <joueur>` (MJ, console RA). File de combat 11, type
+# d'arene 1. Code : src/Ai/Coa/CoaArene1v1.cpp ; conception :
+# coa-project/docs/CONCEPTION-arene-1v1.md.
+#
+# Enabled : 0 (defaut) = tout est inerte : la file 11 n'est pas declaree, aucune option
+#           de dialogue, aucun gladiateur reconnecte.
+AiPlayerbot.Arene1v1.Enabled = 0
+
+# Niveau minimal du joueur. Plancher impose : 10 (premiere tranche d'arene).
+AiPlayerbot.Arene1v1.NiveauMin = 10
+
+# Les gladiateurs : guids bas de bots ALEATOIRES Ranger, NON mercenaires, separes par des
+# virgules ("4242,4243"). Lecture stricte : un morceau mal forme et AUCUN gladiateur.
+# Les constituer et les verifier : coa-project/exploitation/arene/gladiateurs.py.
+# Un gladiateur qui deviendrait mercenaire (WildPvp.MercenaryPercent change) est ecarte
+# au choix, sans erreur : relancer `gladiateurs.py --verifier`.
+# Un gladiateur ne DESCEND jamais de niveau : le jeu tire le plus haut de niveau <= celui
+# du joueur et le monte. Constituer avec des Rangers de niveau <= 10 (~8) ; ils montent
+# avec les joueurs et se renouvellent un jour (refus `aucun_gladiateur_au_niveau`).
+AiPlayerbot.Arene1v1.Gladiateurs = ""
+
+# Reconnecter toutes les 5 minutes un gladiateur hors ligne (RandomPlayerbotMgr::CoaEnroler,
+# comme `.coa enrole`). Sans effet si Enabled = 0.
+AiPlayerbot.Arene1v1.MaintenirEnLigne = 1
 
 # PvP Restricted Zones (bots will not initiate PvP or defend themselves if attacked)
 AiPlayerbot.PvpProhibitedZoneIds = "2255,656,2361,2362,2363,976,35,2268,3425,392,541,1446,3828,3712,3738,3565,3539,3623,4152,3988,4658,4284,4418,4436,4275,4323,4395,3703,4298,3951"
@@ -3284,6 +3355,188 @@ AiPlayerbot.WildPvp.DecrochagePct = 30
 #        Default: 0 (eteint - le tirage se comporte exactement comme au lot 4)
 #                 1 - le tirage du poste de guet est pondere par la presence reelle de proies
 AiPlayerbot.WildPvp.IndexProies = 0
+
+###################################################################################################
+###################################################################################################
+#    HOTEL DES VENTES DES BOTS (lot 1 : simulation ; lot 2 : depot reel ; lot 3 : courrier)
+#
+#    Le butin d'artisanat (class 7) et l'equipement vert ou bleu (class 2 et 4) des bots aleatoires
+#    est DETRUIT a chaque Revive, Randomize ou Refresh (ClearInventory). Juste avant, on parcourt
+#    les SACS du bot (jamais l'equipement porte ni la banque), filtre, et calcule le prix selon la
+#    grille ci-dessous. Puis :
+#      - Simulation = 1 : on JOURNALISE ce qui aurait ete mis en vente, sans rien toucher :
+#          coa hv simu: bot= objet= (id) n= mise= rachat= maison= motif= regle=
+#      - Simulation = 0 : on cree l'enchere (une pile entiere par enchere, duree tiree parmi
+#        12/24/48 h x Rate.Auction.Time, SANS caution), l'objet quitte le sac pour l'HV :
+#          coa hv depot: bot= objet= (id) n= mise= rachat= maison= motif= regle= enchere= duree=
+#    plus un bilan cumule `coa hv:` toutes les BilanSecondes, sur le journal playerbots.coa.
+#    Lot 3 (Courrier = 1) : les courriers d'HV livres aux bots (or des ventes, invendus) sont
+#    encaisses (or) et effaces (objets detruits).
+#    Specification : coa-project/docs/FAISABILITE-bots-hotel-des-ventes.md, § 6 et 7.
+#
+#    Seuls les passages du fil monde sont traites (RandomPlayerbotMgr::UpdateAIInternal). Le meme
+#    ProcessBot appele par l'action de bot « random bot update », sur un fil de carte, est ignore
+#    et compte dans `hors_fil_monde` au bilan.
+#
+#    Ordre d'allumage conseille : Enable = 1 (simulation), mesurer ; puis Simulation = 0 ET
+#    Courrier = 1 ensemble (sans Courrier, l'or des ventes et les invendus s'accumulent en courrier).
+#    Rechargement : .reload config PUIS playerbots rndbot reload, dans cet ordre (P-125).
+#    Retour arriere : Simulation = 1 (plus aucun depot ; les encheres deja posees vont a leur
+#    terme), ou Enable = 0 (plus rien du tout, courrier compris), puis le meme rechargement.
+#
+###################################################################################################
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.Enable
+#        Interrupteur general. A 0, tout sort a la premiere ligne : ni lecture des sacs, ni
+#        lecture de l'HV, ni depot, ni releve du courrier, ni bilan.
+#        Default: 0 (eteint)
+#                 1 - allume (en simulation tant que Simulation = 1)
+AiPlayerbot.Coa.HotelDesVentes.Enable = 0
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.Simulation
+#        1 : journal seul. 0 : depot REEL a l'hotel des ventes du camp du bot (lot 2). N'a d'effet
+#        que si Enable = 1.
+#        Default: 1 (simulation)
+#                 0 - depot reel
+AiPlayerbot.Coa.HotelDesVentes.Simulation = 1
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.Courrier
+#        Lot 3. A 1 (et Enable = 1), a chaque passage de ProcessBot sur le fil monde, les courriers
+#        d'HV (type enchere) DEJA LIVRES d'un bot aleatoire en ligne sont releves : l'or est credite
+#        (jamais au-dela du plafond d'or : le courrier reste alors intact), les objets joints sont
+#        DETRUITS, le courrier est efface. Les courriers « enchere gagnee » (un achat) et les
+#        courriers illisibles ne sont jamais touches.
+#        INDEPENDANT de Simulation : avec Simulation = 1 et Courrier = 1, la releve est REELLE
+#        (ecritures en base) pour tout courrier d'HV deja present chez un bot aleatoire.
+#        Default: 0 (eteint)
+#                 1 - releve
+AiPlayerbot.Coa.HotelDesVentes.Courrier = 0
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.CourrierMaxParPasse
+#        Courriers releves au plus par passe de RandomPlayerbotMgr::UpdateAIInternal (tous bots
+#        confondus). Le reste attend la passe suivante (`courrier_reportes` au bilan).
+#        Default: 30
+AiPlayerbot.Coa.HotelDesVentes.CourrierMaxParPasse = 30
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ1Min / CoefArtisanatQ1Max
+#    AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ23Min / CoefArtisanatQ23Max
+#    AiPlayerbot.Coa.HotelDesVentes.CoefEquipementVertMin / CoefEquipementVertMax
+#    AiPlayerbot.Coa.HotelDesVentes.CoefEquipementBleuMin / CoefEquipementBleuMax
+#        Grille VALIDEE le 2026-10-10 : prix d'achat immediat UNITAIRE = SellPrice x un tirage dans
+#        [Min ; Max], par categorie :
+#          artisanat qualite 1 (class 7)            3 a 5
+#          artisanat qualite 2-3 (class 7)          4 a 6
+#          equipement vert (class 2/4, qualite 2)   3 a 4
+#          equipement bleu (class 2/4, qualite 3)   5 a 7
+#        Un Min superieur au Max est remis dans l'ordre ; une valeur negative est ramenee a 0.
+#        Default: 3 / 5, 4 / 6, 3 / 4, 5 / 7
+AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ1Min = 3
+AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ1Max = 5
+AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ23Min = 4
+AiPlayerbot.Coa.HotelDesVentes.CoefArtisanatQ23Max = 6
+AiPlayerbot.Coa.HotelDesVentes.CoefEquipementVertMin = 3
+AiPlayerbot.Coa.HotelDesVentes.CoefEquipementVertMax = 4
+AiPlayerbot.Coa.HotelDesVentes.CoefEquipementBleuMin = 5
+AiPlayerbot.Coa.HotelDesVentes.CoefEquipementBleuMax = 7
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.BruitPct
+#        Bruit applique au prix unitaire de chaque depot : +/- BruitPct %. Plafonne a 99.
+#        Default: 15
+AiPlayerbot.Coa.HotelDesVentes.BruitPct = 15
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.SousEnchereMinPct / SousEnchereMaxPct
+#        Si une enchere d'un AUTRE bot (compte RNDBOT, autre vendeur) existe deja pour le meme
+#        modele dans la meme maison, et que le prix de grille ne la bat pas deja, le prix devient
+#        le plus bas d'entre elles moins un tirage dans [Min ; Max] %, strictement en dessous,
+#        arrondi « joli » vers le bas quand c'est possible. Un bot ne se sous-enchere jamais
+#        lui-meme (prix de grille). Les encheres humaines ne servent jamais de reference.
+#        Plafonnes a 99.
+#        Default: 1 / 5
+AiPlayerbot.Coa.HotelDesVentes.SousEnchereMinPct = 1
+AiPlayerbot.Coa.HotelDesVentes.SousEnchereMaxPct = 5
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.PlancherCoef
+#        Le prix unitaire ne descend jamais sous SellPrice x PlancherCoef (sous-enchere comprise).
+#        Le PLAFOND, lui, prime sur tout : jamais au-dessus de BuyPrice x n - 1 quand BuyPrice > 0
+#        (le joueur fait toujours une affaire face au marchand). Un objet dont ce plafond tombe sous
+#        SellPrice x n (BuyPrice <= SellPrice) est ecarte. Ordre : grille, arrondi « joli »,
+#        sous-enchere, plancher, plafond.
+#        Default: 1.5
+AiPlayerbot.Coa.HotelDesVentes.PlancherCoef = 1.5
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.MiseAPrixMinPct / MiseAPrixMaxPct
+#        Mise a prix = un tirage dans [Min ; Max] % du prix d'achat immediat, au moins 1 pc, et
+#        toujours strictement sous lui (sauf a 1 pc). Plafonnes a 100.
+#        Default: 70 / 85
+AiPlayerbot.Coa.HotelDesVentes.MiseAPrixMinPct = 70
+AiPlayerbot.Coa.HotelDesVentes.MiseAPrixMaxPct = 85
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.MaxParBotParPassage
+#        Depots au plus par bot et par passage (les plus chers d'abord). Le reste est detruit par
+#        ClearInventory, comme aujourd'hui.
+#        Default: 5
+AiPlayerbot.Coa.HotelDesVentes.MaxParBotParPassage = 5
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.MaxParPasse
+#        Budget GLOBAL de depots par passe de RandomPlayerbotMgr::UpdateAIInternal (jusqu'a
+#        RandomBotsPerInterval bots traites par passe, et une rafale au redemarrage). 0 : aucun depot.
+#        Default: 20
+AiPlayerbot.Coa.HotelDesVentes.MaxParPasse = 20
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.MaxParMinute
+#        Budget GLOBAL de depots (simules ou reels) par fenetre d'une minute de jeu, en plus de
+#        MaxParPasse : borne le debit quelle que soit la cadence des passes (rafale au redemarrage).
+#        0 : aucun depot.
+#        Default: 60
+AiPlayerbot.Coa.HotelDesVentes.MaxParMinute = 60
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.MaxActivesParBot
+#    AiPlayerbot.Coa.HotelDesVentes.MaxParMaison
+#    AiPlayerbot.Coa.HotelDesVentes.MaxParModele
+#        Plafonds sur les encheres de BOTS en place dans l'HV REELLE (comptes RNDBOT ; les humaines
+#        a part, et un vendeur supprime compte comme humain) : par bot, par maison, et par modele
+#        d'objet dans une maison. Recomptes a chaque passe ; chaque depot de la passe s'y ajoute
+#        aussitot. En simulation, les depots simules ne vivent que le temps de la passe.
+#        Default: 12, 300, 15
+AiPlayerbot.Coa.HotelDesVentes.MaxActivesParBot = 12
+AiPlayerbot.Coa.HotelDesVentes.MaxParMaison = 300
+AiPlayerbot.Coa.HotelDesVentes.MaxParModele = 15
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.BilanSecondes
+#        Periode de la ligne de bilan cumule `coa hv:` (compteurs depuis le demarrage). 0 : jamais.
+#        Default: 600
+AiPlayerbot.Coa.HotelDesVentes.BilanSecondes = 600
+
+###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.TeleportVisible
+#    AiPlayerbot.Coa.HotelDesVentes.TeleportVisiblePct
+#        Lot 4, volet visible. A 1 (et Enable = 1, Simulation = 0), un bot qui vient de faire un
+#        depot REEL avant son « teleport for level and refresh », et dont le tirage
+#        ProbTeleToBankers choisit deja la ville, apparait devant un commissaire-priseur de SON camp
+#        (celui de la maison ou il a depose : pas Baie-du-Butin, Gadgetzan ni Long-guet tant que
+#        AllowTwoSide.Interaction.Auction = 0) au lieu d'un banquier. Dalaran a partir du niveau 71
+#        seulement. Aucun commissaire valable : banquier, comme avant. En simulation, rien.
+#        TeleportVisiblePct : part (0-100) des bots marques qui y vont ; les autres gardent le
+#        banquier. Bilan : champs visible_* de la ligne `coa hv:` ; une ligne `coa hv visible:` par
+#        bot envoye (commissaires proposes, l'arrivee n'est pas verifiee).
+#        Retour arriere : TeleportVisible = 0, puis .reload config et playerbots rndbot reload.
+#        Default: 0 (eteint), 100
+AiPlayerbot.Coa.HotelDesVentes.TeleportVisible = 0
+AiPlayerbot.Coa.HotelDesVentes.TeleportVisiblePct = 100
 
 ###################################################################################################
 ###################################################################################################
