@@ -3080,6 +3080,30 @@ bool CoaAreneSortEntrave(SpellInfo const* info, uint8 profondeur = 0)
     return false;
 }
 
+// Le sort change la FORME du lanceur (aura 36 MOD_SHAPESHIFT posee sur soi). Match humain id=29 (11/10, 13:13:52 UTC,
+// Bloodmage 1248 spe 27) : la survie (palier pression) a pris Blood Curse 562720 -> Accursed Form 562572 (25 % de la vie,
+// aura 36 forme 57) pour un defensif ; la forme pose 524861 (SyncCursedFormRequirement, AscensionBloodmageTalents.cpp:105),
+// que Bloodmoon Blast, Sanguine Rupture et Taldaram's Torment excluent (ExcludeCasterAuraSpell) : il ne restait que les
+// sorts maudits payes en rage (Bloodbolt, Veinburst : 300), a 12-27 de rage -- 8 s sans un sort, de 66 a 4 % de vie.
+// Une forme change le kit entier : ce n'est ni un soin ni un defensif de survie (la rotation garde la main dessus).
+bool CoaAreneSortForme(SpellInfo const* info)
+{
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effet = info->Effects[i];
+        if ((!effet.TargetA.GetTarget() || effet.TargetA.GetTarget() == TARGET_UNIT_CASTER) &&
+            effet.IsAura(SPELL_AURA_MOD_SHAPESHIFT))
+            return true;
+    }
+    return false;
+}
+
+// Liste et sort effectif : l'un ou l'autre change la forme (Blood Curse 562720 est remplace par Accursed Form 562572).
+bool CoaAreneSortFormeUsable(Player* bot, Usable const& spell)
+{
+    return CoaAreneSortForme(spell.info) || CoaAreneSortForme(EffectiveSpell(bot, spell.info));
+}
+
 // Le sort rend de la mana au lanceur (Time Out! : ENERGIZE_PCT 137 et aura PERIODIC_ENERGIZE 24, MiscValue 0 = mana).
 bool CoaAreneRendMana(SpellInfo const* info)
 {
@@ -3163,7 +3187,7 @@ CoaAreneSurvieListes CoaAreneSurvieSorts(PlayerbotAI* botAI, Player* bot, uint8 
     l.defensifs.erase(std::remove_if(l.defensifs.begin(), l.defensifs.end(), [&](Usable const& spell)
         {
             SpellInfo const* info = EffectiveSpell(bot, spell.info);
-            if (CoaAreneAuraDeSoi(bot, spell.info, info) ||
+            if (CoaAreneAuraDeSoi(bot, spell.info, info) || CoaAreneSortFormeUsable(bot, spell) ||
                 (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id))))
                 return true;
             if (CoaAreneSortEntrave(info))
@@ -3184,7 +3208,7 @@ CoaAreneSurvieListes CoaAreneSurvieSorts(PlayerbotAI* botAI, Player* bot, uint8 
              { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
-        if ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info))
+        if (((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaAreneSortFormeUsable(bot, spell))
             continue;
         if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
             continue;
@@ -3216,6 +3240,7 @@ bool CoaAreneSoinPret(PlayerbotAI* botAI, Player* bot)
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
         if (CoaAreneSortEntrave(info) || CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id) ||
+            CoaAreneSortFormeUsable(bot, spell) ||
             ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || !CoaAreneSortPret(botAI, bot, spell))
             continue;
         if (CoaAreneSortMobile(bot, info))
@@ -3432,7 +3457,8 @@ void CoaAreneReserveSoin(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& u
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
         if (info->PowerType >= MAX_POWERS || info->PowerType == POWER_MANA || info->PowerType == POWER_HEALTH)
             continue;
-        if (bot->HasSpellCooldown(info->Id) || CoaAreneSortEntrave(info) || (!soinDirect && !(spell.kind & KIND_HOT)) ||
+        if (bot->HasSpellCooldown(info->Id) || CoaAreneSortEntrave(info) || CoaAreneSortFormeUsable(bot, spell) ||
+            (!soinDirect && !(spell.kind & KIND_HOT)) ||
             (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id))) ||
             ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)))
             continue;
@@ -3760,16 +3786,28 @@ bool CoaAreneEstFamilier(SpellInfo const* info)
 {
     if (!info || info->IsPassive() || info->GetMaxDuration() >= 0)
         return false;
-    for (SpellEffectInfo const& effect : info->Effects)
+    // Revue du 11/10 (Necromancer 453, match id=30, aucun familier en arene depuis toujours) : le module reecrit au
+    // chargement les SummonProperties des « Raise: » du Necromancer (AscensionNecromancerContracts.cpp:67-69) et des
+    // invocations du Witch Doctor (AscensionWitchDoctorCompletion.cpp:548-550) en 64 (categorie 0, type 0) : c'est son
+    // script qui cree l'unite, avec les proprietes 61 (allie, gardien ; AscensionNecromancerSummons.cpp:252). Le SpellInfo
+    // en memoire ne passait donc jamais ce test : l'action posait familierAucun au premier essai, en silence, et
+    // CoaAreneAFamilier ne voyait jamais un serviteur. La ligne BRUTE de Spell.dbc (sSpellStore, que le module ne touche
+    // pas) garde 61 : c'est elle que le releve du commentaire ci-dessus avait lue.
+    SpellEntry const* const brut = sSpellStore.LookupEntry(info->Id);
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
     {
+        SpellEffectInfo const& effect = info->Effects[i];
         if (effect.Effect == SPELL_EFFECT_SUMMON_PET)
             return true;
         if (effect.Effect != SPELL_EFFECT_SUMMON)
             continue;
-        SummonPropertiesEntry const* prop = sSummonPropertiesStore.LookupEntry(uint32(effect.MiscValueB));
-        if (prop && (prop->Category == SUMMON_CATEGORY_ALLY || prop->Category == SUMMON_CATEGORY_PET) &&
-            (prop->Type == SUMMON_TYPE_PET || prop->Type == SUMMON_TYPE_GUARDIAN || prop->Type == SUMMON_TYPE_MINION))
-            return true;
+        for (int32 const misc : { effect.MiscValueB, brut ? brut->EffectMiscValueB[i] : effect.MiscValueB })
+        {
+            SummonPropertiesEntry const* prop = sSummonPropertiesStore.LookupEntry(uint32(misc));
+            if (prop && (prop->Category == SUMMON_CATEGORY_ALLY || prop->Category == SUMMON_CATEGORY_PET) &&
+                (prop->Type == SUMMON_TYPE_PET || prop->Type == SUMMON_TYPE_GUARDIAN || prop->Type == SUMMON_TYPE_MINION))
+                return true;
+        }
     }
     return false;
 }
@@ -3923,6 +3961,57 @@ class CoaAreneFamilierTrigger : public Trigger
 public:
     CoaAreneFamilierTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa arene familier") {}
 
+    // 11/10 (Necromancer 453, match id=30) : le declencheur restait MUET -- ni « familier » ni « familier_refus ». Une ligne
+    // « familier_attente » toutes les 5 s au plus tant que la raison ne change pas (une ligne a chaque changement de
+    // raison), seulement pour un kit qui a une invocation permanente (KitAInvocation, en cache), en arene et en
+    // preparation ou engagement vu : la cause se lit au premier match. Raisons 1-6 ici, 7 dans l'action.
+    bool Attendre(CoaAreneEtat& etat, uint8 raison, char const* nom, bool present)
+    {
+        if (etat.cadre == COA_ARENE_ARENE && (etat.preparation || etat.vuCeTick) && KitAInvocation())
+        {
+            uint32 const maintenant = getMSTime();
+            if (raison != etat.familierAttenteRaison || !etat.familierAttenteMs ||
+                getMSTimeDiff(etat.familierAttenteMs, maintenant) >= CoaAreneFamilierRefusTraceMs)
+            {
+                etat.familierAttenteRaison = raison;
+                etat.familierAttenteMs = maintenant ? maintenant : 1;
+                CoaAreneJournal(bot, etat, "familier_attente", -1.0f, -1.0f,
+                                Acore::StringFormat(" raison={} preparation={} present={} familiers={} plafond={}"
+                                                    " life_force_libre={} aucun={}",
+                                                    nom, etat.preparation ? 1 : 0, present ? 1 : 0, etat.familiers,
+                                                    CoaAreneFamilierPlafond(bot, etat),
+                                                    CoaAreneKitLifeForce(bot) ? int32(CoaAreneLifeForceLibrePiles(bot)) : -1,
+                                                    etat.familierAucun ? 1 : 0));
+            }
+        }
+        return false;
+    }
+
+    // Le kit connait au moins une invocation permanente. Relu au plus toutes les 30 s, et aussitot si le niveau ou le
+    // nombre de sorts connus a change (revue : le gladiateur est realigne en niveau a la mise en file, 33 -> 41 au
+    // match id=30 ; sans cette cle, le cache d'un match precedent fini depuis moins de 30 s aurait servi).
+    bool KitAInvocation()
+    {
+        uint32 const maintenant = getMSTime();
+        uint8 const niveau = bot->GetLevel();
+        uint32 const sorts = uint32(bot->GetSpellMap().size());
+        if (!kitLuMs || getMSTimeDiff(kitLuMs, maintenant) >= 30 * IN_MILLISECONDS || niveau != kitNiveau ||
+            sorts != kitSorts)
+        {
+            kitLuMs = maintenant ? maintenant : 1;
+            kitNiveau = niveau;
+            kitSorts = sorts;
+            kitAInvocation = false;
+            for (Usable const& s : KnownAbilities(botAI, bot, [](uint16) { return true; }))
+                if (CoaAreneEstFamilier(EffectiveSpell(bot, s.info)))
+                {
+                    kitAInvocation = true;
+                    break;
+                }
+        }
+        return kitAInvocation;
+    }
+
     bool IsActive() override
     {
         if (!sPlayerbotAIConfig.coaAreneIaCommune || !bot->IsAlive())
@@ -3930,12 +4019,17 @@ public:
         CoaAreneEtat& etat = CoaAreneMaj(botAI, bot);
         // Relecture : engagement VU a ce tick ou preparation -- pas pendant les 10 s de grace d'apres un duel, ou le bot
         // est deja rendu au monde ouvert (etat.cadre garde DUEL).
-        if (!etat.actif || !etat.bras || etat.familierAucun || (!etat.vuCeTick && !etat.preparation) ||
-            (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL))
+        if (!etat.actif || (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL))
+            return false;
+        if (!etat.bras)
+            return Attendre(etat, 1, "bras", false);
+        if (etat.familierAucun)
+            return Attendre(etat, 2, "aucun", false);
+        if (!etat.vuCeTick && !etat.preparation)
             return false;
         // Revue c2 : plafond par engagement (l'etat est remis a zero a chaque engagement, CoaAreneMaj).
         if (etat.familiers >= CoaAreneFamilierPlafond(bot, etat))
-            return false;
+            return Attendre(etat, 3, "plafond", false);
         uint32 const maintenant = getMSTime();
         // Revue c2 : perte d'un familier vu vivant (tue, ou renvoye) -> CoaAreneFamilierApresPerteMs avant de relancer.
         // Teste a chaque tour, avant le delai d'essai, pour dater la perte au tour pres.
@@ -3949,13 +4043,22 @@ public:
         }
         // 11/10 (Necromancer 432) : un kit a Life Force remplit sa capacite en preparation (CoaAreneServiteurEnPlus).
         if (present && !CoaAreneServiteurEnPlus(bot, etat))
-            return false;
+            // Un familier present est l'etat normal du combat : journalise en preparation seulement.
+            return etat.preparation ? Attendre(etat, 4, "present", true) : false;
         if (etat.familierPerduMs && getMSTimeDiff(etat.familierPerduMs, maintenant) < CoaAreneFamilierApresPerteMs)
-            return false;
+            return Attendre(etat, 5, "perte", present);
         if (etat.prochainFamilierMs && getMSTimeDiff(etat.prochainFamilierMs, maintenant) >= 0x80000000u)
-            return false;
-        return !bot->IsNonMeleeSpellCast(false, true, true);
+            return false;  // reessai : attente normale apres un essai deja journalise
+        if (bot->IsNonMeleeSpellCast(false, true, true))
+            return Attendre(etat, 6, "incantation", present);
+        return true;
     }
+
+private:
+    uint32 kitLuMs = 0;
+    uint8 kitNiveau = 0;
+    uint32 kitSorts = 0;
+    bool kitAInvocation = false;
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -5190,6 +5293,10 @@ public:
         if (familiers.empty())
         {
             etat.familierAucun = true;
+            CoaAreneJournal(bot, etat, "familier_aucun", -1.0f, -1.0f,
+                            Acore::StringFormat(" connus={} preparation={}",
+                                                KnownAbilities(botAI, bot, [](uint16) { return true; }).size(),
+                                                etat.preparation ? 1 : 0));
             return false;
         }
         // Portes ouvertes, seulement une incantation courte : les « Build: » du Tinker durent 6 s (SpellCastTimes 171),
@@ -5200,6 +5307,23 @@ public:
                                            { return EffectiveSpell(bot, s.info)->CalcCastTime(bot) >
                                                     CoaAreneFamilierIncantationMaxMs; }),
                             familiers.end());
+        // Diagnostic du 11/10 : portes ouvertes, toutes les invocations trop longues -- sans cette ligne, l'essai etait muet.
+        // Revue : meme debit que le declencheur (raison 7, une ligne par 5 s) -- sans lui, un Tinker sans familier portes
+        // ouvertes (« Build: » de 6 s) ecrivait une ligne a chaque essai, toutes les 3 s, et aussi en duel.
+        if (familiers.empty())
+        {
+            uint32 const maintenant = getMSTime();
+            if (etat.familierAttenteRaison != 7 || !etat.familierAttenteMs ||
+                getMSTimeDiff(etat.familierAttenteMs, maintenant) >= CoaAreneFamilierRefusTraceMs)
+            {
+                etat.familierAttenteRaison = 7;
+                etat.familierAttenteMs = maintenant ? maintenant : 1;
+                CoaAreneJournal(bot, etat, "familier_attente", -1.0f, -1.0f,
+                                Acore::StringFormat(" raison=incantation_longue preparation={} present={}",
+                                                    etat.preparation ? 1 : 0, CoaAreneAFamilier(bot) ? 1 : 0));
+            }
+            return false;
+        }
         // 11/10 (Necromancer 432) : kit a Life Force -> le moins cher d'abord (cout en ressource du sort reel), pour
         // remplir la capacite en preparation : les squelettes (Life Force 1, ~30 % de mana de base) avant le Crypt Fiend
         // (2, 64 %) et l'Abomination (3, 67 %).

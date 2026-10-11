@@ -118,6 +118,10 @@ struct CoaAreneEtat
     // Revue c2 : un familier a ete vu vivant (pour reconnaitre sa perte), et l'instant de cette perte (0 : aucune).
     bool familierVu = false;
     uint32 familierPerduMs = 0;
+    // 11/10 (Necromancer 453, match id=30 : aucune ligne « familier » ni « familier_refus ») : debit de la ligne
+    // « familier_attente » (pourquoi le declencheur reste muet), une par raison toutes les 5 s.
+    uint32 familierAttenteMs = 0;
+    uint8 familierAttenteRaison = 0;
     // Combat contre un humain (11/10, CoaAreneIa.inc, arene 1v1 et duel, CoaArene.IaCommune) : interruption,
     // dissipation sur soi, fenetre de burst apres un controle. Bilan : compteurs ci-dessous.
     // Incantation adverse suivie par CoaAreneMaj (les deux bras) : identite de la derniere vue (sort et adresse du
