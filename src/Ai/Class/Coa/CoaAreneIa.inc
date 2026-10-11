@@ -477,6 +477,28 @@ bool CoaAreneIncantationDigne(Spell const* spell, bool canalisee, bool soin)
     return canalisee || spell->GetCastTime() >= CoaAreneIncantationDigneMs;
 }
 
+// Le type de la cible interdit le sort : RECOPIE des tests de type de SpellInfo::CheckTarget (SpellInfo.cpp:1951-1983),
+// que le coeur applique a la cible explicite (Spell::CheckCast, Spell.cpp:5965) ET a chaque cible de zone (selection
+// implicite, Spell.cpp:1965 et 2363) : un sort qu'il refuse ici ne touche donc jamais cette cible, quelle que soit sa
+// facon de viser. Banc du 11/10 00:30-00:47 UTC (tour 7), TARGET_IS_PLAYER x4, tous en interruption : Overload
+// Mechanical 707365 (TargetCreatureType 256, mecaniques) x3 et Hir'eek's Jinx 803325 (1, betes), proposes contre un joueur.
+bool CoaAreneTypeCibleRefuse(SpellInfo const* info, Unit* cible)
+{
+    if (cible->IsPlayer())
+    {
+        if (info->HasAttribute(SPELL_ATTR5_NOT_ON_PLAYER))
+            return true;
+    }
+    else
+    {
+        if (info->HasAttribute(SPELL_ATTR3_ONLY_ON_PLAYER))
+            return true;
+        if (info->HasAttribute(SPELL_ATTR5_NOT_ON_PLAYER_CONTROLLED_NPC) && cible->IsControlledByPlayer())
+            return true;
+    }
+    return !info->CheckTargetCreatureType(cible);
+}
+
 constexpr uint8 COA_COUPE_NON = 0;
 constexpr uint8 COA_COUPE_PURE = 1;     // SPELL_EFFECT_INTERRUPT_CAST, ou silence
 constexpr uint8 COA_COUPE_CONTROLE = 2; // etourdissement, peur, desorientation
@@ -500,6 +522,12 @@ uint8 CoaAreneCoupe(Player* bot, SpellInfo const* info, SpellInfo const* vise, b
     // Relecture : immunite au sort ENTIER (mecanisme du sort, dissipation, ecole -- bouclier divin), que le test par
     // effet ne voit pas : Unit::IsImmunedToSpell, le test du coeur.
     if (!profondeur && cible->IsImmunedToSpell(info, static_cast<Unit const*>(bot)))
+        return COA_COUPE_NON;
+    // Banc du 11/10 (tour 7) : sort a cible unite explicite que le type de l'adversaire interdit -- PlayerbotAI::CastSpell
+    // lui donne l'adversaire pour cible (sauf sort a point au sol ou a source, PlayerbotAI.cpp:3961-3970) et
+    // Spell::CheckCast refuse tout le lancer, sorts declenches compris (CoaAreneTypeCibleRefuse).
+    if (!profondeur && (info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK) &&
+        !(info->Targets & (TARGET_FLAG_DEST_LOCATION | TARGET_FLAG_SOURCE_LOCATION)) && CoaAreneTypeCibleRefuse(info, cible))
         return COA_COUPE_NON;
     uint8 meilleur = COA_COUPE_NON;
     for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
@@ -544,7 +572,8 @@ uint8 CoaAreneCoupe(Player* bot, SpellInfo const* info, SpellInfo const* vise, b
             if (rayon <= 0.0f || !bot->IsWithinDistInMap(cible, rayon))
                 coupe = COA_COUPE_NON;
         }
-        if (coupe != COA_COUPE_NON && !cible->IsImmunedToSpellEffect(info, i, bot))
+        // Un effet de zone dont le type de l'adversaire interdit le sort ne le touche pas (selection implicite, meme test).
+        if (coupe != COA_COUPE_NON && !cible->IsImmunedToSpellEffect(info, i, bot) && !CoaAreneTypeCibleRefuse(info, cible))
         {
             if (coupe == COA_COUPE_PURE)
                 return COA_COUPE_PURE;
@@ -616,7 +645,9 @@ void CoaAreneClore(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* ad
                                         "interruptions_ratees={} dispels_soi={} fenetres_vues={} fenetres_burst={} "
                                         "fenetre_sorts={}", etat.incantationsVues, etat.soinsVus, etat.interruptions,
                                         etat.interruptionsSoin, etat.interruptionsRatees, etat.dispelsSoi,
-                                        etat.fenetresVues, etat.fenetresBurst, etat.fenetreSorts));
+                                        etat.fenetresVues, etat.fenetresBurst, etat.fenetreSorts) +
+                    // Banc du 11/10 (tour 7) : ratees rattrapees sur la meme incantation (deja retirees des ratees).
+                    Acore::StringFormat(" interruptions_rattrapees={}", etat.interruptionsRattrapees));
     etat.actif = false;
     etat.cacheurEnRouteMs = 0;
     etat.reculFinMs = 0;
@@ -720,7 +751,9 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
         {
             ++etat.incantationsVues;
             etat.soinsVus += CoaAreneEstSoin(incantation->GetSpellInfo()) ? 1 : 0;
-            etat.incantationAdvRateeNotee = false;
+            etat.interruptionJugeeSpell = 0;
+            etat.interruptionJugeeSort = 0;
+            etat.interruptionJugeeRatee = false;
         }
         etat.incantationAdvSpell = adresse;
         etat.incantationAdvSort = sort;
@@ -1894,7 +1927,7 @@ bool CoaAreneEchu(uint32 echeance)
 bool CoaAreneSortPretContre(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* cible)
 {
     SpellInfo const* info = EffectiveSpell(bot, spell.info);
-    if (info->CasterAuraSpell && !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+    if (CoaRefuseParAuraDuLanceur(bot, info))
         return false;
     return CoaAreneSortPret(botAI, bot, spell) && !CoaExigeFamilierAbsent(bot, info) &&
            !CoaRefusCibleCertain(bot, info, cible);
@@ -3136,9 +3169,59 @@ public:
     }
 };
 
+// Banc du 11/10 (tour 7) : POURQUOI CastFirst n'a rien lance, candidat par candidat, dans l'ordre de ses tests (les
+// refus de StrictCheck et de CastSpell sont deja traces par CastFirst ; ici, les ecarts silencieux). Diagnostic seul :
+// aucun effet sur le jeu. Tour 7, 24 lignes reussi=0 sans cause, reconstituees a la main : portee 10, recharge
+// globale 6 (dont 4 rattrapees ensuite), TARGET_IS_PLAYER 4, trop pres (portee minimale) 3, bot etourdi 1.
+// « recharge_globale » arrete la liste, comme dans CastFirst.
+std::string CoaAreneCausesRatee(PlayerbotAI* botAI, Player* bot, CoaAreneCoupeCandidats const& c, char const*& premiere)
+{
+    bool const filtreEtat = CoaAreneFiltreEtatActif(botAI, bot);
+    int8 vue = -1;
+    std::string detail;
+    premiere = nullptr;
+    for (Usable const& spell : c.sorts)
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        char const* cause = "refus";
+        bool arret = false;
+        if (filtreEtat && CoaAreneBloqueParEtat(bot, info))
+            cause = "sous_controle";
+        // Meme ecart que `seulementCapacites` dans CastFirst (aura SPELL_AURA_ALLOW_ONLY_ABILITY).
+        else if (bot->HasPlayerFlag(PLAYER_ALLOW_ONLY_ABILITY) && !info->HasAttribute(SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE) &&
+                 !info->HasAttribute(SPELL_ATTR0_PASSIVE))
+            cause = "capacites_seules";
+        else if (bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
+        {
+            cause = "recharge_globale";
+            arret = true;
+        }
+        else
+            switch (CoaPreControleCible(bot, info, c.adv, vue))
+            {
+                case SPELL_FAILED_OUT_OF_RANGE: cause = "portee"; break;
+                case SPELL_FAILED_TOO_CLOSE: cause = "trop_pres"; break;
+                case SPELL_FAILED_LINE_OF_SIGHT: cause = "vue"; break;
+                case SPELL_FAILED_UNIT_NOT_INFRONT: cause = "dos"; break;
+                default: cause = CoaRefuseEnMouvement(bot, info) ? "en_mouvement" : "refus"; break;
+            }
+        if (!premiere)
+            premiere = cause;
+        detail += Acore::StringFormat("{}{}:{}", detail.empty() ? "" : ",", info->Id, cause);
+        if (arret)
+            break;
+    }
+    if (!premiere)
+        premiere = "aucun";
+    return detail.empty() ? std::string("-") : detail;
+}
+
 // Interruption (voir CoaAreneCandidatsInterruption). Une ligne `action=interruption` par sort parti, et une seule
 // `reussi=0` par incantation adverse ou rien n'est parti. Prochain essai : 1 s apres un succes, 250 ms apres un echec
 // (une recharge globale ne doit pas faire manquer un soin de 1,5 s).
+// Banc du 11/10 (tour 7) : un succes apres un echec sur la MEME incantation (identite sort + adresse) retire la ratee
+// (`rattrapee=1`, bilan `interruptions_rattrapees`) ; un echec apres un succes sur la meme incantation n'est pas compte.
+// La ligne reussi=0 porte en fin `cause=` (premier candidat) et `detail=` (sort:cause de chaque candidat essaye).
 class CoaAreneInterruptionAction : public Action
 {
 public:
@@ -3159,29 +3242,44 @@ public:
         SpellInfo const* lance = CastFirst(botAI, bot, c.sorts, c.adv, USAGE_INTERRUPT);
         uint32 const prochain = getMSTime() + (lance ? IN_MILLISECONDS : 250u);
         etat.prochaineInterruptionMs = prochain ? prochain : 1;
+        // Meme incantation que celle deja jugee (identite seule : c.incantation n'est plus dereferencee apres CastFirst).
+        bool const memeIncantation = etat.interruptionJugeeSpell == adresse && etat.interruptionJugeeSort == vise->Id;
         if (lance)
         {
             auto const itr = std::find_if(c.sorts.begin(), c.sorts.end(), [lance](Usable const& s) { return s.info == lance; });
             bool const pure = itr != c.sorts.end() && size_t(std::distance(c.sorts.begin(), itr)) < c.pures;
             bool canalisee = false;
             bool const coupee = reinterpret_cast<uintptr_t>(CoaAreneIncantationAdverse(c.adv, canalisee)) != adresse;
+            bool const rattrapee = memeIncantation && etat.interruptionJugeeRatee;
+            if (rattrapee && etat.interruptionsRatees)
+            {
+                --etat.interruptionsRatees;
+                ++etat.interruptionsRattrapees;
+            }
+            etat.interruptionJugeeSpell = adresse;
+            etat.interruptionJugeeSort = vise->Id;
+            etat.interruptionJugeeRatee = false;
             ++etat.interruptions;
             etat.interruptionsSoin += c.soin ? 1 : 0;
             CoaAreneJournal(bot, etat, "interruption", d, d,
                             Acore::StringFormat(" reussi=1 sort={} outil={} sort_adverse={} soin={} canalisee={} "
-                                                "reste_ms={} coupee={} candidats={} pv_adverse={:.0f}", lance->Id,
-                                                pure ? "pure" : "controle", vise->Id, c.soin ? 1 : 0,
+                                                "reste_ms={} coupee={} candidats={} pv_adverse={:.0f} rattrapee={}",
+                                                lance->Id, pure ? "pure" : "controle", vise->Id, c.soin ? 1 : 0,
                                                 c.canalisee ? 1 : 0, reste, coupee ? 1 : 0, c.sorts.size(),
-                                                c.adv->GetHealthPct()));
+                                                c.adv->GetHealthPct(), rattrapee ? 1 : 0));
         }
-        else if (!etat.incantationAdvRateeNotee)
+        else if (!memeIncantation)
         {
-            etat.incantationAdvRateeNotee = true;
+            etat.interruptionJugeeSpell = adresse;
+            etat.interruptionJugeeSort = vise->Id;
+            etat.interruptionJugeeRatee = true;
             ++etat.interruptionsRatees;
+            char const* cause = nullptr;
+            std::string const detail = CoaAreneCausesRatee(botAI, bot, c, cause);
             CoaAreneJournal(bot, etat, "interruption", d, d,
                             Acore::StringFormat(" reussi=0 sort_adverse={} soin={} canalisee={} reste_ms={} "
-                                                "candidats={} pures={}", vise->Id, c.soin ? 1 : 0, c.canalisee ? 1 : 0,
-                                                reste, c.sorts.size(), c.pures));
+                                                "candidats={} pures={} cause={} detail={}", vise->Id, c.soin ? 1 : 0,
+                                                c.canalisee ? 1 : 0, reste, c.sorts.size(), c.pures, cause, detail));
         }
         return RecordUsage(USAGE_INTERRUPT, lance);
     }

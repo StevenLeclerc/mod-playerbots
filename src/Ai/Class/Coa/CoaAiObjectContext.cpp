@@ -651,6 +651,28 @@ bool CoaRefuseParFormeOuArme(Player* bot, SpellInfo const* info)
 }
 
 /*
+ * Etat ou aura du LANCEUR exige ou interdit : RECOPIE de Spell::CheckCast (Spell.cpp:5846-5859), branche sans
+ * TRIGGERED_IGNORE_CASTER_AURASTATE, celle qu'emprunte PlayerbotAI::CastSpell (TRIGGERED_NONE). Memes appels que le
+ * coeur : HasAuraState(etat, sort, lanceur) -- qui lit aussi SPELL_AURA_ABILITY_IGNORE_AURASTATE -- et
+ * GetSpellIdForDifficulty. Le coeur rend SPELL_FAILED_CASTER_AURASTATE, que IsLastingFailure met au banc 20 s.
+ * Banc d'arene du 11/10 00:30-00:47 UTC (tour 7), CASTER_AURASTATE x9 : Smash 501029 (CasterAuraState 17) x3,
+ * Sanguine Rupture 802456 x2, Bloodmoon Blast 501610, Taldaram's Torment 802570 (ExcludeCasterAuraSpell 524861),
+ * Sanguine Mend 504081, Scarlet Delirium 803685 (ExcludeCasterAuraSpell 802877). Avant ce jour, seul CasterAuraSpell
+ * etait lu (10/10 soir).
+ */
+bool CoaRefuseParAuraDuLanceur(Player* bot, SpellInfo const* info)
+{
+    if (info->CasterAuraState && !bot->HasAuraState(AuraStateType(info->CasterAuraState), info, bot))
+        return true;
+    if (info->CasterAuraStateNot && bot->HasAuraState(AuraStateType(info->CasterAuraStateNot), info, bot))
+        return true;
+    if (info->CasterAuraSpell && !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+        return true;
+    return info->ExcludeCasterAuraSpell &&
+           bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->ExcludeCasterAuraSpell, bot));
+}
+
+/*
  * Familier exige et absent : RECOPIE de Spell::CheckCast (Spell.cpp:6045-6058). Le premier effet visant
  * TARGET_UNIT_PET decide ; sans familier gardien (GetGuardianPet) ni unite possedee (GetCharm), le coeur rend
  * SPELL_FAILED_NO_PET a un sort lance par CastSpell (TRIGGERED_NONE, sans aura declencheuse). Lu sur le lanceur seul.
@@ -763,8 +785,9 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
         // swapped spell are the replacement's. Reading only the listed id had this answer yes
         // on a spell CastFirst then refuses to try, and the action ran for nothing.
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
-        // Same CasterAuraSpell test as CastFirst (10/10 soir) : a spell CastFirst now skips must not count as ready.
-        if (info->CasterAuraSpell && !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+        // Same caster state and aura test as CastFirst (10/10 soir, 11/10) : a spell CastFirst now skips must not count
+        // as ready.
+        if (CoaRefuseParAuraDuLanceur(bot, info))
             continue;
         // Same form, weapon and resource tests as CastFirst (banc d'arene du 10/10) : skipped there, not ready here.
         if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
@@ -1279,6 +1302,27 @@ SpellCastResult CoaPreControleCible(Player* bot, SpellInfo const* info, Unit* ta
     return SPELL_CAST_OK;
 }
 
+/*
+ * Le coeur refusera ce sort parce que le bot bouge : condition RECOPIEE de Spell::prepare (Spell.cpp:3592-3604), lanceur
+ * joueur, sort non declenche (CastSpell : TRIGGERED_NONE) -- canalisation ou temps d'incantation, drapeau d'interruption
+ * par le mouvement, ni grace de Manastorm ni sort mobile du coeur (Unit::CanCastSpellWhileMoving), et pour une
+ * canalisation sans temps d'incantation, pas SPELL_ATTR5_ALLOW_ACTION_DURING_CHANNEL (IsActionAllowedChannel).
+ * Banc du 11/10 00:30-00:47 UTC (tour 7) : la canalisation sans temps d'incantation manquait -- Testament of Fortitude
+ * 500678 (SPELL_ATTR1_IS_CHANNELED, InterruptFlags MOVEMENT) partait au coeur en courant, refus_castspell x4 et banc.
+ * Le temps d'incantation est lu sans Spell (le coeur passe le sien a CalcCastTime), comme avant ce correctif.
+ */
+bool CoaRefuseEnMouvement(Player* bot, SpellInfo const* info)
+{
+    if (!bot->isMoving() || !(info->InterruptFlags & SPELL_INTERRUPT_FLAG_MOVEMENT))
+        return false;
+    uint32 const incantationMs = info->CalcCastTime(bot);
+    if (!incantationMs && !info->IsChanneled())
+        return false;
+    if (bot->HasManastormMovementGrace() || bot->CanCastSpellWhileMoving(info))
+        return false;
+    return incantationMs || !info->IsActionAllowedChannel();
+}
+
 // Casts the first ability of the list that passes the strict check on the target. Returns it,
 // or nullptr when none went off. With a usage kind, why each ability failed is counted.
 SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spells, Unit* target,
@@ -1330,8 +1374,9 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // techniques d'une forme) serait refuse SPELL_FAILED_CASTER_AURASTATE, que IsLastingFailure met au banc
         // 20 s : le Ranger perdait son burst 20 s chaque fois que le tourniquet le tentait a 0 charge. Meme test
         // que Spell::CheckCast (Spell.cpp:5856), sans banc : le sort repart des que l'aura est la.
-        if (info->CasterAuraSpell &&
-            !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+        // Banc du 11/10 (tour 7) : aussi CasterAuraState, CasterAuraStateNot et ExcludeCasterAuraSpell, le reste du meme
+        // bloc du coeur (CoaRefuseParAuraDuLanceur).
+        if (CoaRefuseParAuraDuLanceur(bot, info))
             continue;
 
         // Banc d'arene du 10/10 (CoaRefuseParFormeOuArme, CoaPeutPayer) : forme absente, arme requise absente,
@@ -1400,8 +1445,8 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             // Spell::GetCastTime() AVANT prepare, donc 0 (Spell.cpp:671) -- c'est prepare qui refuse, sur ce drapeau.
             // Condition RECOPIEE de prepare : drapeau de mouvement, ni grace de Manastorm, ni sort mobile du coeur
             // (Unit::CanCastSpellWhileMoving : sorts Tinker, Starcaller, Witch Doctor... et aura 313).
-            if (bot->isMoving() && info->CalcCastTime(bot) && (info->InterruptFlags & SPELL_INTERRUPT_FLAG_MOVEMENT) &&
-                !bot->HasManastormMovementGrace() && !bot->CanCastSpellWhileMoving(info))
+            // Banc du 11/10 (tour 7) : et la canalisation sans temps d'incantation (CoaRefuseEnMouvement).
+            if (CoaRefuseEnMouvement(bot, info))
             {
                 bool const voulu = CoaAreneMouvementVoulu(botAI);
                 // Jamais pendant une charge, un saut ou sous controle (UNIT_STATE_LOST_CONTROL) : arreter couperait la

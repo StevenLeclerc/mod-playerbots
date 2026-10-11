@@ -120,7 +120,14 @@ struct CoaAreneEtat
     // Spell, jamais dereferencee), pour compter chaque incantation une fois ; echec d'interruption deja note pour elle.
     uint32 incantationAdvSort = 0;
     uintptr_t incantationAdvSpell = 0;
-    bool incantationAdvRateeNotee = false;
+    // Banc du 11/10 (tour 7) : l'incantation dont l'interruption a deja ete jugee (meme identite sort + adresse), et si
+    // elle est comptee ratee. Une ratee suivie d'un succes sur la MEME incantation (recharge globale finie 250 ms plus
+    // tard) est decomptee : avant, elle restait ratee (4 cas sur 24 au tour 7). Remis a zero par CoaAreneMaj a chaque
+    // nouvelle incantation vue.
+    uint32 interruptionJugeeSort = 0;
+    uintptr_t interruptionJugeeSpell = 0;
+    bool interruptionJugeeRatee = false;
+    uint32 interruptionsRattrapees = 0;
     uint32 prochaineInterruptionMs = 0;
     uint32 prochainDispelSoiMs = 0;
     // Fenetre de burst en cours : aura de controle qui l'a ouverte, fin prevue (getMSTime), un sort deja lance dedans.
