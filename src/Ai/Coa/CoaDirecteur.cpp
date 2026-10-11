@@ -5517,6 +5517,8 @@ void SuivreInvoques()
 #include "CoaDirecteurObjectifs.inc"
 // Chefs a mecaniques (10/10/2026) : paliers, bouclier lie, degats en % (fragment a part, meme espace).
 #include "CoaDirecteurBoss.inc"
+// Ressources rares des evenements (11/10/2026) : la tranche suit le niveau du MONSTRE (fragment a part).
+#include "CoaDirecteurRessources.inc"
 
 // ------------------------------------------------------------------ lot D4c : prime et morts tracees
 //
@@ -10620,6 +10622,7 @@ void AddSC_coa_directeur()
     new coa_directeur_dose_unitscript();       // lot G : degats doses
     new coa_directeur_coffre_globalscript();   // lot G : qui ouvre le coffre
     new coa_directeur_coffre_playerscript();   // lot G : chacun sa tranche au coffre
+    new coa_directeur_ressources_globalscript();   // ressources rares : tranche du niveau du monstre
     new coa_directeur_commandscript();
     new coa_directeur_worldscript();
     new coa_directeur_playerscript();

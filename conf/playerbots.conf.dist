@@ -4186,6 +4186,17 @@ AiPlayerbot.Directeur.EvenementArriveeCiel = 0
 #        Default: 0 (humain seul : comportement d'avant, a l'identique)
 AiPlayerbot.Directeur.EvenementAncreBot = 0
 
+#    AiPlayerbot.Directeur.RessourcesNiveauMonstre
+#        Ressources rares des evenements (11/10/2026, coa-project/docs/CONCEPTION-ressources-rares-evenements.md
+#        § 3.1, decision D4a) : au tirage du butin d'une CREATURE, une ressource 9100100-9100149 (rang x0-x7 : fragments
+#        et essences des tranches 1-34, 35-54, 55-67, 68-80) n'est gardee que si sa tranche est celle du NIVEAU DE LA
+#        CREATURE pillee ; les autres prennent une chance nulle. Un 80 qui aide un 10 recoit la ressource basse.
+#        A 1 AVANT d'appliquer la migration du butin 2026_10_11_11 (tables sans condition : sans l'option, chaque corps
+#        tirerait les QUATRE tranches) ; a 0 seulement APRES son -RETOUR.
+#        Lue par PlayerbotAIConfig::Initialize seulement : `.reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0 (rien n'est touche : comportement d'avant, a l'identique)
+AiPlayerbot.Directeur.RessourcesNiveauMonstre = 0
+
 #    AiPlayerbot.Directeur.EvenementInvoquesParJoueur
 #        invoques VIVANTS par joueur au plus (1-24), 64 en tout dans le royaume ; au-dela, refus `plein`.
 #        Default: 12

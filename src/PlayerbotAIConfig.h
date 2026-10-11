@@ -583,6 +583,10 @@ public:
     // mercenaire peut servir d'ANCRE (joueur de reference) a `evenement` aux lieux point/haut, a invoquer/ordre et a la
     // presence `peupler` F-/T-/L-/Q- (CoaDirecteur.cpp, AncreDEvenement). Faux (defaut) : humain seul, comme avant.
     bool directeurEvenementAncreBot;
+    // Ressources rares des evenements (11/10/2026, coa-project/docs/CONCEPTION-ressources-rares-evenements.md § 3.1,
+    // decision D4a) : au tirage du butin d'une creature, une ressource 9100100-9100149 n'est gardee que si sa tranche
+    // est celle du NIVEAU DE LA CREATURE (CoaDirecteurRessources.inc). Faux (defaut) : rien n'est touche.
+    bool directeurRessourcesNiveauMonstre;
     uint32 directeurEvenementInvoquesParJoueur;       // invoques vivants par joueur (1-24)
     uint32 directeurEvenementInvocationDistanceYd;    // point d'apparition a au plus N yd du joueur (20-250)
     // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas

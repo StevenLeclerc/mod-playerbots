@@ -909,6 +909,12 @@ bool PlayerbotAIConfig::Initialize()
     directeurEvenementArriveeCiel = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementArriveeCiel", false);
     // Autonomie des evenements (11/10/2026) : un bot pour ancre d'evenement. Eteinte par defaut : rien ne change.
     directeurEvenementAncreBot = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementAncreBot", false);
+    // Ressources rares des evenements (11/10/2026) : la tranche suit le niveau du monstre. Eteinte : rien ne change.
+    directeurRessourcesNiveauMonstre =
+        sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.RessourcesNiveauMonstre", false);
+    // Preuve lisible de la valeur CHARGEE (prerequis de la migration du butin 2026_10_11_11) : une ligne par lecture.
+    LOG_INFO("playerbots", "coa directeur ressources: sous_action=config niveau_monstre={}",
+             directeurRessourcesNiveauMonstre ? 1 : 0);
     directeurEvenementInvoquesParJoueur =
         std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementInvoquesParJoueur", 12), 1, 24);
     directeurEvenementInvocationDistanceYd = std::clamp<uint32>(
