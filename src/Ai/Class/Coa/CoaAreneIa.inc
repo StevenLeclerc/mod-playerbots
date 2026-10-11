@@ -1736,7 +1736,8 @@ void CoaAreneTracerTick(PlayerbotAI* botAI, Player* bot)
     float const dotsPrevus = CoaAreneDotsPrevus(bot, 0, nDots, true);
     LOG_INFO("playerbots.coa", "coa arene trace: guid={} tick action={} moteur={} cible={} cible_adversaire={} dist={:.1f}"
              " vue={} pv_bot={:.0f} pv_cible={:.0f} pile_advantage={} bouge={} omises={} adv={} vue_adv={} dist_adv={:.1f}"
-             " portee_adv={} cacheur={} mana_pct={:.0f} energie={} furtif={} dot_prevu_pct={:.0f} survie={}",
+             " portee_adv={} cacheur={} mana_pct={:.0f} energie={} furtif={} dot_prevu_pct={:.0f} survie={} rage={} focus={}"
+             " verrou={}",
              bot->GetGUID().GetCounter(),
              action, botAI->GetState() == BOT_STATE_COMBAT ? "combat" : "hors_combat",
              cible ? cible->GetGUID().GetCounter() : 0, CoaAreneEstAdversaire(etat, cible) ? 1 : 0,
@@ -1746,7 +1747,12 @@ void CoaAreneTracerTick(PlayerbotAI* botAI, Player* bot)
              adv ? bot->GetExactDist2d(adv) : -1.0f, porteeAdv ? 1 : 0, CoaAreneCacheurActif(bot, etat) ? 1 : 0,
              bot->GetMaxPower(POWER_MANA) ? bot->GetPowerPct(POWER_MANA) : -1.0f,
              bot->GetMaxPower(POWER_ENERGY) ? int32(bot->GetPower(POWER_ENERGY)) : -1, bot->HasStealthAura() ? 1 : 0,
-             bot->GetMaxHealth() ? dotsPrevus * 100.0f / float(bot->GetMaxHealth()) : 0.0f, etat.survieNiveau);
+             bot->GetMaxHealth() ? dotsPrevus * 100.0f / float(bot->GetMaxHealth()) : 0.0f, etat.survieNiveau,
+             // 11/10 (classe 31 spe 95, Boulder Dash) : rage et focus en points (comme le cout des sorts, rage x10), -1 sans
+             // reserve ; verrou = aura 263 en cours (plus aucun sort). EN FIN de ligne (contrat de outils/banc-arene.py).
+             bot->GetMaxPower(POWER_RAGE) ? int32(bot->GetPower(POWER_RAGE)) : -1,
+             bot->GetMaxPower(POWER_FOCUS) ? int32(bot->GetPower(POWER_FOCUS)) : -1,
+             bot->HasPlayerFlag(PLAYER_ALLOW_ONLY_ABILITY) ? 1 : 0);
 }
 
 // Les sorts d'attaque du bot qui creent de la distance, prets a partir sur cette cible maintenant : ni en
@@ -1941,6 +1947,7 @@ char const* CoaAreneRefusTactiqueNom(uint8 refus)
         case COA_TACTIQUE_HORS_CONE:  return "tactique_hors_cone";
         case COA_TACTIQUE_REVELATION: return "tactique_revelation_inutile";
         case COA_TACTIQUE_DEJA_POSE:  return "tactique_debuff_deja_pose";
+        case COA_TACTIQUE_VERROU:     return "tactique_verrou";
         default:                      return "-";
     }
 }
@@ -1952,9 +1959,83 @@ char const* CoaAreneRefusTactiqueNom(uint8 refus)
 //
 // Revue du 11/10 : une zone qui touche un AUTRE ennemi (familier, gardien, totem de l'adversaire, ou la cible courante
 // du bot) a un effet reel -- elle n'est jamais ecartee pour la seule absence de l'adversaire (regles 1 et 3).
+// Regle 4, le verrou (11/10, banc de 13:00-13:20 Paris, classe 31 spe 95, gladiateur 440) : Boulder Dash 500692 enferme
+// le lanceur 10 s -- chaque coup 500693 (toutes les 500 ms) repose sur lui l'aura 263 (ALLOW_ONLY_ABILITY : plus aucun
+// sort, soin compris ; CastFirst les ecarte par `seulementCapacites`) et 500692 porte l'aura 241 (FORCE_MOVE_FORWARD,
+// que seul un client execute : un bot reste sur place). Lance a 20-28 yd de l'adversaire, a la reprise de vue, le bot
+// restait fige 8 a 10 s sans toucher personne ni se soigner : mana gelee, 0 sort, 0 degat jusqu'a la mort (matchs 13,
+// 21 et 23 du banc). Rend le rayon de ses coups (zone d'ennemis autour du lanceur, lue sur le sort et ses sorts
+// declenches) si le sort pose l'aura 263 sur le lanceur, 0 si aucune zone n'est lue, -1 si ce n'est pas un verrou.
+// Un verrou qui rend le lanceur INSENSIBLE (immunite aux degats ou a une ecole posee sur lui : Liquify 806310, 263 +
+// immunite 40) est un defensif, pas une ruee : il n'est pas un verrou ici (-1), la survie le lance quand il faut.
+float CoaAreneRayonVerrou(Player* bot, SpellInfo const* info)
+{
+    bool verrou = false;
+    bool immunite = false;
+    float rayon = 0.0f;
+    auto lire = [&](SpellInfo const* sort)
+    {
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        {
+            SpellEffectInfo const& effet = sort->Effects[i];
+            if (!effet.Effect)
+                continue;
+            bool const surSoi = !effet.TargetA.GetTarget() || effet.TargetA.GetTarget() == TARGET_UNIT_CASTER;
+            if (surSoi && effet.IsAura(SPELL_AURA_ALLOW_ONLY_ABILITY))
+                verrou = true;
+            if (surSoi && (effet.IsAura(SPELL_AURA_DAMAGE_IMMUNITY) || effet.IsAura(SPELL_AURA_SCHOOL_IMMUNITY)))
+                immunite = true;
+            if (CoaAreneEffetZoneDuLanceur(effet) && effet.HasRadius())
+                rayon = std::max(rayon, effet.CalcRadius(bot));
+        }
+    };
+    lire(info);
+    // Un niveau de declenchement : sort declenche, ou aura periodique qui declenche (Boulder Dash : aura 23 -> 500693).
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effet = info->Effects[i];
+        bool const declenche = effet.Effect == SPELL_EFFECT_TRIGGER_SPELL ||
+                               effet.IsAura(SPELL_AURA_PERIODIC_TRIGGER_SPELL) ||
+                               effet.IsAura(SPELL_AURA_PERIODIC_TRIGGER_SPELL_WITH_VALUE);
+        if (!declenche || !effet.TriggerSpell || effet.TriggerSpell == info->Id)
+            continue;
+        SpellInfo const* sort = sSpellMgr->GetSpellInfo(effet.TriggerSpell);
+        if (!sort)
+            continue;
+        // Revue du 11/10 : une aura periodique posee sur un AUTRE que le lanceur declenche son sort depuis ce porteur
+        // (AuraEffect::HandlePeriodicTriggerSpellAuraTick : `target`, sauf NeedsToBeTriggeredByCaster) -- son 263
+        // « sur soi » enfermerait le porteur, pas le bot. Seul le sort declenche par le bot lui-meme est lu.
+        bool const auraSurSoi = !effet.TargetA.GetTarget() || effet.TargetA.GetTarget() == TARGET_UNIT_CASTER;
+        if (effet.Effect == SPELL_EFFECT_TRIGGER_SPELL || auraSurSoi || sort->NeedsToBeTriggeredByCaster(info, i))
+            lire(sort);
+    }
+    return verrou && !immunite ? rayon : -1.0f;
+}
+
 uint8 CoaAreneRefusTactique(Player* bot, SpellInfo const* info, Unit* adv, Unit* cible)
 {
-    if (!bot || !info || !adv || info->NeedsExplicitUnitTarget())
+    if (!bot || !info || !adv)
+        return COA_TACTIQUE_AUCUN;
+
+    // Regle 4 : pour un bot qui n'est pas de melee, un verrou ne part que si l'adversaire est deja sous ses coups (voir
+    // CoaAreneRayonVerrou). Une melee le garde comme avant : la ruee (+70 % de vitesse, aura 31) la porte au contact par
+    // ses propres deplacements (retour, « reach melee »), et ses coups frappent a l'arrivee (spe 59, 2543 et 461, nuit
+    // du 10-11/10). Un tireur, lui, se plante a portee de tir (CoaArenePlante) et reste enferme sans rien toucher.
+    // Un verrou a cible designee suit le coeur (arbitrage plus bas).
+    // Revue du 11/10 : le rayon (lecture de SpellInfo, sans verrou) d'abord ; le style ensuite, et seulement pour un
+    // verrou -- GetCoaStyle prend le verrou global de AscensionClassService (GetActiveSpecialization), et ce test tourne
+    // pour chaque sort a chaque CastFirst.
+    float rayonVerrou = adv->GetMap() != bot->GetMap() ? -1.0f : CoaAreneRayonVerrou(bot, info);
+    if (rayonVerrou >= 0.0f && GetCoaStyle(bot) == CoaStyle::Melee)
+        rayonVerrou = -1.0f;
+    // Revue du 11/10 (arbitrage) : seulement un verrou dont la zone est LUE et qui ne vise pas l'adversaire. Un verrou a
+    // cible designee (Hurricane 645435 : son script frappe la cible a toute distance) ou a zone non reconnue (Fury of the
+    // Illidari 561216, cibles 18/16) suit le coeur -- jamais plus strict que lui sans preuve que le sort est vain.
+    if (rayonVerrou > 0.0f && !info->NeedsExplicitUnitTarget() &&
+        bot->GetExactDist(adv) > rayonVerrou + bot->GetLeewayBonusRadius() + adv->GetObjectSize() + CoaAreneMargeZone)
+        return COA_TACTIQUE_VERROU;
+
+    if (info->NeedsExplicitUnitTarget())
         return COA_TACTIQUE_AUCUN;
 
     // Les ennemis qui comptent : l'adversaire d'abord, puis la cible du lancer et les unites qu'il controle (familier,

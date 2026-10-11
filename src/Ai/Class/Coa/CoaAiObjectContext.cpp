@@ -1221,7 +1221,8 @@ enum CoaAreneRefusTactiqueType : uint8
     COA_TACTIQUE_HORS_ZONE,     // adversaire hors du rayon de toutes les zones du sort
     COA_TACTIQUE_HORS_CONE,     // dans le rayon d'un cone, mais pas devant : un demi-tour peut suffire
     COA_TACTIQUE_REVELATION,    // sort de revelation, adversaire ni furtif ni invisible
-    COA_TACTIQUE_DEJA_POSE      // debuff de zone deja sur l'adversaire, ni a renouveler ni a empiler
+    COA_TACTIQUE_DEJA_POSE,     // debuff de zone deja sur l'adversaire, ni a renouveler ni a empiler
+    COA_TACTIQUE_VERROU         // le sort enferme le lanceur (aura 263), adversaire hors de portee de ses coups
 };
 Unit* CoaAreneTactiqueAdversaire(PlayerbotAI* botAI, Player* bot);
 uint8 CoaAreneRefusTactique(Player* bot, SpellInfo const* info, Unit* adv, Unit* cible);
