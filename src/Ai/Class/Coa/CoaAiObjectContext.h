@@ -122,6 +122,14 @@ struct CoaAreneEtat
     // « familier_attente » (pourquoi le declencheur reste muet), une par raison toutes les 5 s.
     uint32 familierAttenteMs = 0;
     uint8 familierAttenteRaison = 0;
+    // Lot 19 (11/10, ouvertures) : monture de classe lue une fois par engagement (0 : aucune, ou pas d'attaque montee),
+    // essais d'attaque montee a portee sans rien lancer (au troisieme, le bot descend), debit de « ouverture_refus ».
+    bool montureLue = false;
+    uint32 montureClasseId = 0;
+    uint8 ouvertureMonteeEssais = 0;
+    uint32 ouvertureMonteeDebutMs = 0;  // premier tick monte portes ouvertes (plafond CoaAreneOuvertureMonteeMaxMs)
+    uint32 ouvertureRefusMs = 0;
+    uint8 ouvertureRefusRaison = 0;
     // Combat contre un humain (11/10, CoaAreneIa.inc, arene 1v1 et duel, CoaArene.IaCommune) : interruption,
     // dissipation sur soi, fenetre de burst apres un controle. Bilan : compteurs ci-dessous.
     // Incantation adverse suivie par CoaAreneMaj (les deux bras) : identite de la derniere vue (sort et adresse du
@@ -169,6 +177,7 @@ struct CoaAreneEtat
     uint32 pireCoupMs = 0;
     float survieSeuilDanger = 50.0f;
     uint32 survieControles = 0;        // controles lances par la survie faute de soin ou de defensif (bilan)
+    uint32 survieControleMs = 0;       // dernier controle de secours (lot 18 : au plus un par CoaAreneSurvieControleFenetreMs)
     uint32 survieArretMs = 0;          // dernier « survie_arret » (au plus un toutes les 2 s)
     uint32 retourVuDepuisMs = 0;       // retour d'un tireur : adversaire en vue sans interruption depuis (0 : pas en vue)
     // Dissipation sur soi, politique de cout (IaSurvie) : attente apres un succes (3 -> 6 -> 12 s, plafond 15 s, doublee

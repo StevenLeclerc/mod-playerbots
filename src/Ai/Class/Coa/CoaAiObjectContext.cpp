@@ -1267,6 +1267,26 @@ SpellCastResult CoaPreControleCible(Player* bot, SpellInfo const* info, Unit* ta
     if (info->Effects[0].Effect == SPELL_EFFECT_OPEN_LOCK || info->Effects[0].Effect == SPELL_EFFECT_SKINNING)
         return SPELL_CAST_OK;
     /*
+     * Lot 18 (11/10, match humain id=43 : Overload Mechanical 707365 « mecaniques seulement », Call of the Maelstrom 654545
+     * « elementaires seulement » ; plus tot Mass Grave 803741, Ghoulify 800706) : SPELL_FAILED_TARGET_IS_PLAYER rendu par
+     * StrictCheck a chaque tour. RECOPIE de SpellInfo::CheckTarget (SpellInfo.cpp:1951-1983) : sur un joueur,
+     * SPELL_ATTR5_NOT_ON_PLAYER, puis CheckTargetCreatureType (TargetCreatureType contre le masque de type de la cible, cas
+     * Warlock/categorie 1179 compris).
+     *   - sort a cible unite (branche `else` de PlayerbotAI::CastSpell, PlayerbotAI.cpp:3973) : CheckCast l'appelle sur la
+     *     cible (Spell.cpp:5965) -- meme verdict, ou au pire un autre refus plus tot dans CheckTarget ;
+     *   - sort au sol ou a source (SetDst, aucune cible unite) : le coeur ne le refuserait pas, mais la selection des
+     *     cibles de zone passe chaque unite par le meme CheckTarget (implicit, Spell.cpp:1965 et 9199) -- le joueur vise
+     *     ne serait jamais touche. Limite : un familier du bon type pres de lui aurait pu l'etre (cas non rencontre).
+     *   Dans les DEUX cas, aucun changement de jeu : StrictCheck (appele juste apres par CastFirst) pose la cible unite
+     *   sur le Spell quel que soit le sort (SetUnitTarget, sans InitExplicitTargets), et Spell::CheckCast appelle
+     *   CheckTarget sur elle sans condition (Spell.cpp:5963-5967) -- il rendait deja TARGET_IS_PLAYER, hors banc. Ce test
+     *   n'ecarte rien de ce que StrictCheck accepte ; il evite le Spell construit, le demi-tour inutile et l'echec
+     *   consigne (RecordFailure : TARGET_IS_PLAYER ne figure plus dans les compteurs d'echec de CoaBots.log).
+     *   Cible non joueur (PNJ, familier) : non jugee ici, StrictCheck seul.
+     */
+    if (target->IsPlayer() && (info->HasAttribute(SPELL_ATTR5_NOT_ON_PLAYER) || !info->CheckTargetCreatureType(target)))
+        return SPELL_FAILED_TARGET_IS_PLAYER;
+    /*
      * Sort au sol (champ Targets de Spell.dbc = TARGET_FLAG_DEST_LOCATION) : PlayerbotAI::CastSpell le lance sur la
      * POSITION de la cible (targets.SetDst(*target), PlayerbotAI.cpp:3965), et Spell::CheckRange (strict, Spell.cpp:7251-
      * 7254) refuse OUT_OF_RANGE si cette position est a plus de max_range + GetLeewayBonusRadius() (+ taille du lanceur,
