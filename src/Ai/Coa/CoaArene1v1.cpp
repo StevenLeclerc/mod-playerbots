@@ -636,6 +636,159 @@ uint32 ArmerADistance(Player* bot, uint32& requis)
     return choisi;
 }
 
+/*
+ * Endurance a score egal (decision du commanditaire, 11/10 ~14:50 Paris). L'alignement sur le joueur fait descendre
+ * la fabrique jusqu'au BLANC (Reequiper(bot, ITEM_QUALITY_NORMAL)) : des pieces sans aucune statistique hors armure
+ * (enquete du 11/10 : 443 Witch Doctor 41, 11 pieces blanches, 1 298 PV ; 477 et 488 en gris et blanc). La regle
+ * d'alignement reste : ici, emplacement par emplacement, une piece blanche ou grise est remplacee par une piece BLANCHE
+ * ou VERTE qui porte de l'Endurance (puis la statistique principale) et dont le score mixte (CalcMixedGearScore, celui
+ * de ScoreEquipement) est INFERIEUR OU EGAL au sien -- le score moyen ne peut donc pas monter, l'alignement tient.
+ *
+ * Seulement les emplacements d'armure et de bijoux (jamais les armes : une verte plus basse en niveau d'objet a moins
+ * de DPS, la frappe du bot baisserait). Meme sous-classe d'armure que la piece portee (plaque reste plaque : l'armure
+ * ne baisse pas d'un type). Statistiques FIXES d'item_template seulement : une piece a suffixe ou propriete aleatoire
+ * est ecartee (spellitemenchantment_dbc est vide, ses statistiques ne se lisent pas). Memes exclusions d'extension que
+ * la fabrique (InitEquipment, limitGearExpansion). Niveau requis du bot jusqu'a 20 niveaux en dessous.
+ * Rend le nombre de pieces remplacees. N'est appele QUE par Preparer (gladiateur ou bot de banc). FIL MONDE.
+ */
+uint32 EndurerEquipement(Player* bot)
+{
+    uint32 const niveau = bot->GetLevel();
+    // Statistique principale : la plus haute des trois apres l'equipement blanc (base de classe et de race).
+    Stats principale = STAT_STRENGTH;
+    for (Stats s : { STAT_AGILITY, STAT_INTELLECT })
+        if (bot->GetStat(s) > bot->GetStat(principale))
+            principale = s;
+    uint32 const modPrincipal = principale == STAT_STRENGTH ? ITEM_MOD_STRENGTH
+                                : principale == STAT_AGILITY ? ITEM_MOD_AGILITY
+                                                             : ITEM_MOD_INTELLECT;
+    auto valeur = [&](ItemTemplate const* proto, int32& endurance)
+    {
+        endurance = 0;
+        int32 v = 0;
+        for (uint32 i = 0; i < proto->StatsCount && i < MAX_ITEM_PROTO_STATS; ++i)
+        {
+            int32 const n = proto->ItemStat[i].ItemStatValue;
+            if (n <= 0)
+                continue;
+            uint32 const type = proto->ItemStat[i].ItemStatType;
+            if (type == ITEM_MOD_STAMINA)
+                endurance += n;
+            else if (type == modPrincipal || (modPrincipal == ITEM_MOD_INTELLECT && type == ITEM_MOD_SPELL_POWER))
+                v += n;
+        }
+        return 2 * endurance + v;
+    };
+
+    // Deux types d'inventaire au plus par emplacement ; INVTYPE_NON_EQUIP : aucun.
+    struct Emplacement { uint8 slot; InventoryType types[2]; };
+    static Emplacement const Emplacements[] = {
+        { EQUIPMENT_SLOT_HEAD, { INVTYPE_HEAD, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_NECK, { INVTYPE_NECK, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_SHOULDERS, { INVTYPE_SHOULDERS, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_CHEST, { INVTYPE_CHEST, INVTYPE_ROBE } },
+        { EQUIPMENT_SLOT_WAIST, { INVTYPE_WAIST, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_LEGS, { INVTYPE_LEGS, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_FEET, { INVTYPE_FEET, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_WRISTS, { INVTYPE_WRISTS, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_HANDS, { INVTYPE_HANDS, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_FINGER1, { INVTYPE_FINGER, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_FINGER2, { INVTYPE_FINGER, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_BACK, { INVTYPE_CLOAK, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_TRINKET1, { INVTYPE_TRINKET, INVTYPE_NON_EQUIP } },
+        { EQUIPMENT_SLOT_TRINKET2, { INVTYPE_TRINKET, INVTYPE_NON_EQUIP } },
+    };
+
+    uint32 remplacees = 0;
+    for (Emplacement const& e : Emplacements)
+    {
+        Item* porte = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, e.slot);
+        ItemTemplate const* protoPorte = porte ? porte->GetTemplate() : nullptr;
+        // Rien a remplacer : emplacement vide (la fabrique n'y met rien a ce niveau), ou deja une verte ou mieux.
+        if (!protoPorte || protoPorte->Quality > ITEM_QUALITY_NORMAL)
+            continue;
+        uint32 const plafond = PlayerbotFactory::CalcMixedGearScore(protoPorte->ItemLevel, protoPorte->Quality);
+        int32 endurancePortee = 0;
+        int32 meilleur = valeur(protoPorte, endurancePortee);
+        uint32 choisi = 0;
+        // Plafond, pas 0 : a valeur EGALE a celle de la piece portee, aucun remplacant (score <= plafond) ne passe ;
+        // sinon une piece qui porte deja de l'Endurance serait echangee pour rien contre une piece de score plus bas.
+        uint32 meilleurScore = plafond;
+        for (uint32 requis = niveau; requis + 20 > niveau; --requis)
+        {
+            for (InventoryType type : e.types)
+            {
+                if (type == INVTYPE_NON_EQUIP)
+                    continue;
+                for (uint32 id : sRandomItemMgr.GetEquipmentNew(requis, type))
+                {
+                    ItemTemplate const* proto = sObjectMgr->GetItemTemplate(id);
+                    if (!proto || proto->Quality < ITEM_QUALITY_NORMAL || proto->Quality > ITEM_QUALITY_UNCOMMON ||
+                        proto->RequiredLevel > niveau || proto->Duration || proto->RandomProperty ||
+                        proto->RandomSuffix || proto->Class != protoPorte->Class ||
+                        (proto->Class == ITEM_CLASS_ARMOR && proto->SubClass != protoPorte->SubClass))
+                        continue;
+                    if (sPlayerbotAIConfig.limitGearExpansion &&
+                        ((niveau <= 60 && id >= 23728) ||
+                         (niveau <= 70 && id >= 35570 && id != 36737 && id != 37739 && id != 37740)))
+                        continue;
+                    uint32 const score = PlayerbotFactory::CalcMixedGearScore(proto->ItemLevel, proto->Quality);
+                    // Borne basse (arbitrage du 11/10) : au moins 90 % du score de la piece portee -- l'alignement sur le
+                    // joueur reste fidele, l'echange ne fait qu'ajouter de l'Endurance a qualite d'objet comparable.
+                    if (score > plafond || score * 10 < plafond * 9)
+                        continue;
+                    int32 endurance = 0;
+                    int32 const v = valeur(proto, endurance);
+                    // L'Endurance d'abord : jamais une piece qui en porte moins que l'actuelle ; a valeur egale, le
+                    // score le plus proche du plafond (l'armure la plus haute).
+                    if (endurance <= 0 || endurance < endurancePortee || v < meilleur ||
+                        (v == meilleur && score <= meilleurScore))
+                        continue;
+                    uint16 dest = 0;
+                    // swap = vrai : l'emplacement est occupe ; restent competence, niveau, classe, race, unique.
+                    if (bot->CanEquipNewItem(e.slot, dest, id, true) != EQUIP_ERR_OK)
+                        continue;
+                    choisi = id;
+                    meilleur = v;
+                    meilleurScore = score;
+                }
+            }
+            if (!requis)
+                break;
+        }
+        if (!choisi || choisi == protoPorte->ItemId)
+            continue;
+        bot->DestroyItem(INVENTORY_SLOT_BAG_0, e.slot, true);
+        uint16 dest = 0;
+        if (bot->CanEquipNewItem(e.slot, dest, choisi, false) != EQUIP_ERR_OK || !bot->EquipNewItem(dest, choisi, true))
+        {
+            // L'ancienne piece est detruite : on la repose (meme objet, deja juge portable avant).
+            uint16 retour = 0;
+            bool const repose = bot->CanEquipNewItem(e.slot, retour, protoPorte->ItemId, false) == EQUIP_ERR_OK &&
+                                bot->EquipNewItem(retour, protoPorte->ItemId, true);
+            LOG_INFO("playerbots", "coa arene1v1: endurance gladiateur={} emplacement={} objet={} refuse ancien={}"
+                     " repose={}", bot->GetGUID().GetCounter(), uint32(e.slot), choisi, protoPorte->ItemId,
+                     repose ? 1 : 0);
+            continue;
+        }
+        ++remplacees;
+    }
+    return remplacees;
+}
+
+// Endurance FIXE portee (item_template, sans suffixe aleatoire) : pour la trace de Preparer.
+int32 EndurancePortee(Player* bot)
+{
+    int32 total = 0;
+    for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
+        if (Item* it = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+            if (ItemTemplate const* proto = it->GetTemplate())
+                for (uint32 s = 0; s < proto->StatsCount && s < MAX_ITEM_PROTO_STATS; ++s)
+                    if (proto->ItemStat[s].ItemStatType == ITEM_MOD_STAMINA)
+                        total += proto->ItemStat[s].ItemStatValue;
+    return total;
+}
+
 // FIL MONDE, AUCUN verrou tenu (Randomize -> ResetStrategies -> fabrique, qui prend le
 // verrou partage du Directeur). La recette de la reserve du Directeur
 // (CoaDirecteur.cpp, preparation `P-`) : PlayerbotFactory::Randomize(false) au niveau
@@ -665,6 +818,7 @@ void Preparer(Player* bot, uint32 niveau, Player* reference, uint32 idMatch)
     uint32 const scoreAvant = ScoreEquipement(bot, bot->GetLevel());
     uint32 scoreApres = scoreAvant;
     uint32 reequipe = 0;
+    bool versLeBas = false;  // reequipe ne suffit pas : vers le haut il vaut RandomGearQualityLimit, qui peut etre 2
     if (reference && scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur)
     {
         Reequiper(bot, 0);
@@ -677,7 +831,22 @@ void Preparer(Player* bot, uint32 niveau, Player* reference, uint32 idMatch)
             break;
         Reequiper(bot, qualite);
         reequipe = qualite;
+        versLeBas = true;
         scoreApres = ScoreEquipement(bot, bot->GetLevel());
+    }
+    // Endurance a score egal (11/10) : seulement apres un reequipement d'alignement, sur les pieces blanches ou grises.
+    // Le score ne peut que rester egal ou baisser (EndurerEquipement) : scoreApres est relu pour la trace.
+    int32 const enduranceAvant = EndurancePortee(bot);
+    bot->UpdateAllStats();
+    uint32 const pvMaxAvant = bot->GetMaxHealth();
+    uint32 piecesEndurance = 0;
+    // Arbitrage du 11/10 : seulement apres un reequipement VERS LE BAS (boucle vert puis blanc) ; apres un
+    // reequipement vers le haut, le bot est deja sous le joueur, l'echange creuserait l'ecart.
+    if (versLeBas)
+    {
+        piecesEndurance = EndurerEquipement(bot);
+        if (piecesEndurance)
+            scoreApres = ScoreEquipement(bot, bot->GetLevel());
     }
     // APRES tout reequipement (qui detruit et refait l'emplacement a distance) : l'arme que ses sorts exigent passe
     // avant la regle d'alignement (elle n'entre pas dans ScoreEquipement, et reste blanche ou verte).
@@ -699,10 +868,12 @@ void Preparer(Player* bot, uint32 niveau, Player* reference, uint32 idMatch)
         bot->SetPower(POWER_MANA, bot->GetMaxPower(POWER_MANA));
     LOG_INFO("playerbots", "coa arene1v1: preparation id={} gladiateur={} niveau_avant={} niveau_apres={} niveau_joueur={}"
              " score_joueur={} score_avant={} score_apres={} reequipe={} classe={} specialisation={} spe_changee={}"
-             " duree_ms={} arme_distance={} arme_requise=0x{:x}", idMatch, bot->GetGUID().GetCounter(), avant,
+             " duree_ms={} arme_distance={} arme_requise=0x{:x} pieces_endurance={} endurance_avant={}"
+             " endurance_apres={} pv_max_avant={} pv_max_apres={}", idMatch, bot->GetGUID().GetCounter(), avant,
              uint32(bot->GetLevel()), niveau, scoreJoueur, scoreAvant, scoreApres, reequipe, uint32(bot->getClass()),
              GetAscensionActiveSpecialization(bot), specialisation ? 1 : 0, GetMSTimeDiffToNow(debutMs), armeDistance,
-             armeRequise);
+             armeRequise, piecesEndurance, enduranceAvant, EndurancePortee(bot), pvMaxAvant,
+             uint32(bot->GetMaxHealth()));
 }
 
 // ------------------------------------------------------------------ defis CoA
