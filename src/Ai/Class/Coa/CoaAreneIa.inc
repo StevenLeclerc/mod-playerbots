@@ -84,6 +84,8 @@ constexpr uint32 CoaAreneRetourReessaiMs = IN_MILLISECONDS;
 constexpr uint32 CoaAreneRetourJournalMs = 5 * IN_MILLISECONDS;
 // Retour d'urgence (immobile, hors de vue, sous les degats) : une relance par 300 ms au plus, hors du delai ci-dessus.
 constexpr uint32 CoaAreneRetourUrgenceMs = 300;
+// Retour d'un tireur (11/10, match id=18) : la vue doit tenir ce temps, course continuee, avant l'arret.
+constexpr uint32 CoaAreneRetourVueTenueMs = 700;
 // Burst a pile pleine (revue du 10/10 soir) : seulement cible ralentie/controlee ou sous 60 % ; au-dela de 4 s
 // de pile pleine sans fenetre, chaque generateur est perdu (pas de 6e charge) : on depense quand meme.
 // 4 s et non plus 8 (lot 3, demande du commanditaire) : a ~40 de Focus par generateur, 8 s de pile tenue
@@ -121,6 +123,10 @@ constexpr float CoaAreneSurvieDangerPv = 50.0f;
 constexpr float CoaAreneSurvieCritiquePv = 30.0f;
 constexpr float CoaAreneSurviePentePv = 15.0f;
 constexpr float CoaAreneSurvieDotsPct = 25.0f;
+// Palier pression : soin DIRECT seulement sous 80 % (un soin periodique, lui, part a toute vie).
+constexpr float CoaAreneSurvieSoinPressionPv = 80.0f;
+// Sort d'entrave qui rend de la mana (Time Out!) : outil de mana seulement sous ce pourcentage.
+constexpr float CoaAreneSurvieManaOutilPct = 25.0f;
 // Defensif « a faible cout » du palier pression : recharge (RecoveryTime / CategoryRecoveryTime) de 60 s au plus.
 constexpr uint32 CoaAreneSurvieRechargeLegereMs = 60 * IN_MILLISECONDS;
 // Fuite hors de vue du palier critique (arene) : duree max, pause apres une fuite, cumul par engagement, essais.
@@ -711,10 +717,11 @@ void CoaAreneClore(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* ad
                     // poses, sources de degats hors de vue notees. EN FIN de ligne.
                     Acore::StringFormat(" survie_pression={} survie_danger={} survie_critique={} soins_soi={} "
                                         "survie_fuites={} dispel_refus_pv={} dispel_refus_mana={} dispel_refus_rentable={} "
-                                        "dispel_refus_reapplique={} refus_ressource={} soutiens={} sources_hors_vue={}",
+                                        "dispel_refus_reapplique={} refus_ressource={} soutiens={} sources_hors_vue={} survie_controles={}",
                                         etat.survieSorts[1], etat.survieSorts[2], etat.survieSorts[3], etat.soinsSoi,
                                         etat.survieFuites, etat.dispelRefus[1], etat.dispelRefus[2], etat.dispelRefus[3],
-                                        etat.dispelRefus[4], etat.refusRessource, etat.soutiens, etat.sourcesHorsVue));
+                                        etat.dispelRefus[4], etat.refusRessource, etat.soutiens, etat.sourcesHorsVue,
+                                        etat.survieControles));
     etat.actif = false;
     etat.survieNiveau = 0;
     etat.survieFuiteDebutMs = 0;
@@ -865,16 +872,31 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
         else
         {
             CoaArenePlage(botAI, bot, bas, haut);
-            if (bot->IsWithinLOSInMap(adv) && CoaAreneDistanceCombat(bot, adv) <= haut - CoaAreneMargePortee - 2.0f)
+            // 11/10 (match humain id=18, 477 classe 26) : arrete au PREMIER tick en vue, le tireur se posait au ras du
+            // pilier ; l'adversaire faisait un pas, la vue se perdait (vue 0/1 a 13-26 yd, bouge=0, 2 sorts de degats en
+            // tout le match). La vue doit tenir CoaAreneRetourVueTenueMs sans interruption, le bot continuant sa course,
+            // avant l'arret : il sort de l'angle du pilier.
+            bool const enVue = bot->IsWithinLOSInMap(adv);
+            if (!enVue)
+                etat.retourVuDepuisMs = 0;
+            else if (!etat.retourVuDepuisMs)
+                etat.retourVuDepuisMs = maintenant ? maintenant : 1;
+            if (enVue && CoaAreneDistanceCombat(bot, adv) <= haut - CoaAreneMargePortee - 2.0f &&
+                (getMSTimeDiff(etat.retourVuDepuisMs, maintenant) >= CoaAreneRetourVueTenueMs || !bot->isMoving()))
             {
                 if (bot->isMoving())
                     bot->StopMoving();
                 etat.retourEnCours = false;
+                etat.retourVuDepuisMs = 0;
             }
             else if (!bot->isMoving() && etat.dernierRetourMs && getMSTimeDiff(etat.dernierRetourMs, maintenant) > 500)
                 etat.retourEnCours = false;  // arrive, ou mouvement repris par autre chose : le declencheur jugera
         }
     }
+    // Revue survie v2 : la vue tenue repart de zero a chaque retour -- sinon une heure de vue restee d'un retour clos par
+    // une autre branche (melee, adversaire mort, arret) ferait arreter le retour suivant des son premier tick en vue.
+    if (!etat.retourEnCours)
+        etat.retourVuDepuisMs = 0;
 
     // L2, cachette en cours : sortie (voir CoaArenePilierSortie, plus bas).
     if (etat.pilierDebutMs)
@@ -908,7 +930,9 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
             CoaAreneSurvieFuiteSortie(bot, etat, adv, "fin", maintenant);
         else if (depuis >= CoaAreneSurvieFuiteMaxMs)
             CoaAreneSurvieFuiteSortie(bot, etat, adv, "duree", maintenant);
-        else if (bot->GetHealthPct() >= CoaAreneSurvieDangerPv)
+        // Revue survie v2 : et seulement si le palier du tick precedent est retombe sous danger (2) -- un danger arme par
+        // la vie PROJETEE (DoT, raison « dots ») a vie haute fermait la fuite des le tick suivant (« pv »), pause de 8 s.
+        else if (etat.survieNiveau < 2 && bot->GetHealthPct() >= std::max(CoaAreneSurvieDangerPv, etat.survieSeuilDanger))
             CoaAreneSurvieFuiteSortie(bot, etat, adv, "pv", maintenant);
         else if (depuis > 1500 && !bot->isMoving() && adv->IsWithinLOSInMap(bot))
             CoaAreneSurvieFuiteSortie(bot, etat, adv, "vu", maintenant);
@@ -925,35 +949,64 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
     // defensif (deux releves espaces de 2 s : une perte mesuree sur 2 a 4 s).
     etat.survieNiveau = 0;
     etat.survieRaison = "-";
+    etat.survieSeuilDanger = CoaAreneSurvieDangerPv;
     if (CoaAreneSurvieArmee() && etat.bras && etat.vuCeTick && (cadre == COA_ARENE_ARENE || cadre == COA_ARENE_DUEL) &&
         bot->IsAlive() && CoaAreneUnContreUn(bot))
     {
         float const pv = bot->GetHealthPct();
-        if (pv < CoaAreneSurvieCritiquePv)
+        // Seuils haussés par le pire coup recent X (% de la vie maximale, 15 s ; 11/10, match id=10 : un tick de Melt
+        // Reality a retire 38 % d'un coup, de 40 a 2 %) : soigner et se proteger AVANT d'arriver sous 2X (danger), le
+        // dernier recours avant de tomber sous X (critique). Bornes : danger 85 %, critique 60 %, pression au-dessus du
+        // danger (+15, 95 au plus). Sans coup recent, les seuils fixes (70/50/30).
+        float const pire = etat.pireCoupMs && getMSTimeDiff(etat.pireCoupMs, maintenant) <= CoaAreneSurviePireCoupMs
+            ? etat.pireCoupPct : 0.0f;
+        float const seuilCritique = std::max(CoaAreneSurvieCritiquePv, std::min(pire, 60.0f));
+        float const seuilDanger = std::max(CoaAreneSurvieDangerPv, std::min(2.0f * pire, 85.0f));
+        float const seuilPression = std::max(CoaAreneSurviePressionPv, std::min(seuilDanger + 15.0f, 95.0f));
+        etat.survieSeuilDanger = seuilDanger;
+        if (pv < seuilCritique)
         {
             etat.survieNiveau = 3;
-            etat.survieRaison = "pv";
+            etat.survieRaison = pire > CoaAreneSurvieCritiquePv ? "coup" : "pv";
         }
-        else if (pv < CoaAreneSurvieDangerPv)
+        else if (pv < seuilDanger)
         {
             etat.survieNiveau = 2;
-            etat.survieRaison = "pv";
+            etat.survieRaison = pv < CoaAreneSurvieDangerPv ? "pv" : "coup";
         }
-        else if (pv < CoaAreneSurviePressionPv)
+        else
         {
-            etat.survieNiveau = 1;
-            etat.survieRaison = "pv";
-        }
-        else if (std::max(etat.pvPrec, etat.pvRef) - pv >= CoaAreneSurviePentePv)
-        {
-            etat.survieNiveau = 1;
-            etat.survieRaison = "pente";
-        }
-        else if (bot->GetMaxHealth())
-        {
-            uint32 nombre = 0;
-            float const dots = CoaAreneDotsPrevus(bot, 0, nombre, true);
-            if (dots * 100.0f / float(bot->GetMaxHealth()) >= CoaAreneSurvieDotsPct)
+            // Part de la vie que les DoT portes prevoient sur 6 s, lue une fois et seulement si un palier en depend.
+            float dotsPct = -1.0f;
+            auto dots = [&]()
+            {
+                if (dotsPct < 0.0f)
+                {
+                    uint32 nombre = 0;
+                    dotsPct = bot->GetMaxHealth()
+                        ? CoaAreneDotsPrevus(bot, 0, nombre, true) * 100.0f / float(bot->GetMaxHealth()) : 0.0f;
+                }
+                return dotsPct;
+            };
+            // Vie PROJETEE a 6 s (vie moins DoT prevus) sous le seuil danger : le palier danger s'arme maintenant (11/10,
+            // match id=12 : Felsworn a 85 % sous 60 % de DoT prevus, rien lance, mort 8 s plus tard ; match id=6 : 84 % et
+            // 47 %). « dots_lourds » si elle passe meme sous le seuil critique : les gros defensifs sont alors permis.
+            if (dots() >= CoaAreneSurvieDotsPct && pv - dots() < seuilDanger)
+            {
+                etat.survieNiveau = 2;
+                etat.survieRaison = pv - dots() < seuilCritique ? "dots_lourds" : "dots";
+            }
+            else if (pv < seuilPression)
+            {
+                etat.survieNiveau = 1;
+                etat.survieRaison = "pv";
+            }
+            else if (std::max(etat.pvPrec, etat.pvRef) - pv >= CoaAreneSurviePentePv)
+            {
+                etat.survieNiveau = 1;
+                etat.survieRaison = "pente";
+            }
+            else if (dots() >= CoaAreneSurvieDotsPct)
             {
                 etat.survieNiveau = 1;
                 etat.survieRaison = "dots";
@@ -1737,7 +1790,7 @@ void CoaAreneTracerTick(PlayerbotAI* botAI, Player* bot)
     LOG_INFO("playerbots.coa", "coa arene trace: guid={} tick action={} moteur={} cible={} cible_adversaire={} dist={:.1f}"
              " vue={} pv_bot={:.0f} pv_cible={:.0f} pile_advantage={} bouge={} omises={} adv={} vue_adv={} dist_adv={:.1f}"
              " portee_adv={} cacheur={} mana_pct={:.0f} energie={} furtif={} dot_prevu_pct={:.0f} survie={} rage={} focus={}"
-             " verrou={}",
+             " verrou={} runique={}",
              bot->GetGUID().GetCounter(),
              action, botAI->GetState() == BOT_STATE_COMBAT ? "combat" : "hors_combat",
              cible ? cible->GetGUID().GetCounter() : 0, CoaAreneEstAdversaire(etat, cible) ? 1 : 0,
@@ -1752,7 +1805,10 @@ void CoaAreneTracerTick(PlayerbotAI* botAI, Player* bot)
              // reserve ; verrou = aura 263 en cours (plus aucun sort). EN FIN de ligne (contrat de outils/banc-arene.py).
              bot->GetMaxPower(POWER_RAGE) ? int32(bot->GetPower(POWER_RAGE)) : -1,
              bot->GetMaxPower(POWER_FOCUS) ? int32(bot->GetPower(POWER_FOCUS)) : -1,
-             bot->HasPlayerFlag(PLAYER_ALLOW_ONLY_ABILITY) ? 1 : 0);
+             bot->HasPlayerFlag(PLAYER_ALLOW_ONLY_ABILITY) ? 1 : 0,
+             // 11/10 (Necromancer 432, match id=13) : Command: Undead et Plague of Undeath se paient en puissance runique
+             // (PowerType 6, x10 comme le cout des sorts) ; -1 sans reserve. EN FIN de ligne.
+             bot->GetMaxPower(POWER_RUNIC_POWER) ? int32(bot->GetPower(POWER_RUNIC_POWER)) : -1);
 }
 
 // Les sorts d'attaque du bot qui creent de la distance, prets a partir sur cette cible maintenant : ni en
@@ -1819,6 +1875,10 @@ Unit* CoaAreneTactiqueAdversaire(PlayerbotAI* botAI, Player* bot)
 
 // L'effet vise les ennemis d'une zone ou d'un cone centre sur le lanceur : reference CASTER (cones, zones autour du
 // lanceur), ou SRC posee sur le lanceur par TargetA = TARGET_SRC_CASTER (Eclipse of Fury : A=22, B=15).
+// Zone posee par script sans rayon dans la donnee : 10 yd, le rayon reel de Cloudburst (802385, revue du 11/10) --
+// seul sort connu concerne ; 15 laissait partir des lancers vains entre 10 et ~17 yd.
+constexpr float CoaAreneRayonScript = 10.0f;
+
 bool CoaAreneEffetZoneDuLanceur(SpellEffectInfo const& effet)
 {
     for (SpellImplicitTargetInfo const* cible : { &effet.TargetA, &effet.TargetB })
@@ -1829,6 +1889,10 @@ bool CoaAreneEffetZoneDuLanceur(SpellEffectInfo const& effet)
         if (ref == TARGET_REFERENCE_TYPE_CASTER)
             return true;
         if (ref == TARGET_REFERENCE_TYPE_SRC && effet.TargetA.GetTarget() == TARGET_SRC_CASTER)
+            return true;
+        // 11/10 (match humain id=11) : Cloudburst 801838, zone ennemie 16 (DEST_AREA) autour d'une destination posee SUR
+        // le lanceur (18, TARGET_DEST_CASTER) -- lance a 111 yd de l'adversaire, non reconnu comme zone du lanceur.
+        if (ref == TARGET_REFERENCE_TYPE_DEST && effet.TargetA.GetTarget() == TARGET_DEST_CASTER)
             return true;
     }
     return false;
@@ -1948,6 +2012,8 @@ char const* CoaAreneRefusTactiqueNom(uint8 refus)
         case COA_TACTIQUE_REVELATION: return "tactique_revelation_inutile";
         case COA_TACTIQUE_DEJA_POSE:  return "tactique_debuff_deja_pose";
         case COA_TACTIQUE_VERROU:     return "tactique_verrou";
+        case COA_TACTIQUE_SURVIE_CHARGE: return "tactique_survie_charge";
+        case COA_TACTIQUE_SURVIE_INCANTATION: return "tactique_survie_incantation";
         default:                      return "-";
     }
 }
@@ -2087,18 +2153,22 @@ uint8 CoaAreneRefusTactique(Player* bot, SpellInfo const* info, Unit* adv, Unit*
         zone = true;
         if (effet.Effect != SPELL_EFFECT_APPLY_AURA && effet.Effect != SPELL_EFFECT_APPLY_AREA_AURA_ENEMY)
             queDesAuras = false;
-        // Sans rayon lu dans SpellRadius.dbc, la zone est inconnue : jamais ecarte sur elle.
-        if (!effet.HasRadius())
+        SpellImplicitTargetInfo const& zoneCible =
+            effet.TargetA.GetSelectionCategory() == TARGET_SELECT_CATEGORY_CONE ? effet.TargetA : effet.TargetB;
+        bool const cone = zoneCible.GetSelectionCategory() == TARGET_SELECT_CATEGORY_CONE;
+        // Sans rayon lu dans SpellRadius.dbc, la zone du coeur ne touche personne : seul un script agit, a une distance que
+        // la donnee ne dit pas (Cloudburst : « ten-yard area », AscensionStormbringerTalents.cpp). 11/10 : un rayon
+        // SUPPOSE de CoaAreneRayonScript (15 yd, plus large que les 10 yd lus dans le seul script recense) remplace le
+        // « jamais ecarte » d'avant, qui laissait partir Cloudburst a 111 yd. Un cone sans rayon reste inconnu.
+        if (!effet.HasRadius() && cone)
         {
             dansUneZone = true;
             autreDansZone = true;
             continue;
         }
-        SpellImplicitTargetInfo const& zoneCible =
-            effet.TargetA.GetSelectionCategory() == TARGET_SELECT_CATEGORY_CONE ? effet.TargetA : effet.TargetB;
-        bool const cone = zoneCible.GetSelectionCategory() == TARGET_SELECT_CATEGORY_CONE;
         // Rayon du coeur (CalcRadius avec les modificateurs du lanceur, plus la marge de deplacement du lanceur).
-        float const rayonCoeur = effet.CalcRadius(bot) + bot->GetLeewayBonusRadius();
+        float const rayonCoeur = (effet.HasRadius() ? effet.CalcRadius(bot) : CoaAreneRayonScript) +
+                                 bot->GetLeewayBonusRadius();
         for (uint8 k = 0; k < nEnnemis; ++k)
         {
             Unit* u = ennemis[k];
@@ -2907,11 +2977,16 @@ public:
 // 50 % ou apres 20 points perdus, et ne prenait que KIND_DEFENSIVE.
 //
 // Trois paliers, calcules par CoaAreneMaj (CoaAreneEtat::survieNiveau), un declencheur et une action par palier :
-//   pression (39,4) : perte de 15 points en 2-4 s, DoT prevus >= 25 % de la vie sur 6 s, ou vie < 70 % -- un defensif a
+//   pression (39,4) : perte de 15 points en 2-4 s, DoT prevus >= 25 % de la vie sur 6 s, ou vie < 70 % -- soin sur soi
+//                     (periodique a toute vie, direct sous 80 %, incante seulement hors de vue), puis un defensif a
 //                     recharge courte (60 s au plus), le moins cher d'abord ;
-//   danger (39,6)   : vie < 50 % -- defensif majeur (recharge la plus longue d'abord), puis soin sur soi utilisable en
-//                     mouvement (instantane, ou sans interruption par le mouvement) ; un soin INCANTE seulement hors de vue
-//                     de l'adversaire ou sous un defensif du bot, et jamais pendant un deplacement voulu de l'IA ;
+//   danger (39,6)   : vie < 50 % (ou 2X, X le pire coup des 15 dernieres s), ou vie projetee a 6 s (vie moins DoT
+//                     prevus >= 25 %) sous ce seuil -- soin sur soi utilisable en mouvement
+//                     (instantane, ou sans interruption par le mouvement), soin INCANTE seulement hors de vue de l'adversaire
+//                     ou sous un defensif du bot, jamais pendant un deplacement voulu de l'IA ; PUIS defensif majeur
+//                     (recharge la plus longue d'abord ; recharge courte seulement tant que la vie reste >= 50 %) ;
+//   (11/10, match id=6) un sort qui met le lanceur hors d'etat d'agir (stase Time Out!) n'est jamais un defensif de ces
+//   paliers : dernier recours au palier critique, ou outil de mana (pression, mana < 25 %, hors de vue) ;
 //   critique (41)   : vie < 30 % -- tout ce qui precede, au-dessus des interruptions (40,5) ; si seul un soin incante
 //                     reste et que l'adversaire voit le bot, fuite hors de vue (arene : cachette de L2, 6 s au plus, 8 s
 //                     de pause, 20 s par engagement), puis le soin ; sans cachette, le soin incante quand meme.
@@ -2944,6 +3019,82 @@ bool CoaAreneSortMobile(Player* bot, SpellInfo const* info)
     return !info->IsChanneled() || info->IsActionAllowedChannel();
 }
 
+// Sort qui met son LANCEUR hors d'etat d'agir (11/10, match humain id=6, 13:54 Paris, Chronomancer 494) : Time Out! 803896
+// declenche (effet 142, TRIGGER_SPELL_WITH_VALUE, sur le lanceur) l'aura 802228 -- MOD_DAMAGE_PERCENT_TAKEN (87) et
+// MOD_STUN (12) sur soi, 6 s, « Unable to act ». Classify voit l'aura 87 du declenche et le classe KIND_DEFENSIVE ; sa
+// regle « selfIncapacitating » ne regarde que le sort lui-meme, pas ce qu'il declenche. Choisi comme « defensif majeur »
+// au palier danger (la recharge la plus longue d'abord), le bot est reste etourdi de 11:54:51 a 11:54:55, mana 74 -> 100,
+// sans aucun soin, l'adversaire hors de vue ; premier soin a 9 % de vie. Lu sur le sort et ses declenches (deux
+// niveaux) : une aura d'incapacite posee sur le lanceur (etourdissement, pacification, silence, peur, confusion, ou 263
+// qui n'autorise plus que le sort lui-meme). Le classement general n'est pas touche (monde ouvert inchange) : seule la
+// survie d'arene l'ecarte, sauf en dernier recours (critique, rien d'autre) ou comme outil de mana.
+// Revue survie v2 : un sort qui rend son lanceur INSENSIBLE (immunite aux degats ou a des ecoles posee sur lui, au sort
+// lui-meme) n'est pas une entrave mais un defensif majeur, comme pour la regle du verrou (CoaAreneRayonVerrou) : Liquify
+// 806310 (263 + immunite 40, 55 personnages le connaissent), Burrow 806154 (etourdissement + immunite 39, 36). Mesure sur
+// Spell.dbc du 11/10 : sans cette exception, ils ne partaient plus qu'en dernier recours, apres le controle de secours.
+bool CoaAreneImmuniseLanceur(SpellInfo const* info)
+{
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effet = info->Effects[i];
+        bool const surSoi = !effet.TargetA.GetTarget() || effet.TargetA.GetTarget() == TARGET_UNIT_CASTER;
+        if (surSoi && IsAuraEffect(effet) &&
+            (effet.ApplyAuraName == SPELL_AURA_DAMAGE_IMMUNITY || effet.ApplyAuraName == SPELL_AURA_SCHOOL_IMMUNITY))
+            return true;
+    }
+    return false;
+}
+
+bool CoaAreneSortEntrave(SpellInfo const* info, uint8 profondeur = 0)
+{
+    if (!profondeur && CoaAreneImmuniseLanceur(info))
+        return false;
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effet = info->Effects[i];
+        if (!effet.IsEffect())
+            continue;
+        // Un sort declenche n'est lu que pour ses effets EXPLICITEMENT sur le lanceur (une cible implicite nulle y designe
+        // la cible du declenchement, pas forcement le bot).
+        bool const surSoi = effet.TargetA.GetTarget() == TARGET_UNIT_CASTER || (!profondeur && !effet.TargetA.GetTarget());
+        if (surSoi && IsAuraEffect(effet))
+            switch (effet.ApplyAuraName)
+            {
+                case SPELL_AURA_MOD_STUN: case SPELL_AURA_MOD_PACIFY: case SPELL_AURA_MOD_SILENCE:
+                case SPELL_AURA_MOD_PACIFY_SILENCE: case SPELL_AURA_MOD_FEAR: case SPELL_AURA_MOD_CONFUSE:
+                case SPELL_AURA_ALLOW_ONLY_ABILITY:
+                    return true;
+                default:
+                    break;
+            }
+        // Sort declenche par le lanceur lui-meme : effet direct, ou aura periodique posee sur soi.
+        bool const declenche = effet.Effect == SPELL_EFFECT_TRIGGER_SPELL ||
+                               effet.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE ||
+                               (surSoi && (effet.IsAura(SPELL_AURA_PERIODIC_TRIGGER_SPELL) ||
+                                           effet.IsAura(SPELL_AURA_PERIODIC_TRIGGER_SPELL_WITH_VALUE)));
+        if (declenche && effet.TriggerSpell && effet.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* sort = sSpellMgr->GetSpellInfo(effet.TriggerSpell))
+                if (CoaAreneSortEntrave(sort, profondeur + 1))
+                    return true;
+    }
+    return false;
+}
+
+// Le sort rend de la mana au lanceur (Time Out! : ENERGIZE_PCT 137 et aura PERIODIC_ENERGIZE 24, MiscValue 0 = mana).
+bool CoaAreneRendMana(SpellInfo const* info)
+{
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effet = info->Effects[i];
+        if (effet.MiscValue != POWER_MANA)
+            continue;
+        if (effet.Effect == SPELL_EFFECT_ENERGIZE || effet.Effect == SPELL_EFFECT_ENERGIZE_PCT ||
+            effet.IsAura(SPELL_AURA_PERIODIC_ENERGIZE))
+            return true;
+    }
+    return false;
+}
+
 // Recharge propre du sort (la plus longue de RecoveryTime et CategoryRecoveryTime).
 uint32 CoaAreneRechargeMs(SpellInfo const* info)
 {
@@ -2969,37 +3120,126 @@ bool CoaAreneSousDefensif(PlayerbotAI* botAI, Player* bot)
 // Les sorts de survie du palier : `defensifs` puis `mobiles` (soins utilisables en courant), et a part `incantes` (soins
 // incantes). Defensif deja actif et soin periodique deja pose par le bot retires ; au palier pression, seuls les
 // defensifs a recharge courte, le moins cher d'abord.
+// Sorts qui soignent ou protegent PAR SERVITEUR (11/10, match humain id=13 : Necromancer 432 a lance Sacrifice Undead a
+// 38 % de vie sans aucun serviteur -- soin nul). Aucun critere de donnee commun ne les distingue : Sacrifice Undead 807939
+// soigne par 805031 (HEAL sur soi) declenche sur chaque serviteur (TARGET_SRC_CASTER) ; Bone Tithe 802121 n'a qu'un
+// SCRIPT_EFFECT ; Command: Undead 504868 deux DUMMY ; Transfer Life 801530 deja retire des soins par Classify (aura exigee
+// sur la cible). Le module les refuse a sa facon (AscensionNecromancerAbilities.cpp:146-157 : Minions(player) vide ->
+// NO_PET pour 802121 et 801530, CANT_DO_THAT pour les « Command ») ou pas du tout (807939). Liste explicite, raison
+// lue dans leur description : « for each Undead minion destroyed », « Siphon life from your undead minions »,
+// « Command your Undead minions », « only ever targets Raised minions ».
+bool CoaAreneSortParServiteur(uint32 id)
+{
+    switch (id)
+    {
+        case 807939: case 805027: case 802121: case 504868: case 801530:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Le bot a au moins une unite controlee vivante issue d'une invocation (familier, serviteurs, gardiens).
+bool CoaAreneAServiteur(Player* bot)
+{
+    for (Unit* u : bot->m_Controlled)
+        if (u && u->IsInWorld() && u->IsAlive() && u->GetUInt32Value(UNIT_CREATED_BY_SPELL))
+            return true;
+    return false;
+}
+
+// `entraves` (11/10, match id=6) : defensifs et soins qui mettent le lanceur hors d'etat d'agir (CoaAreneSortEntrave),
+// sortis des trois autres listes -- dernier recours au palier critique, ou outil de mana (voir l'action).
 struct CoaAreneSurvieListes
 {
-    std::vector<Usable> defensifs, mobiles, incantes;
+    std::vector<Usable> defensifs, mobiles, incantes, entraves;
 };
 
 CoaAreneSurvieListes CoaAreneSurvieSorts(PlayerbotAI* botAI, Player* bot, uint8 niveau)
 {
     CoaAreneSurvieListes l;
+    bool const sansServiteur = !CoaAreneAServiteur(bot);
     l.defensifs = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; });
     l.defensifs.erase(std::remove_if(l.defensifs.begin(), l.defensifs.end(), [&](Usable const& spell)
         {
             SpellInfo const* info = EffectiveSpell(bot, spell.info);
-            return CoaAreneAuraDeSoi(bot, spell.info, info) ||
-                   (niveau == COA_SURVIE_PRESSION && CoaAreneRechargeMs(info) > CoaAreneSurvieRechargeLegereMs);
+            if (CoaAreneAuraDeSoi(bot, spell.info, info) ||
+                (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id))))
+                return true;
+            if (CoaAreneSortEntrave(info))
+            {
+                l.entraves.push_back(spell);
+                return true;
+            }
+            return niveau == COA_SURVIE_PRESSION && CoaAreneRechargeMs(info) > CoaAreneSurvieRechargeLegereMs;
         }), l.defensifs.end());
     if (niveau == COA_SURVIE_PRESSION)
-    {
         CheapestFirst(bot, l.defensifs);
-        return l;
-    }
-    std::stable_sort(l.defensifs.begin(), l.defensifs.end(), [bot](Usable const& a, Usable const& b)
-        { return CoaAreneRechargeMs(EffectiveSpell(bot, a.info)) > CoaAreneRechargeMs(EffectiveSpell(bot, b.info)); });
+    else
+        std::stable_sort(l.defensifs.begin(), l.defensifs.end(), [bot](Usable const& a, Usable const& b)
+            { return CoaAreneRechargeMs(EffectiveSpell(bot, a.info)) > CoaAreneRechargeMs(EffectiveSpell(bot, b.info)); });
+    // Soins sur soi a TOUS les paliers depuis le 11/10 (match id=6 : le palier pression ne soignait jamais) ; l'action
+    // trie ce qu'elle en garde selon le palier.
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
              { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
         if ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info))
             continue;
+        if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
+            continue;
+        if (CoaAreneSortEntrave(info))
+        {
+            // Un sort a la fois defensif et soin n'y entre qu'une fois.
+            if (std::none_of(l.entraves.begin(), l.entraves.end(),
+                             [&](Usable const& e) { return e.info == spell.info; }))
+                l.entraves.push_back(spell);
+            continue;
+        }
         (CoaAreneSortMobile(bot, info) ? l.mobiles : l.incantes).push_back(spell);
     }
     return l;
+}
+
+// Un soin sur soi du kit est pret (recharge, ressource, etat : CoaAreneSortPret) ET la survie peut le lancer a ce tick.
+// Revue survie v2 : « quelle que soit la vue » figeait le bot -- un soin incante pret mais vu (fuite impossible : duel,
+// pause de 8 s, cumul de 20 s, aucune cachette ; ou soin periodique deja pose, que la survie retire) comptait comme pret,
+// la survie ne le lancait pas, et toute attaque de 2 s ou plus etait refusee : une classe dont toutes les attaques sont
+// longues restait plantee au palier danger (jusqu'a 85 % de vie quand un gros coup a hausse le seuil). Memes retraits que
+// CoaAreneSurvieSorts ; un soin incante ne compte que si l'adversaire ne voit pas le bot, ou sous un defensif.
+bool CoaAreneSoinPret(PlayerbotAI* botAI, Player* bot)
+{
+    Unit* adv = CoaAreneAdversaireVivant(bot, CoaAreneEtatDe(botAI));
+    int8 incanteLibre = -1;  // lu une fois, et seulement si un soin incante est pret
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+             { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        if (CoaAreneSortEntrave(info) || CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id) ||
+            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || !CoaAreneSortPret(botAI, bot, spell))
+            continue;
+        if (CoaAreneSortMobile(bot, info))
+            return true;
+        if (incanteLibre < 0)
+            incanteLibre = (!adv || !adv->IsWithinLOSInMap(bot) || CoaAreneSousDefensif(botAI, bot)) ? 1 : 0;
+        if (incanteLibre)
+            return true;
+    }
+    return false;
+}
+
+// Incantation longue d'attaque en survie (11/10, match humain id=17 : deux Geode Barrage de 2,5 s pendant que la vie
+// tombait de 94 a 26 %) : au palier danger ou critique, un sort d'attaque de 2 s d'incantation ou plus n'est pas lance
+// tant qu'un soin du kit est pret -- la survie ne l'a pas lance parce que l'adversaire voit le bot (soin incante) : il
+// faut rompre la vue (fuite) et soigner, pas s'enfermer 2 s dans une attaque. Sans soin pret (ressource a construire),
+// l'incantation part : elle peut etre ce qui construit la ressource.
+constexpr uint32 CoaAreneSurvieIncantationLongueMs = 2000;
+bool CoaAreneSurvieRefuseIncantation(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, uint16 kind)
+{
+    if (CoaAreneEtatDe(botAI).survieNiveau < COA_SURVIE_DANGER || (kind & KIND_HEAL) ||
+        !(kind & (KIND_DAMAGE | KIND_HOSTILE)) || info->CalcCastTime(bot) < int32(CoaAreneSurvieIncantationLongueMs))
+        return false;
+    return CoaAreneSoinPret(botAI, bot);
 }
 
 class CoaAreneSurvieTrigger : public Trigger
@@ -3082,6 +3322,40 @@ std::vector<Usable> CoaAreneSoutiensPrets(PlayerbotAI* botAI, Player* bot)
     return soutiens;
 }
 
+// Le sort soigne-t-il (effet de soin, soin periodique, ou declenchement periodique d'un soin ; deux niveaux) ?
+bool CoaAreneSortSoigne(SpellInfo const* info, uint8 profondeur = 0)
+{
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effet = info->Effects[i];
+        if (effet.Effect == SPELL_EFFECT_HEAL || effet.Effect == SPELL_EFFECT_HEAL_PCT ||
+            effet.IsAura(SPELL_AURA_PERIODIC_HEAL))
+            return true;
+        if (effet.TriggerSpell && effet.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* sort = sSpellMgr->GetSpellInfo(effet.TriggerSpell))
+                if (CoaAreneSortSoigne(sort, profondeur + 1))
+                    return true;
+    }
+    return false;
+}
+
+// Soutien au sol qui SOIGNE (11/10, match humain id=14 : Standard of Recovery 500260 du Gardien 448, pose a 0 % de vie).
+// Le soin d'un etendard du Gardien n'est pas dans le sort : l'invocation (SUMMON 50053) porte une aura posee par le script
+// (npc_ascension_guardian_standard) -- 500266, declenchement periodique de 500248 (HEAL) toutes les 3 s. Le lien sort ->
+// aura est la table generee du module, GuardianStandards::Contracts ; pour tout autre soutien, le sort lui-meme.
+bool CoaAreneSoutienSoigne(SpellInfo const* info)
+{
+    if (CoaAreneSortSoigne(info))
+        return true;
+    for (GuardianStandards::Contract const& contrat : GuardianStandards::Contracts)
+        if (contrat.spell == info->Id)
+        {
+            SpellInfo const* aura = sSpellMgr->GetSpellInfo(contrat.field);
+            return aura && CoaAreneSortSoigne(aura);
+        }
+    return false;
+}
+
 // Rotation d'attaque et de zone en arene 1v1 ou en duel (IaSurvie) : les sorts au sol de soutien en sont retires --
 // « coa arene soutien » les pose sur le bot ; vises sur l'adversaire, ils partaient a sa position (PlayerbotAI::CastSpell :
 // targets.SetDst(*target)).
@@ -3108,6 +3382,11 @@ public:
         if (!CoaAreneL1Actif(etat) || (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL) ||
             !CoaAreneEchu(etat.prochainSoutienMs) || etat.survieFuiteDebutMs)
             return false;
+        // 11/10 : en survie, l'etendard est l'affaire de « coa arene survie » (etendard de SOIN seulement). Sinon les deux
+        // se relaieraient : un seul etendard du Gardien a la fois, recharge commune de 5 s (categorie 1254) -- Might
+        // remplacerait Recovery, que la survie reposerait, et ainsi de suite.
+        if (etat.survieNiveau >= COA_SURVIE_PRESSION)
+            return false;
         Unit* adv = CoaAreneAdversaireVivant(bot, etat);
         if (!adv || bot->GetExactDist(adv) > CoaAreneSoutienDistanceMax || !bot->IsWithinLOSInMap(adv))
             return false;
@@ -3125,8 +3404,65 @@ public:
 // prend le moins cher d'abord (CheapestFirst) et ne lance aucun sort de mana qui laisserait le bot sous le cout du moins
 // cher de ses sorts de survie (defensif, ou soin sur soi) payes en mana. Sans sort de survie paye en mana, seul l'ordre
 // change. Rien n'est retire hors de ce cadre.
+// Reserve d'une ressource qui SE CONSTRUIT pour le soin (11/10, match humain id=17 : Hand of the Earthmother 502804 de
+// la classe 31 coute 350 de rage -- 35 affiches ; le bot est mort a 178). En survie (palier pression ou plus, arene 1v1
+// ou duel), pour chaque ressource autre que la mana dont un soin sur soi se paie, aucun sort d'attaque paye dans cette
+// ressource ne la fait passer sous le cout du moins cher de ces soins : la ressource s'accumule jusqu'au soin. Les sorts
+// payes autrement (generateurs payes en mana, comme Geode Barrage 502772) ne sont pas touches.
+void CoaAreneReserveSoin(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
+{
+    if (!CoaAreneSurvieArmee() || usable.empty())
+        return;
+    Unit* const adv = CoaAreneTactiqueAdversaire(botAI, bot);
+    uint8 const niveau = CoaAreneEtatDe(botAI).survieNiveau;
+    if (!adv || niveau < COA_SURVIE_PRESSION)
+        return;
+    // Revue survie v2 : seulement les soins que la survie lancerait une fois la ressource la -- ni en recharge (la reserve
+    // tenait toute la recharge pour rien), ni entrave, ni « par serviteur » sans serviteur, ni soin periodique deja pose ;
+    // au palier pression, un soin direct seulement sous CoaAreneSurvieSoinPressionPv ; un soin incante seulement hors de vue
+    // de l'adversaire ou sous un defensif. Sinon un soin que la survie ne lance jamais bloquait pour de bon toute attaque
+    // dont le cout plus la reserve depasse le maximum de la ressource (energie 100 : soin a 50, attaques a 55 et plus).
+    bool const sansServiteur = !CoaAreneAServiteur(bot);
+    bool const soinDirect = niveau >= COA_SURVIE_DANGER || bot->GetHealthPct() < CoaAreneSurvieSoinPressionPv;
+    int8 incanteLibre = -1;
+    int32 reserve[MAX_POWERS] = {};
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+             { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        if (info->PowerType >= MAX_POWERS || info->PowerType == POWER_MANA || info->PowerType == POWER_HEALTH)
+            continue;
+        if (bot->HasSpellCooldown(info->Id) || CoaAreneSortEntrave(info) || (!soinDirect && !(spell.kind & KIND_HOT)) ||
+            (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id))) ||
+            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)))
+            continue;
+        if (!CoaAreneSortMobile(bot, info))
+        {
+            if (incanteLibre < 0)
+                incanteLibre = (!adv->IsWithinLOSInMap(bot) || CoaAreneSousDefensif(botAI, bot)) ? 1 : 0;
+            if (!incanteLibre)
+                continue;
+        }
+        int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+        int32& r = reserve[info->PowerType];
+        if (cout > 0 && (!r || cout < r))
+            r = cout;
+    }
+    usable.erase(std::remove_if(usable.begin(), usable.end(), [bot, &reserve](Usable const& spell)
+        {
+            if (spell.kind & KIND_HEAL)
+                return false;
+            SpellInfo const* info = EffectiveSpell(bot, spell.info);
+            if (info->PowerType >= MAX_POWERS || !reserve[info->PowerType])
+                return false;
+            int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+            return cout > 0 && int32(bot->GetPower(Powers(info->PowerType))) - cout < reserve[info->PowerType];
+        }), usable.end());
+}
+
 void CoaAreneReserveMana(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
 {
+    CoaAreneReserveSoin(botAI, bot, usable);
     if (!CoaAreneSurvieArmee() || usable.empty() || !bot->GetMaxPower(POWER_MANA) ||
         bot->GetPowerPct(POWER_MANA) >= CoaAreneReserveManaPct || !CoaAreneTactiqueAdversaire(botAI, bot))
         return;
@@ -3457,6 +3793,99 @@ bool CoaAreneAFamilier(Player* bot)
     return false;
 }
 
+/*
+ * Life Force du Necromancer (11/10, match humain id=13, Necromancer 432 entre SANS serviteur ; analyse : aucun
+ * Necromancer n'a jamais leve un serviteur en arene). Capacite de 2 de base, chaque « Raise: » en occupe 1 a 3
+ * (Cost/Capacity, AscensionNecromancer.cpp:81-110) ; le module tient a jour deux auras sur le joueur (Sync, meme fichier
+ * :179-198) : 805011 = capacite totale (piles), 525004 = Life Force LIBRE (piles = capacite - occupee ; retiree a 0).
+ * Rend le nombre de piles libres, 0 sans l'aura. Revue du 11/10 : Sync tourne toutes les 500 ms pour tout Necromancer
+ * vivant et dans le monde (necromancer_lifecycle::OnUnitUpdate, AscensionNecromancer.cpp:393-406), et aussitot apres
+ * chaque invocation (Summon, AscensionNecromancerSummons.cpp:285) : l'aura retarde au plus d'une demi-seconde. Le module
+ * refuse de toute facon une invocation au-dela de la capacite (OnSpellCheckCast : SPELL_FAILED_ALREADY_HAVE_SUMMON,
+ * AscensionNecromancerAbilities.cpp:146, avant tout paiement -- pas de mana perdue sur ce refus).
+ */
+constexpr uint32 CoaAreneLifeForceTotale = 805011;
+constexpr uint32 CoaAreneLifeForceLibre = 525004;
+
+uint8 CoaAreneLifeForceLibrePiles(Player* bot)
+{
+    Aura const* libre = bot->GetAura(CoaAreneLifeForceLibre);
+    return libre ? libre->GetStackAmount() : 0;
+}
+
+// Kit a Life Force : le bot porte l'aura de capacite du module (posee par Sync, toutes les 500 ms, sur tout Necromancer
+// vivant, au moins 1 pile). Sans elle (autre classe, ou Necromancer mort), la regle « un seul familier » s'applique.
+bool CoaAreneKitLifeForce(Player* bot)
+{
+    return bot->HasAura(CoaAreneLifeForceTotale);
+}
+
+// Invocations reussies par engagement pour un kit a Life Force EN ARENE : capacite totale (piles de 805011, bornees a 6)
+// en plus du plafond commun -- de quoi remplir la capacite en preparation et remplacer quelques pertes. Au plus 3 + 6 = 9.
+// En duel (aucune preparation a remplir), le plafond commun (revue du 11/10).
+uint32 CoaAreneFamilierPlafond(Player* bot, CoaAreneEtat const& etat);
+
+// Raison d'un refus d'invocation, dans l'ordre exact de CastFirst (cible = le bot) : ce que le journal « familier_refus »
+// ecrit. Rejoue les memes tests SANS effet de bord (pas de demi-tour, pas de banc, pas d'arret). « refus_castspell » :
+// tout passait, c'est PlayerbotAI::CastSpell ou le script du module qui a refuse (raison invisible d'ici).
+// Revue du 11/10 : le rejeu tourne APRES CastFirst, qui vient peut-etre de mettre le sort au banc (refus de CastSpell :
+// 8 s ; refus durable de StrictCheck : 20 s). « banc » seul aurait masque la cause dans presque tous les cas : un sort
+// au banc rend « banc_<raison des tests suivants> » (« banc_refus_castspell » si tous passent).
+std::string CoaAreneRaisonRefusFamilier(PlayerbotAI* botAI, Player* bot, Usable const& spell)
+{
+    SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+    if (CoaAreneFiltreEtatActif(botAI, bot) && CoaAreneBloqueParEtat(bot, info))
+        return "etat";
+    if (bot->HasPlayerFlag(PLAYER_ALLOW_ONLY_ABILITY) && !info->HasAttribute(SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE) &&
+        !info->HasAttribute(SPELL_ATTR0_PASSIVE))
+        return "verrou";
+    if (bot->HasSpellCooldown(info->Id))
+        return "recharge";
+    if (CoaRefuseParAuraDuLanceur(bot, info))
+        return "aura_lanceur";
+    if (CoaRefuseParFormeOuArme(bot, info))
+        return "forme_arme";
+    if (!CoaPeutPayer(bot, info))
+        return "ressource";
+    if (CoaExigeFamilierAbsent(bot, info))
+        return "familier_requis";
+    if (CoaRefusCibleCertain(bot, info, bot))
+        return "cible";
+    if (bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
+        return "recharge_globale";
+    auto const& banc = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
+    time_t const maintenant = time(nullptr);
+    bool auBanc = false;
+    for (uint32 const id : { spell.info->Id, info->Id })
+    {
+        auto const it = banc.find(id);
+        if (it != banc.end() && it->second > maintenant)
+            auBanc = true;
+    }
+    std::string const prefixe = auBanc ? "banc_" : "";
+    if (Unit* adv = CoaAreneTactiqueAdversaire(botAI, bot))
+    {
+        // Memes refus que CastFirst, dans le meme ordre (survie : charge vers l'adversaire, incantation longue).
+        uint8 refus = CoaAreneRefusTactique(bot, info, adv, bot);
+        if (refus == COA_TACTIQUE_AUCUN && CoaAreneEtatDe(botAI).survieNiveau >= 2 && CoaAreneSortDeRapprochement(info))
+            refus = COA_TACTIQUE_SURVIE_CHARGE;
+        if (refus == COA_TACTIQUE_AUCUN && CoaAreneSurvieRefuseIncantation(botAI, bot, info, spell.kind))
+            refus = COA_TACTIQUE_SURVIE_INCANTATION;
+        if (refus != COA_TACTIQUE_AUCUN)
+            return prefixe + CoaAreneRefusTactiqueNom(refus);
+    }
+    int8 vue = -1;
+    SpellCastResult const pre = CoaPreControleCible(bot, info, bot, vue);
+    if (pre != SPELL_CAST_OK)
+        return prefixe + Acore::StringFormat("pre_{}", uint32(pre));
+    SpellCastResult const check = StrictCheck(bot, info, bot);
+    if (check != SPELL_CAST_OK)
+        return prefixe + Acore::StringFormat("check_{}", uint32(check));
+    if (CoaRefuseEnMouvement(bot, info))
+        return prefixe + "en_mouvement";
+    return prefixe + "refus_castspell";
+}
+
 // Entre deux essais d'invocation (reussi ou non) : borne le cout a un CheckCast par sort candidat toutes les 3 s, et
 // laisse l'incantation (2 a 3 s pour les « Raise: ») aboutir avant de rejuger.
 constexpr uint32 CoaAreneFamilierReessaiMs = 3 * IN_MILLISECONDS;
@@ -3466,6 +3895,26 @@ constexpr uint32 CoaAreneFamilierIncantationMaxMs = 3 * IN_MILLISECONDS;
 // familier, et invocations reussies au plus par engagement (preparation comprise).
 constexpr uint32 CoaAreneFamilierApresPerteMs = 15 * IN_MILLISECONDS;
 constexpr uint32 CoaAreneFamilierMaxParEngagement = 3;
+// Journal « familier_refus » : au plus une ligne par sort sur cette duree.
+constexpr uint32 CoaAreneFamilierRefusTraceMs = 5 * IN_MILLISECONDS;
+
+uint32 CoaAreneFamilierPlafond(Player* bot, CoaAreneEtat const& etat)
+{
+    if (etat.cadre != COA_ARENE_ARENE || !CoaAreneKitLifeForce(bot))
+        return CoaAreneFamilierMaxParEngagement;
+    Aura const* totale = bot->GetAura(CoaAreneLifeForceTotale);
+    uint32 const capacite = totale ? std::min<uint32>(totale->GetStackAmount(), 6) : 0;
+    return CoaAreneFamilierMaxParEngagement + capacite;
+}
+
+// Un serviteur de PLUS (kit a Life Force) : seulement en preparation d'arene (portes fermees, rien d'autre a faire) et
+// tant que le module annonce de la Life Force libre. Portes ouvertes, la regle « un seul » reprend : relever une armee
+// sous les coups coute des recharges globales que la survie et l'attaque doivent garder.
+bool CoaAreneServiteurEnPlus(Player* bot, CoaAreneEtat const& etat)
+{
+    return etat.preparation && etat.cadre == COA_ARENE_ARENE && CoaAreneKitLifeForce(bot) &&
+           CoaAreneLifeForceLibrePiles(bot) > 0;
+}
 
 // Arene ou duel (preparation comprise), bras tire, CoaArene.IaCommune : le bot n'a aucun familier et son kit en a un.
 // Jamais en monde ouvert (cadre MONDE) ni hors engagement : inerte pour tous les autres bots.
@@ -3485,7 +3934,7 @@ public:
             (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL))
             return false;
         // Revue c2 : plafond par engagement (l'etat est remis a zero a chaque engagement, CoaAreneMaj).
-        if (etat.familiers >= CoaAreneFamilierMaxParEngagement)
+        if (etat.familiers >= CoaAreneFamilierPlafond(bot, etat))
             return false;
         uint32 const maintenant = getMSTime();
         // Revue c2 : perte d'un familier vu vivant (tue, ou renvoye) -> CoaAreneFamilierApresPerteMs avant de relancer.
@@ -3498,7 +3947,8 @@ public:
             etat.familierVu = false;
             etat.familierPerduMs = maintenant ? maintenant : 1;
         }
-        if (present)
+        // 11/10 (Necromancer 432) : un kit a Life Force remplit sa capacite en preparation (CoaAreneServiteurEnPlus).
+        if (present && !CoaAreneServiteurEnPlus(bot, etat))
             return false;
         if (etat.familierPerduMs && getMSTimeDiff(etat.familierPerduMs, maintenant) < CoaAreneFamilierApresPerteMs)
             return false;
@@ -4194,7 +4644,9 @@ public:
         // Palier danger ou critique, adversaire HORS DE VUE, un soin incante pret : le RETOUR (qui ramenerait le bot en vue)
         // est arrete, et le tour s'arrete la -- le soin part au tick suivant, bot immobile (memes raisons que CastFirst, qui
         // arrete le bot et lance plus tard). Pas sous la recharge globale : sinon le retour repartirait et l'on oscillerait.
+        // 11/10 (match id=18) : au plus un arret toutes les 2 s -- jamais une suite d'arrets qui figerait le bot hors de vue.
         if (niveau >= COA_SURVIE_DANGER && !vu && voulu && etat.retourEnCours && !bot->HasUnitState(UNIT_STATE_LOST_CONTROL) &&
+            (!etat.survieArretMs || getMSTimeDiff(etat.survieArretMs, getMSTime()) >= 2000) &&
             std::any_of(l.incantes.begin(), l.incantes.end(), [&](Usable const& spell)
                 {
                     // Revue du 11/10 : les memes refus sans banc que CastFirst (etat du lanceur : silence, pacification ;
@@ -4207,6 +4659,8 @@ public:
         {
             etat.retourEnCours = false;
             bot->StopMoving();
+            uint32 const t = getMSTime();
+            etat.survieArretMs = t ? t : 1;
             float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
             CoaAreneJournal(bot, etat, "survie_arret", d, d,
                             Acore::StringFormat(" niveau={} pv={:.0f}", CoaAreneSurvieNom(niveau), bot->GetHealthPct()));
@@ -4216,24 +4670,101 @@ public:
         // dernier recours (apres la fuite).
         bool const incanteLibre = !voulu && (!vu || CoaAreneSousDefensif(botAI, bot));
 
-        std::vector<Usable> liste = l.defensifs;
-        if (niveau >= COA_SURVIE_DANGER)
+        // Ordre (11/10, match id=6 : « elle s'est mise a se soigner bien trop tard ») : le SOIN d'abord, puis le defensif.
+        // Palier pression : un soin periodique (HoT) a toute vie, un soin direct sous CoaAreneSurvieSoinPressionPv, un
+        // soin incante seulement hors de vue ; danger et critique : soins utilisables en courant, puis incantes (hors de
+        // vue ou sous defensif), puis defensifs -- un defensif reste le recours quand aucun soin ne peut partir.
+        float const pv = bot->GetHealthPct();
+        std::vector<Usable> liste;
+        if (niveau == COA_SURVIE_PRESSION)
         {
-            liste.insert(liste.end(), l.mobiles.begin(), l.mobiles.end());
+            bool const soinDirect = pv < CoaAreneSurvieSoinPressionPv;
+            for (Usable const& spell : l.mobiles)
+                if (soinDirect || (spell.kind & KIND_HOT))
+                    liste.push_back(spell);
+            if (!vu && !voulu)
+                for (Usable const& spell : l.incantes)
+                    if (soinDirect || (spell.kind & KIND_HOT))
+                        liste.push_back(spell);
+        }
+        else
+        {
+            liste = l.mobiles;
             if (incanteLibre)
                 liste.insert(liste.end(), l.incantes.begin(), l.incantes.end());
         }
+        // Danger arme par les seuls DoT (vie de 50 a 60 %) : pas encore les gros defensifs, seulement ceux a recharge
+        // courte, comme au palier pression -- le soin est la reponse a un DoT ; la recharge longue est gardee pour la chute.
+        // Etendard de soin (11/10, match id=14) : pose aux pieds du bot des le palier pression, apres les soins directs.
+        for (Usable const& spell : CoaAreneSoutiensPrets(botAI, bot))
+            if (CoaAreneSoutienSoigne(EffectiveSpell(bot, spell.info)))
+                liste.push_back(spell);
+        // 11/10 (match id=14, Gardien 448) : Heroic Resolve, son SEUL defensif, parti a 100 % de vie au palier pression
+        // sur la seule raison « dots » -- gaspille, plus rien 6 s plus tard a 0 %. Au palier pression arme par les DoT
+        // (aucune vie encore perdue), aucun defensif : le soin (periodique) seul.
+        bool const sansDefensif = niveau == COA_SURVIE_PRESSION && std::strcmp(etat.survieRaison, "dots") == 0;
+        bool const defensifsCourts = niveau == COA_SURVIE_PRESSION ||
+                                     (niveau == COA_SURVIE_DANGER && std::strcmp(etat.survieRaison, "dots") == 0);
+        if (!sansDefensif)
+            for (Usable const& spell : l.defensifs)
+                if (!defensifsCourts || CoaAreneRechargeMs(EffectiveSpell(bot, spell.info)) <= CoaAreneSurvieRechargeLegereMs)
+                    liste.push_back(spell);
         if (Noter(etat, adv, CastFirst(botAI, bot, liste, bot, USAGE_DEFENSIVE)))
             return true;
-        if (niveau != COA_SURVIE_CRITIQUE || incanteLibre || voulu || l.incantes.empty())
-            return false;
 
-        // Critique, a decouvert, seul un soin incante reste : se mettre hors de vue d'abord (arene), sinon le lancer.
-        bool const incantePret = std::any_of(l.incantes.begin(), l.incantes.end(),
-                                             [&](Usable const& spell) { return CoaAreneSortPret(botAI, bot, spell); });
-        if (incantePret && Fuir(etat, adv))
-            return true;
-        return Noter(etat, adv, CastFirst(botAI, bot, l.incantes, bot, USAGE_DEFENSIVE));
+        // 11/10 (match id=11 et 17) : des le palier DANGER -- « jouer la montre » : a decouvert, un soin incante pret,
+        // rompre la vue d'abord (arene), puis le soin ; au palier critique seulement, le lancer quand meme a decouvert.
+        if (niveau >= COA_SURVIE_DANGER && !incanteLibre && !voulu && !l.incantes.empty())
+        {
+            bool const incantePret = std::any_of(l.incantes.begin(), l.incantes.end(),
+                                                 [&](Usable const& spell) { return CoaAreneSortPret(botAI, bot, spell); });
+            if (incantePret && Fuir(etat, adv))
+                return true;
+            if (niveau == COA_SURVIE_CRITIQUE && Noter(etat, adv, CastFirst(botAI, bot, l.incantes, bot, USAGE_DEFENSIVE)))
+                return true;
+        }
+        // Ni soin ni defensif n'a pu partir (11/10, match humain id=11 : Stormancer 488, a 44 % puis 33 %, n'a rien lance --
+        // son seul soin, Invigorating Surge, coute 25 « Static », une ressource de script que le bot ne suit pas) : aux
+        // paliers danger et critique, un CONTROLE sur l'adversaire pour casser la pression (etourdir, effrayer, enraciner,
+        // ralentir), s'il est en vue. Rien a dire de plus au cas ou il est deja controle : CastFirst ecarte deja un sort
+        // refuse sur sa cible (CoaRefusCibleCertain) et la regle « sous controle » du coeur.
+        if (niveau >= COA_SURVIE_DANGER && adv && vu && !etat.survieFuiteDebutMs)
+        {
+            std::vector<Usable> controles = KnownAbilities(botAI, bot, [](uint16 kind)
+                { return (kind & KIND_CONTROL) && (kind & KIND_HOSTILE) && !(kind & KIND_HEAL); });
+            // Revue survie v2 : un controle deja pose par le bot sur l'adversaire n'est pas relance -- le coeur accepte de
+            // rafraichir un ralentissement, et un sort bon marche sans recharge prenait alors chaque recharge globale du
+            // palier danger (jusqu'a 15 s apres un gros coup, a vie haute) au lieu des attaques.
+            controles.erase(std::remove_if(controles.begin(), controles.end(), [&](Usable const& spell)
+                {
+                    SpellInfo const* info = EffectiveSpell(bot, spell.info);
+                    return adv->HasAura(info->Id, bot->GetGUID()) || adv->HasAura(spell.info->Id, bot->GetGUID());
+                }), controles.end());
+            if (SpellInfo const* cast = CastFirst(botAI, bot, controles, adv, USAGE_DEFENSIVE))
+            {
+                RecordUsage(USAGE_DEFENSIVE, cast);
+                ++etat.survieControles;
+                float const d = bot->GetExactDist2d(adv);
+                CoaAreneJournal(bot, etat, "survie_controle", d, d,
+                                Acore::StringFormat(" niveau={} sort={} pv={:.0f}", CoaAreneSurvieNom(niveau), cast->Id, pv));
+                return true;
+            }
+        }
+        if (l.entraves.empty())
+            return false;
+        // Sort d'entrave (stase, bloc) : au palier critique en DERNIER recours, aucun soin ni defensif n'ayant pu partir
+        // et aucune fuite en cours ; ou comme outil de mana, au palier pression, mana sous le quart, adversaire hors de vue
+        // et vie au-dessus de la moitie (Time Out! rend 15 % puis 5 % toutes les 0,5 s, mais etourdit 6 s).
+        bool const dernierRecours = niveau == COA_SURVIE_CRITIQUE && !etat.survieFuiteDebutMs;
+        bool const outilMana = niveau == COA_SURVIE_PRESSION && !vu && pv > CoaAreneSurvieDangerPv &&
+                               bot->GetMaxPower(POWER_MANA) && bot->GetPowerPct(POWER_MANA) < CoaAreneSurvieManaOutilPct;
+        if (!dernierRecours && !outilMana)
+            return false;
+        std::vector<Usable> entraves;
+        for (Usable const& spell : l.entraves)
+            if (dernierRecours || CoaAreneRendMana(EffectiveSpell(bot, spell.info)))
+                entraves.push_back(spell);
+        return !entraves.empty() && Noter(etat, adv, CastFirst(botAI, bot, entraves, bot, USAGE_DEFENSIVE));
     }
 
     bool isUseful() override { return bot->IsAlive() && ClassHas(bot, KIND_DEFENSIVE | KIND_HEAL); }
@@ -4669,18 +5200,55 @@ public:
                                            { return EffectiveSpell(bot, s.info)->CalcCastTime(bot) >
                                                     CoaAreneFamilierIncantationMaxMs; }),
                             familiers.end());
+        // 11/10 (Necromancer 432) : kit a Life Force -> le moins cher d'abord (cout en ressource du sort reel), pour
+        // remplir la capacite en preparation : les squelettes (Life Force 1, ~30 % de mana de base) avant le Crypt Fiend
+        // (2, 64 %) et l'Abomination (3, 67 %).
+        if (CoaAreneKitLifeForce(bot))
+            std::stable_sort(familiers.begin(), familiers.end(), [this](Usable const& a, Usable const& b)
+                             {
+                                 SpellInfo const* ia = EffectiveSpell(bot, a.info);
+                                 SpellInfo const* ib = EffectiveSpell(bot, b.info);
+                                 return ia->CalcPowerCost(bot, ia->GetSchoolMask()) <
+                                        ib->CalcPowerCost(bot, ib->GetSchoolMask());
+                             });
 
         SpellInfo const* lance = CastFirst(botAI, bot, familiers, bot);
         if (!lance)
+        {
+            // 11/10 (analyse du Necromancer 432) : l'echec etait muet -- seuls les succes etaient journalises, CastFirst
+            // sans usage ne consigne rien et la trace d'arene ne couvre pas la preparation. Une ligne par candidat, au
+            // plus une par sort toutes les CoaAreneFamilierRefusTraceMs, preparation comprise.
+            uint32 const maintenant = getMSTime();
+            for (Usable const& spell : familiers)
+            {
+                SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+                auto const it = refusTraceMs.find(info->Id);
+                if (it != refusTraceMs.end() && getMSTimeDiff(it->second, maintenant) < CoaAreneFamilierRefusTraceMs)
+                    continue;
+                refusTraceMs[info->Id] = maintenant;
+                CoaAreneJournal(bot, etat, "familier_refus", -1.0f, -1.0f,
+                                Acore::StringFormat(" sort={} raison={} preparation={} present={} life_force_libre={}"
+                                                    " mana_pct={:.0f}",
+                                                    info->Id, CoaAreneRaisonRefusFamilier(botAI, bot, spell),
+                                                    etat.preparation ? 1 : 0, CoaAreneAFamilier(bot) ? 1 : 0,
+                                                    CoaAreneKitLifeForce(bot) ? int32(CoaAreneLifeForceLibrePiles(bot)) : -1,
+                                                    bot->GetMaxPower(POWER_MANA) ? bot->GetPowerPct(POWER_MANA) : -1.0f));
+            }
             return false;
+        }
         ++etat.familiers;
         CoaAreneJournal(bot, etat, "familier", -1.0f, -1.0f,
-                        Acore::StringFormat(" sort={} preparation={} candidats={}", lance->Id, etat.preparation ? 1 : 0,
-                                            familiers.size()));
+                        Acore::StringFormat(" sort={} preparation={} candidats={} life_force_libre={}", lance->Id,
+                                            etat.preparation ? 1 : 0, familiers.size(),
+                                            CoaAreneKitLifeForce(bot) ? int32(CoaAreneLifeForceLibrePiles(bot)) : -1));
         return true;
     }
 
     bool isUseful() override { return bot->IsAlive(); }
+
+private:
+    // Derniere ligne « familier_refus » par sort (horloge getMSTime) : une instance d'action par bot, fil de son IA.
+    std::unordered_map<uint32, uint32> refusTraceMs;
 };
 
 // ---------------------------------------------------------------------------------------------------------------

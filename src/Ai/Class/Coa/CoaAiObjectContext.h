@@ -40,6 +40,10 @@ struct CoaKnownAbility
  * verrou, comme benchedSpells. Inerte tant qu'aucune option AiPlayerbot.CoaArene.* n'est
  * armee : rien ne l'ecrit.
  */
+// Survie d'arene (11/10, match id=10) : fenetre du « pire coup recent » note par le crochet de degats (CoaArene1v1.cpp)
+// et lu par CoaAreneMaj (CoaAreneIa.inc).
+constexpr uint32 CoaAreneSurviePireCoupMs = 15000;
+
 struct CoaAreneEtat
 {
     uint32 majMs = 0;              // getMSTime() de la derniere mise a jour (0 : jamais)
@@ -154,6 +158,15 @@ struct CoaAreneEtat
     uint32 survieFuiteFinMs = 0;
     uint32 survieFuiteCumulMs = 0;
     uint32 survieFuites = 0;
+    // Pire coup subi recemment (11/10, match id=10 : un tick de Melt Reality a retire 38 % de vie d'un coup), en % de la
+    // vie maximale, et son heure ; note par le crochet de degats (CoaArene1v1.cpp), lu par CoaAreneMaj pour hausser les
+    // seuils des paliers : seuil danger courant (CoaAreneSurvieDangerPv ou plus).
+    float pireCoupPct = 0.0f;
+    uint32 pireCoupMs = 0;
+    float survieSeuilDanger = 50.0f;
+    uint32 survieControles = 0;        // controles lances par la survie faute de soin ou de defensif (bilan)
+    uint32 survieArretMs = 0;          // dernier « survie_arret » (au plus un toutes les 2 s)
+    uint32 retourVuDepuisMs = 0;       // retour d'un tireur : adversaire en vue sans interruption depuis (0 : pas en vue)
     // Dissipation sur soi, politique de cout (IaSurvie) : attente apres un succes (3 -> 6 -> 12 s, plafond 15 s, doublee
     // a chaque reapplication vue dans les 4 s), derniere dissipation reussie, DoT qu'elle visait, reapplication deja
     // comptee ; refus par raison (1 pv haut, 2 mana basse, 3 pas rentable, 4 reapplication), comptes au plus une fois

@@ -34,6 +34,7 @@
 #include "Strategy.h"
 #include "Trigger.h"
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
+#include "mod-ascension-compat/src/AscensionGuardianStandardData.h"
 
 #include <algorithm>
 #include <array>
@@ -1222,11 +1223,16 @@ enum CoaAreneRefusTactiqueType : uint8
     COA_TACTIQUE_HORS_CONE,     // dans le rayon d'un cone, mais pas devant : un demi-tour peut suffire
     COA_TACTIQUE_REVELATION,    // sort de revelation, adversaire ni furtif ni invisible
     COA_TACTIQUE_DEJA_POSE,     // debuff de zone deja sur l'adversaire, ni a renouveler ni a empiler
-    COA_TACTIQUE_VERROU         // le sort enferme le lanceur (aura 263), adversaire hors de portee de ses coups
+    COA_TACTIQUE_VERROU,        // le sort enferme le lanceur (aura 263), adversaire hors de portee de ses coups
+    COA_TACTIQUE_SURVIE_CHARGE, // charge ou saut vers l'adversaire, bot au palier de survie danger ou critique
+    COA_TACTIQUE_SURVIE_INCANTATION // attaque de 2 s ou plus au palier danger ou critique, un soin pret
 };
 Unit* CoaAreneTactiqueAdversaire(PlayerbotAI* botAI, Player* bot);
 uint8 CoaAreneRefusTactique(Player* bot, SpellInfo const* info, Unit* adv, Unit* cible);
 void CoaAreneNoterRefusTactique(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* adv, uint8 refus, bool trace);
+CoaAreneEtat& CoaAreneEtatDe(PlayerbotAI* botAI);
+bool CoaAreneSortDeRapprochement(SpellInfo const* info);
+bool CoaAreneSurvieRefuseIncantation(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, uint16 kind);
 // Survie d'arene (11/10) : sort ecarte faute de ressource (CoaPeutPayer) par un gladiateur trace -- une ligne
 // « refus_ressource » par sort et par 5 s, et le compte du bilan. Defini dans CoaAreneIa.inc.
 void CoaAreneNoterRefusRessource(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target);
@@ -1476,6 +1482,12 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         if (advTactique)
         {
             uint8 refus = CoaAreneRefusTactique(bot, info, advTactique, target);
+            // 11/10 (match humain id=14, Gardien 448) : a pv quasi nul, Battle Rush 501546 l'a jete sur l'adversaire au
+            // lieu de rester sous son etendard. Aux paliers danger et critique, plus aucune charge ni saut VERS lui.
+            if (refus == COA_TACTIQUE_AUCUN && CoaAreneEtatDe(botAI).survieNiveau >= 2 && CoaAreneSortDeRapprochement(info))
+                refus = COA_TACTIQUE_SURVIE_CHARGE;
+            if (refus == COA_TACTIQUE_AUCUN && CoaAreneSurvieRefuseIncantation(botAI, bot, info, spell.kind))
+                refus = COA_TACTIQUE_SURVIE_INCANTATION;
             if (refus == COA_TACTIQUE_HORS_CONE && !tourne && bot->IsAlive() &&
                 !bot->HasUnitState(UNIT_STATE_LOST_CONTROL) && !CoaAreneMouvementVoulu(botAI))
             {

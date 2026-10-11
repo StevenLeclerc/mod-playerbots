@@ -2238,7 +2238,8 @@ public:
  * pour un sort direct ; OnPeriodicDamageResult le donne apres DealDamage pour un tick de DoT) ; coup blanc sinon.
  * Le guet est ouvert et ferme par CoaAreneMaj (CoaAreneIa.inc), qui ecrit la ligne « action=source_degat ».
  *
- * COUT : pour tout degat, un test IsPlayer() ; puis InArena(), une classe CoA et un bot -- rien d'autre hors d'une arene.
+ * COUT : pour tout degat, un test IsPlayer() ; puis InArena() ou un duel, une classe CoA et un bot -- rien d'autre hors
+ * d'une arene ou d'un duel.
  * FIL : le crochet tourne dans la mise a jour de la carte ou le coup est porte ; la victime (le bot) est sur cette carte,
  * et son IA aussi (P-137) : l'etat n'est ecrit que par ce fil.
  */
@@ -2251,22 +2252,30 @@ public:
     {
     }
 
-    // L'etat d'arene du bot vise, s'il guette (adversaire hors de vue). `libre` : aucun coup encore note.
-    static CoaAreneEtat* Etat(Unit* victime, bool libre)
+    // L'etat d'arene du bot vise, engagement actif (arene ou duel). Revue survie v2 : le duel etait exclu, le pire coup
+    // n'y etait jamais note et les seuils dynamiques n'y jouaient pas. Le guet de source (Etat) reste propre a l'arene :
+    // CoaAreneMaj n'ouvre sourceGuetDepuisMs qu'en COA_ARENE_ARENE. Duel : meme carte, meme fil que l'IA du bot.
+    static CoaAreneEtat* EtatActif(Unit* victime)
     {
         if (!victime || !victime->IsPlayer())
             return nullptr;
         Player* bot = victime->ToPlayer();
-        if (!bot->InArena() || !IsAscensionCustomClassId(bot->getClass()))
+        if (!(bot->InArena() || (bot->duel && bot->duel->Opponent)) || !IsAscensionCustomClassId(bot->getClass()))
             return nullptr;
         PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
         CoaAiObjectContext* contexte = ia ? dynamic_cast<CoaAiObjectContext*>(ia->GetAiObjectContext()) : nullptr;
-        if (!contexte)
+        if (!contexte || !contexte->arene.actif)
             return nullptr;
-        CoaAreneEtat& etat = contexte->arene;
-        if (!etat.actif || !etat.sourceGuetDepuisMs || (libre && etat.sourceNotee))
+        return &contexte->arene;
+    }
+
+    // Le meme, s'il guette (adversaire hors de vue). `libre` : aucun coup encore note.
+    static CoaAreneEtat* Etat(Unit* victime, bool libre)
+    {
+        CoaAreneEtat* etat = EtatActif(victime);
+        if (!etat || !etat->sourceGuetDepuisMs || (libre && etat->sourceNotee))
             return nullptr;
-        return &etat;
+        return etat;
     }
 
     void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& /*damage*/, SpellInfo const* spellInfo) override
@@ -2283,7 +2292,21 @@ public:
     {
         if (!damage || attacker == victim)
             return;
-        CoaAreneEtat* etat = Etat(victim, true);
+        // Pire coup recent (11/10, match id=10), en % de la vie maximale : garde le plus fort sur la fenetre
+        // CoaAreneSurviePireCoupMs (CoaAreneIa.inc), le remplace quand il est perime. Lecture seule de `damage`.
+        CoaAreneEtat* actif = EtatActif(victim);
+        if (actif && victim->GetMaxHealth())
+        {
+            uint32 const t = getMSTime();
+            float const pct = float(damage) * 100.0f / float(victim->GetMaxHealth());
+            if (!actif->pireCoupMs || getMSTimeDiff(actif->pireCoupMs, t) > CoaAreneSurviePireCoupMs ||
+                pct >= actif->pireCoupPct)
+            {
+                actif->pireCoupPct = pct;
+                actif->pireCoupMs = t ? t : 1;
+            }
+        }
+        CoaAreneEtat* etat = actif && actif->sourceGuetDepuisMs && !actif->sourceNotee ? actif : nullptr;
         if (!etat)
             return;
         uint32 const maintenant = getMSTime();
