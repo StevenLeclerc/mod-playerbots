@@ -1000,6 +1000,8 @@ bool PlayerbotAIConfig::Initialize()
     coaAreneMondeOuvert = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.MondeOuvert", false);
     coaAreneTirage = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaArene.Tirage", 100), 100);
     coaAreneIaPiliers = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaPiliers", false);
+    // Survie d'arene (11/10/2026) : VRAIE par defaut, mais n'agit que sous IaCommune (strategie « coa arene » composee).
+    coaAreneIaSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaSurvie", true);
     // --- fin CoaArene IA
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);

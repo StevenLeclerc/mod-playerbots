@@ -1583,6 +1583,19 @@ AiPlayerbot.CoaArene.Tirage = 100
 # Journal : « coa arene ia: ... action=pilier|sortie_pilier ». Exige IaRanger = 1.
 # Default: 0
 AiPlayerbot.CoaArene.IaPiliers = 0
+
+# Survie d'arene (arene 1v1 et duel seulement, exige IaCommune = 1) : trois paliers --
+# pression (perte de 15 points de vie en 2 a 4 s, DoT prevus >= 25 % de la vie sur 6 s,
+# ou vie < 70 %) : defensif a recharge courte ; danger (vie < 50 %) : defensif majeur
+# puis soin sur soi (instantane, ou incante hors de vue de l'adversaire ou sous un
+# defensif) ; critique (vie < 30 %) : tout, puis fuite hors de vue en arene. Remplace le
+# defensif d'arene, « coa defensive » et « coa dispel » en 1v1 ; la dissipation sur soi
+# exige alors vie < 90 %, mana >= 30 %, un DoT qui vaut sa mana, et attend 3 -> 6 -> 12 s
+# (15 au plus) si l'adversaire le repose aussitot. Reserve de mana pour la survie sous
+# 25 % ; etendards poses sur soi ; recul ouvert a toute specialisation a distance sous la
+# pression. Journal : « coa arene ia: ... action=survie|survie_fuite|soutien ».
+# Default: 1
+AiPlayerbot.CoaArene.IaSurvie = 1
 # --- fin CoaArene IA ------------------------------------------------------------------
 
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:

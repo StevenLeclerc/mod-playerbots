@@ -54,6 +54,7 @@
  */
 
 #include "CoaArene1v1.h"
+#include "CoaAiObjectContext.h"
 
 #include "ArenaTeam.h"
 #include "BattleGroundJoinAction.h"
@@ -2228,6 +2229,100 @@ public:
         return true;
     }
 };
+
+/*
+ * Survie d'arene (11/10/2026, match id=90) : le Ranger 2239 est sorti de furtivite et a perdu 6 % de vie a 11:56:03
+ * (Paris), adversaire HORS DE VUE, sans qu'aucune trace ne dise d'ou venait le coup -- le commanditaire, lui, ne l'avait
+ * pas touche. Ce crochet note la SOURCE du premier degat subi pendant que l'adversaire est hors de vue : l'adversaire,
+ * une unite qu'il controle (familier, diablotin), ou autre ; le sort (ModifySpellDamageTaken l'annonce avant DealDamage
+ * pour un sort direct ; OnPeriodicDamageResult le donne apres DealDamage pour un tick de DoT) ; coup blanc sinon.
+ * Le guet est ouvert et ferme par CoaAreneMaj (CoaAreneIa.inc), qui ecrit la ligne « action=source_degat ».
+ *
+ * COUT : pour tout degat, un test IsPlayer() ; puis InArena(), une classe CoA et un bot -- rien d'autre hors d'une arene.
+ * FIL : le crochet tourne dans la mise a jour de la carte ou le coup est porte ; la victime (le bot) est sur cette carte,
+ * et son IA aussi (P-137) : l'etat n'est ecrit que par ce fil.
+ */
+class CoaArene1v1DegatsScript : public UnitScript
+{
+public:
+    CoaArene1v1DegatsScript()
+        : UnitScript("coa_arene1v1_degats", true,
+                     { UNITHOOK_ON_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN, UNITHOOK_ON_PERIODIC_DAMAGE_RESULT })
+    {
+    }
+
+    // L'etat d'arene du bot vise, s'il guette (adversaire hors de vue). `libre` : aucun coup encore note.
+    static CoaAreneEtat* Etat(Unit* victime, bool libre)
+    {
+        if (!victime || !victime->IsPlayer())
+            return nullptr;
+        Player* bot = victime->ToPlayer();
+        if (!bot->InArena() || !IsAscensionCustomClassId(bot->getClass()))
+            return nullptr;
+        PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
+        CoaAiObjectContext* contexte = ia ? dynamic_cast<CoaAiObjectContext*>(ia->GetAiObjectContext()) : nullptr;
+        if (!contexte)
+            return nullptr;
+        CoaAreneEtat& etat = contexte->arene;
+        if (!etat.actif || !etat.sourceGuetDepuisMs || (libre && etat.sourceNotee))
+            return nullptr;
+        return &etat;
+    }
+
+    void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& /*damage*/, SpellInfo const* spellInfo) override
+    {
+        if (CoaAreneEtat* etat = Etat(target, true))
+        {
+            etat->sortSubiAttente = spellInfo ? spellInfo->Id : 0;
+            etat->sortSubiAttaquant = attacker ? attacker->GetGUID() : ObjectGuid::Empty;
+            etat->sortSubiMs = getMSTime();
+        }
+    }
+
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        if (!damage || attacker == victim)
+            return;
+        CoaAreneEtat* etat = Etat(victim, true);
+        if (!etat)
+            return;
+        uint32 const maintenant = getMSTime();
+        ObjectGuid const attaquant = attacker ? attacker->GetGUID() : ObjectGuid::Empty;
+        etat->sourceNotee = true;
+        etat->sourceAEcrire = true;
+        etat->sourceDegats = damage;
+        etat->sourceFurtif = victim->HasStealthAura();
+        etat->sourceMs = getMSTimeDiff(etat->sourceGuetDepuisMs, maintenant);
+        etat->sourcePeriodique = false;
+        etat->sourceEntree = 0;
+        etat->sourceSort = (attacker && etat->sortSubiAttente && etat->sortSubiAttaquant == attaquant &&
+                            etat->sortSubiMs == maintenant) ? etat->sortSubiAttente : 0;
+        Unit const* maitre = attacker ? attacker->GetCharmerOrOwner() : nullptr;
+        if (!attacker)
+            etat->sourceGenre = 3;
+        else if (attaquant == etat->adversaire)
+            etat->sourceGenre = 1;
+        else
+        {
+            etat->sourceGenre = maitre && maitre->GetGUID() == etat->adversaire ? 2 : 3;
+            etat->sourceEntree = attacker->GetEntry();
+        }
+        // Repris par OnPeriodicDamageResult s'il s'agit d'un tick de DoT (meme attaquant, meme instant).
+        etat->sortSubiAttente = 0;
+        etat->sortSubiAttaquant = attaquant;
+        etat->sortSubiMs = maintenant;
+    }
+
+    void OnPeriodicDamageResult(Unit* target, Unit* attacker, uint32 /*damage*/, SpellInfo const* spellInfo) override
+    {
+        CoaAreneEtat* etat = Etat(target, false);
+        if (!etat || !etat->sourceAEcrire || etat->sourceSort || !spellInfo || !attacker ||
+            etat->sortSubiAttaquant != attacker->GetGUID() || etat->sortSubiMs != getMSTime())
+            return;
+        etat->sourceSort = spellInfo->Id;
+        etat->sourcePeriodique = true;
+    }
+};
 }  // namespace
 
 void AddSC_coa_arene1v1()
@@ -2239,4 +2334,5 @@ void AddSC_coa_arene1v1()
     new CoaArene1v1PlayerScript();
     new CoaArene1v1GossipScript();
     new CoaArene1v1CommandScript();
+    new CoaArene1v1DegatsScript();
 }

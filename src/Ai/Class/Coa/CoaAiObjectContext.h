@@ -136,6 +136,60 @@ struct CoaAreneEtat
     bool fenetreExploitee = false;
     uint32 incantationsVues = 0, soinsVus = 0, interruptions = 0, interruptionsSoin = 0, interruptionsRatees = 0;
     uint32 dispelsSoi = 0, fenetresVues = 0, fenetresBurst = 0, fenetreSorts = 0;
+    // Choix tactiques (11/10, match id=89 ; CoaAreneRefusTactique) : sorts sans effet ecartes (bilan), et derniere
+    // trace de refus par sort (une ligne toutes les 2 s par sort au plus, sinon la trace serait noyee).
+    uint32 refusTactiques = 0;
+    std::unordered_map<uint32, uint32> refusTactiqueTraceMs;
+    // Retour en urgence (11/10, match id=90) : derniere relance hors du delai d'une seconde.
+    uint32 retourUrgenceMs = 0;
+    // Survie d'arene (11/10, AiPlayerbot.CoaArene.IaSurvie ; CoaAreneIa.inc « coa arene survie ») : palier courant
+    // (0 aucun, 1 pression, 2 danger, 3 critique) et sa raison, recalcules par CoaAreneMaj ; sorts lances par palier
+    // (index 1 a 3), soins sur soi ; fuite hors de vue en palier critique (en cours, dernier essai, fin, cumul).
+    uint8 survieNiveau = 0;
+    char const* survieRaison = "-";
+    uint32 survieSorts[4] = { 0, 0, 0, 0 };
+    uint32 soinsSoi = 0;
+    uint32 survieFuiteDebutMs = 0;     // 0 : aucune fuite en cours
+    uint32 survieFuiteEssaiMs = 0;
+    uint32 survieFuiteFinMs = 0;
+    uint32 survieFuiteCumulMs = 0;
+    uint32 survieFuites = 0;
+    // Dissipation sur soi, politique de cout (IaSurvie) : attente apres un succes (3 -> 6 -> 12 s, plafond 15 s, doublee
+    // a chaque reapplication vue dans les 4 s), derniere dissipation reussie, DoT qu'elle visait, reapplication deja
+    // comptee ; refus par raison (1 pv haut, 2 mana basse, 3 pas rentable, 4 reapplication), comptes au plus une fois
+    // par raison et par 2 s.
+    uint32 dispelAttenteMs = 0;
+    uint32 dernierDispelMs = 0;
+    std::vector<uint32> dispelRetires;
+    bool dispelReapplicationVue = false;
+    uint32 dispelRefus[5] = { 0, 0, 0, 0, 0 };
+    uint32 dispelRefusMs[5] = { 0, 0, 0, 0, 0 };
+    // Sorts ecartes faute de ressource (CoaPeutPayer) : bilan, et derniere trace par sort (une toutes les 5 s au plus).
+    uint32 refusRessource = 0;
+    std::unordered_map<uint32, uint32> refusRessourceTraceMs;
+    // Etendards et autres sorts au sol de soutien poses sur soi (« coa arene soutien ») : prochain essai, poses.
+    uint32 prochainSoutienMs = 0;
+    uint32 soutiens = 0;
+    // Source du premier degat subi hors de vue de l'adversaire (gladiateurs traces seulement) : guet ouvert par
+    // CoaAreneMaj quand l'adversaire sort de la vue, rempli par le crochet de degats de CoaArene1v1.cpp (meme fil : la
+    // carte du bot), ecrit dans le journal par CoaAreneMaj. Genre : 1 joueur (l'adversaire), 2 familier ou unite qu'il
+    // controle, 3 autre. `sourceSort` : sort du coup (0 : coup blanc ou inconnu), `sourcePeriodique` : tick de DoT.
+    uint32 sourceGuetDepuisMs = 0;
+    bool sourceNotee = false;
+    bool sourceAEcrire = false;
+    uint8 sourceGenre = 0;
+    uint32 sourceSort = 0;
+    bool sourcePeriodique = false;
+    bool sourceFurtif = false;         // le bot etait furtif au moment du coup
+    uint32 sourceDegats = 0;
+    uint32 sourceEntree = 0;           // entree de creature de l'attaquant (familier), 0 pour un joueur
+    uint32 sourceMs = 0;               // delai entre la perte de vue (ouverture du guet) et le coup
+    uint32 sourcesHorsVue = 0;
+    // Sort de degats annonce par ModifySpellDamageTaken juste avant DealDamage (meme tour de carte) : pour nommer le sort
+    // du coup que OnDamage recoit sans lui.
+    uint32 sortSubiAttente = 0;
+    ObjectGuid sortSubiAttaquant;
+    uint32 sortSubiMs = 0;
 };
 
 /*

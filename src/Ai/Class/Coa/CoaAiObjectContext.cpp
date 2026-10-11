@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <ctime>
 #include <map>
 #include <mutex>
@@ -1212,6 +1213,22 @@ void CoaAreneTracerSort(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, 
 // CoaArene : le bot suit un deplacement VOULU de l'IA d'arene (recul, retour, cachette L2, cacheur du banc). Faux pour
 // tout bot hors de ces etats, donc pour tout bot hors arene et hors duel. Defini dans CoaAreneIa.inc.
 bool CoaAreneMouvementVoulu(PlayerbotAI* botAI);
+// CoaArene, choix tactiques (11/10, arene 1v1 id=89 : 11 lancers, 0 degat) : sort de zone sans l'adversaire dans la
+// zone, revelation sans adversaire furtif, debuff de zone deja pose. Arene 1v1 et duel seulement ; voir CoaAreneIa.inc.
+enum CoaAreneRefusTactiqueType : uint8
+{
+    COA_TACTIQUE_AUCUN = 0,
+    COA_TACTIQUE_HORS_ZONE,     // adversaire hors du rayon de toutes les zones du sort
+    COA_TACTIQUE_HORS_CONE,     // dans le rayon d'un cone, mais pas devant : un demi-tour peut suffire
+    COA_TACTIQUE_REVELATION,    // sort de revelation, adversaire ni furtif ni invisible
+    COA_TACTIQUE_DEJA_POSE      // debuff de zone deja sur l'adversaire, ni a renouveler ni a empiler
+};
+Unit* CoaAreneTactiqueAdversaire(PlayerbotAI* botAI, Player* bot);
+uint8 CoaAreneRefusTactique(Player* bot, SpellInfo const* info, Unit* adv, Unit* cible);
+void CoaAreneNoterRefusTactique(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* adv, uint8 refus, bool trace);
+// Survie d'arene (11/10) : sort ecarte faute de ressource (CoaPeutPayer) par un gladiateur trace -- une ligne
+// « refus_ressource » par sort et par 5 s, et le compte du bilan. Defini dans CoaAreneIa.inc.
+void CoaAreneNoterRefusRessource(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target);
 
 /*
  * Pre-controle de la cible, pour tous les bots CoA (banc d'arene du 10/10/2026 23:31-23:37 Paris : OUT_OF_RANGE 61,
@@ -1373,6 +1390,8 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
     // Pre-controle de la cible (CoaPreControleCible) : ligne de vue calculee une fois par appel, et un seul demi-tour.
     int8 vueCible = -1;
     bool tourne = false;
+    // Choix tactiques d'arene 1v1 et de duel : l'adversaire, ou nullptr (tout autre bot : deux tests de champ).
+    Unit* const advTactique = !spells.empty() ? CoaAreneTactiqueAdversaire(botAI, bot) : nullptr;
 
     for (Usable const& spell : spells)
     {
@@ -1410,8 +1429,16 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // Banc d'arene du 10/10 (CoaRefuseParFormeOuArme, CoaPeutPayer) : forme absente, arme requise absente,
         // ressource insuffisante -- refus certains du coeur, ecartes sans banc ni echec consigne : le sort repart des
         // que la forme, l'arme ou la ressource est la (avant : banc de 20 s, 20 s et 5 s).
-        if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
+        if (CoaRefuseParFormeOuArme(bot, info))
             continue;
+        if (!CoaPeutPayer(bot, info))
+        {
+            // Survie d'arene (11/10, Sun Cleric 478, match id=93) : les refus faute de mana etaient muets -- 18 s sans un
+            // sort, adversaire en vue et a portee. Trace seulement (gladiateur d'arene 1v1) ; le sort reste ecarte.
+            if (trace)
+                CoaAreneNoterRefusRessource(botAI, bot, info, target);
+            continue;
+        }
 
         // Banc d'arene du 11/10 : familier exige et absent (CoaExigeFamilierAbsent), refus certains lus sur la cible --
         // etat d'aura, ressource a bruler, rien a dissiper (CoaRefusCibleCertain). Recopies du coeur, ecartes sans banc
@@ -1441,6 +1468,26 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         }
         if (stillBenched)
             continue;
+
+        // Choix tactiques (CoaAreneRefusTactique) : le coeur accepterait ce sort, mais il ne toucherait pas l'adversaire.
+        // Ecarte sans banc ni echec consigne. Hors du cone mais dans son rayon : le bot se tourne (memes gardes que le
+        // demi-tour du pre-controle ci-dessous, un seul par appel) et le sort est rejuge.
+        if (advTactique)
+        {
+            uint8 refus = CoaAreneRefusTactique(bot, info, advTactique, target);
+            if (refus == COA_TACTIQUE_HORS_CONE && !tourne && bot->IsAlive() &&
+                !bot->HasUnitState(UNIT_STATE_LOST_CONTROL) && !CoaAreneMouvementVoulu(botAI))
+            {
+                ServerFacade::instance().SetFacingTo(bot, advTactique);
+                tourne = true;
+                refus = CoaAreneRefusTactique(bot, info, advTactique, target);
+            }
+            if (refus != COA_TACTIQUE_AUCUN)
+            {
+                CoaAreneNoterRefusTactique(botAI, bot, info, advTactique, refus, trace);
+                continue;
+            }
+        }
 
         // Pre-controle (CoaPreControleCible) : hors de portee, sans ligne de vue ou trop pres, le sort est ecarte d'avance,
         // sans banc ni echec consigne (StrictCheck ne mettait aucun de ces trois refus au banc). Pas face a la cible :
@@ -2075,6 +2122,9 @@ public:
         bool const saveMana = SavingManaForHeals(botAI, bot);
 
         std::vector<Usable> usable = KnownAbilities(botAI, bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
+        // CoaArene, survie (11/10, arene 1v1 et duel, IaSurvie) : les etendards et autres sorts au sol de soutien ne sont
+        // plus lances vers l'adversaire -- « coa arene soutien » les pose sur le bot. Voir CoaAreneRetirerSoutiens.
+        CoaAreneRetirerSoutiens(botAI, bot, usable);
         if (usable.empty())
             return false;
 
@@ -2122,6 +2172,12 @@ public:
         // the whole fight, lost its main spell for a minute in under a second, and the count never
         // decayed, so three refusals hours apart did the same. CastFirst handles the three cases,
         // benches for 8 seconds and says why in the failure log.
+        // CoaArene, survie (11/10, arene 1v1 et duel, IaSurvie) : sous 25 % de mana, le moins cher d'abord et une reserve
+        // pour un sort de survie. Apres tous les ordres ci-dessus : a sec, le cout passe devant. Voir CoaAreneReserveMana.
+        CoaAreneReserveMana(botAI, bot, usable);
+        if (usable.empty())
+            return RecordUsage(USAGE_ATTACK, nullptr);
+
         SpellInfo const* const cast = CastFirst(botAI, bot, usable, target, USAGE_ATTACK);
         if (cast)
         {
@@ -2164,6 +2220,9 @@ public:
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
         if (SavingManaForHeals(botAI, bot))
             DropManaSpells(bot, spells);
+        // CoaArene, survie (11/10) : comme dans « coa attack », ni etendard ni soutien au sol vise sur l'adversaire.
+        CoaAreneRetirerSoutiens(botAI, bot, spells);
+        CoaAreneReserveMana(botAI, bot, spells);
 
         return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, spells, target, USAGE_AOE));
     }

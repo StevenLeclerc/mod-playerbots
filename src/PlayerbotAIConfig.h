@@ -720,6 +720,7 @@ public:
     bool coaAreneMondeOuvert;    // etend L0/L1 au un contre un JcJ du monde ouvert (banc)
     uint32 coaAreneTirage;       // % d'engagements ou l'IA s'applique (tirage par engagement)
     bool coaAreneIaPiliers;      // L2 : Ranger en ARENE, casser la ligne de vue derriere un obstacle (defaut faux)
+    bool coaAreneIaSurvie;       // survie d'arene 1v1 et duel (11/10) : paliers, soins sur soi, dissipation rentable (defaut vrai)
     // --- fin CoaArene IA
     uint32 lootLogMinQuality;
     bool autoDoQuests;
