@@ -249,6 +249,15 @@ bool CoaRegistreCombat::EstPilotee(uint64 guid) const
     return trouve != _encours.end() && trouve->second.pilote;
 }
 
+int CoaRegistreCombat::Bras(uint64 guid) const
+{
+    std::lock_guard<std::mutex> garde(_verrou);
+    auto const trouve = _encours.find(guid);
+    if (trouve == _encours.end())
+        return -1;
+    return trouve->second.pilote ? 1 : 0;
+}
+
 uint32 CoaRegistreCombat::DebutMs(uint64 guid) const
 {
     std::lock_guard<std::mutex> tenu(_verrou);

@@ -82,7 +82,10 @@ public:
     // le libelle sert alors aussi de description. `avecNoul` ajoute la question
     // « le bot risque-t-il de mourir » : utile pour le canal action, inutile et
     // deux fois plus lent pour le canal sort.
-    void Demander(uint64 guid, uint32 canal, std::string const& etat,
+    // Rend vrai si le datagramme est parti. Les appelants qui n'attendent pas
+    // la reponse peuvent l'ignorer ; le canal cible s'en sert pour ne jamais
+    // attendre une reponse a une demande qui n'a pas ete envoyee.
+    bool Demander(uint64 guid, uint32 canal, std::string const& etat,
                   std::vector<std::pair<std::string, float>> const& candidats,
                   std::vector<std::string> const& descriptions = {},
                   bool avecNoul = true);
@@ -113,6 +116,45 @@ public:
     // la greffe est branchee et sans effet, et il faut pouvoir le constater.
     void CompterCibleChangee() { _ciblesChangees.fetch_add(1, std::memory_order_relaxed); }
 
+    // ATTENDRE UNE REPONSE SANS BLOQUER LE THREAD MONDE (canal cible).
+    //
+    // La demande part a l'acquisition, et la reponse doit servir CETTE
+    // acquisition : lue a la suivante, elle aurait vieilli bien au-dela de
+    // Laya.MaxAgeMs (P-133). L'appelant renonce donc a agir pendant un ou
+    // deux ticks et redemande ou en est l'attente :
+    //
+    //   Libre       rien en cours, on peut demander puis OuvrirAttente ;
+    //   EnVol       demande partie, pas de reponse, delai non echu ;
+    //   Repondue    la reponse a CETTE demande est la, fraiche, et le moteur
+    //               propose toujours la meme cible — l'attente est close ;
+    //   Discordante la reponse est la, mais le moteur a change de cible depuis
+    //               la demande : elle ne classe pas son choix actuel, on la
+    //               jette — l'attente est close ;
+    //   Expiree     delai echu sans reponse, OU reponse devenue trop vieille
+    //               (tick lent, attente orpheline) — l'attente est close, le
+    //               repit commence ;
+    //   Repit       une attente vient d'expirer : ne pas en rouvrir une.
+    //
+    // AUCUN etat ne mene d'une attente close a une nouvelle demande dans le
+    // meme appel : c'est ce qui garantit que l'attaque n'est jamais differee
+    // plus d'une fois par acquisition, quel que soit le rythme des ticks.
+    enum class Attente { Libre, EnVol, Repondue, Discordante, Expiree, Repit };
+    Attente SuivreAttente(uint64 guid, uint32 canal, uint32 attenteMaxMs, uint32 repitMs,
+                          std::string const& libelleMoteur);
+
+    // A appeler seulement si Demander a rendu vrai. `libelleMoteur` est la
+    // cible que le moteur proposait au moment de la demande.
+    bool OuvrirAttente(uint64 guid, uint32 canal, std::string const& libelleMoteur);
+
+    // Le releve du canal cible : attentes ouvertes, expirees, discordantes,
+    // reponses consommees sur le bras pilote, et sur le temoin — ces deux
+    // dernieres comptees au MEME endroit, pour etre comparables.
+    void CompterCibleAttente() { _ciblesAttentes.fetch_add(1, std::memory_order_relaxed); }
+    void CompterCibleExpiree() { _ciblesExpirees.fetch_add(1, std::memory_order_relaxed); }
+    void CompterCibleDiscordante() { _ciblesDiscordantes.fetch_add(1, std::memory_order_relaxed); }
+    void CompterCibleDecidee() { _ciblesDecidees.fetch_add(1, std::memory_order_relaxed); }
+    void CompterCibleTemoin() { _ciblesTemoins.fetch_add(1, std::memory_order_relaxed); }
+
     void Oublier(uint64 guid);
 
     // Le nettoyage que subit tout libelle avant de partir sur le fil.
@@ -136,6 +178,10 @@ private:
         uint32 seqRecu = 0;        // derniere reponse RETENUE
         uint32 msReception = 0;
         std::vector<std::pair<std::string, float>> probabilites;
+        uint32 seqAttendu = 0;     // compteur de la demande attendue, 0 = aucune
+        uint32 msAttente = 0;      // ouverture de cette attente
+        uint32 msRepli = 0;        // derniere attente expiree, 0 = jamais
+        std::string libelleAttendu; // cible du moteur au moment de la demande
     };
 
     void Recevoir();               // corps du thread receveur
@@ -163,6 +209,11 @@ private:
     std::atomic<uint64> _muets{0};
     std::atomic<uint64> _choix{0};
     std::atomic<uint64> _ciblesChangees{0};
+    std::atomic<uint64> _ciblesAttentes{0};
+    std::atomic<uint64> _ciblesExpirees{0};
+    std::atomic<uint64> _ciblesDiscordantes{0};
+    std::atomic<uint64> _ciblesDecidees{0};
+    std::atomic<uint64> _ciblesTemoins{0};
     // mutable : Probabilite() est const — elle ne touche que le cache — mais
     // doit pouvoir compter ce qu'elle sert. fetch_add n'est pas const.
     mutable std::atomic<uint64> _lecturesServies{0};

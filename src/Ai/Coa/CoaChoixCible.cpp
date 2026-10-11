@@ -34,6 +34,14 @@ namespace
     // longue du jeu tourne autour de 40 metres.
     constexpr float PORTEE_MAX = 45.0f;
 
+    // L'attente d'une reponse, bornee. L'aller-retour mesure est de 35 ms au
+    // P95 (P-085) : 400 ms couvrent un Mac charge sans laisser un bot plante
+    // la sous les coups. Au-dela, le moteur reprend la main, et pendant le
+    // repit qui suit on n'attend plus du tout : un oracle muet ne doit pas
+    // retarder chaque acquisition de 400 ms.
+    constexpr uint32 ATTENTE_MAX_MS = 400;
+    constexpr uint32 REPIT_MS = 2000;
+
     // Ce qu'un candidat est, en une phrase que le modele lit. Que des faits :
     // ce qu'il faut en conclure est precisement la question qu'on lui pose.
     std::string Decrire(Player* bot, Unit* cible)
@@ -90,10 +98,15 @@ namespace
     // demande entiere serait perdue, en silence, uniquement quand un joueur et
     // un monstre de meme compteur sont candidats en meme temps. Un defaut rare,
     // donc un defaut qu'on ne trouve jamais.
+    //
+    // ET LE COMPTEUR NE SUFFIT PAS NON PLUS : un familier et une creature sont
+    // tous deux TYPEID_UNIT, tires de generateurs differents, et peuvent donc
+    // partager un compteur sous le meme prefixe. Le GUID brut, lui, est unique
+    // tous types confondus ; le prefixe ne reste que pour la lisibilite.
     std::string Libelle(Unit* cible)
     {
         return (cible->GetTypeId() == TYPEID_PLAYER ? "j" : "c") +
-               std::to_string(cible->GetGUID().GetCounter());
+               std::to_string(cible->GetGUID().GetRawValue());
     }
 }
 
@@ -115,13 +128,21 @@ Unit* CoaChoisirCibleParLaya(PlayerbotAI* botAI, Player* bot, Unit* choixMoteur)
     if (bot->GetVictim())
         return choixMoteur;
 
-    // A 100 — le defaut — on n'interroge PAS le registre : ni verrou pris, ni
-    // comportement change. En dessous, une rencontre non ouverte vaut « non
-    // pilotee », ce qui dilue le bras pilote sans le melanger au temoin : la
-    // mesure est sous-estimee, jamais fabriquee.
-    if (sPlayerbotAIConfig.layaTirageAuSort < 100 &&
-        !CoaRegistreCombat::Instance().EstPilotee(guid))
-        return choixMoteur;
+    // LE BRAS DE LA RENCONTRE. A 100 — le defaut — tout est pilote et on
+    // n'interroge pas le registre. En dessous, hors rencontre ouverte il n'y a
+    // pas de bras, donc ni decision ni attente : c'est le cas de l'acquisition
+    // d'OUVERTURE, que le registre ne tire qu'une fois le combat engage
+    // (P-133, limite connue). Le TEMOIN, lui, passe par tout ce qui suit — la
+    // demande, l'attente — et ignore la reponse a la fin : les deux bras paient
+    // le meme delai, et seule la decision les distingue.
+    bool pilote = true;
+    if (sPlayerbotAIConfig.layaTirageAuSort < 100)
+    {
+        int const bras = CoaRegistreCombat::Instance().Bras(guid);
+        if (bras < 0)
+            return choixMoteur;
+        pilote = bras == 1;
+    }
 
     CoaLayaOracle& oracle = CoaLayaOracle::Instance();
     if (!oracle.Actif())
@@ -155,6 +176,11 @@ Unit* CoaChoisirCibleParLaya(PlayerbotAI* botAI, Player* bot, Unit* choixMoteur)
                 continue;
             if (bot->GetExactDist2d(unite) > PORTEE_MAX)
                 continue;
+            // `possible targets` est construit en ignorant la ligne de vue.
+            // Un candidat hors de vue, elu, ferait echouer Attack() — et le bras
+            // pilote serait le seul a payer cet echec.
+            if (!bot->IsWithinLOSInMap(unite))
+                continue;
             candidats.push_back(unite);
         }
     }
@@ -170,39 +196,90 @@ Unit* CoaChoisirCibleParLaya(PlayerbotAI* botAI, Player* bot, Unit* choixMoteur)
         candidats.resize(MAX_CIBLES);
 
     /* ---------------------------------------------------------------- */
-    /* 1. Demander, pour la prochaine acquisition                        */
+    /* 1. Ou en est l'attente                                            */
     /* ---------------------------------------------------------------- */
 
-    if (oracle.PeutRedemander(guid, CoaLayaOracle::CANAL_CIBLE))
+    // POURQUOI ATTENDRE (P-133). La premiere version demandait a
+    // l'acquisition et lisait le cache a l'acquisition SUIVANTE : la reponse
+    // avait alors des secondes, bien plus que Laya.MaxAgeMs, et n'etait
+    // jamais utilisable. Ici la reponse sert l'acquisition qui l'a demandee :
+    // on rend nullptr — « pas cette fois » — et l'action d'attaque, toujours
+    // declenchee, repasse au tick suivant. Rien ne bloque le thread monde.
+    std::string const libelleMoteur = Libelle(choixMoteur);
+    switch (oracle.SuivreAttente(guid, CoaLayaOracle::CANAL_CIBLE, ATTENTE_MAX_MS, REPIT_MS,
+                                 libelleMoteur))
     {
-        std::vector<std::pair<std::string, float>> lot;
-        std::vector<std::string> descriptions;
-        lot.reserve(candidats.size());
-        descriptions.reserve(candidats.size());
-        for (Unit* cible : candidats)
+        case CoaLayaOracle::Attente::EnVol:
+            return nullptr;
+        case CoaLayaOracle::Attente::Expiree:
+            oracle.CompterCibleExpiree();
+            return choixMoteur;
+        case CoaLayaOracle::Attente::Discordante:
+            // Le moteur propose une autre cible que celle de la demande (deux
+            // actions d'attaque dans le meme tick, une valeur recalculee) : la
+            // reponse ne classe pas son choix actuel, elle ne decide rien.
+            oracle.CompterCibleDiscordante();
+            return choixMoteur;
+        case CoaLayaOracle::Attente::Repit:
+            return choixMoteur;
+        case CoaLayaOracle::Attente::Libre:
         {
-            lot.emplace_back(Libelle(cible), 0.0f);
-            descriptions.push_back(Decrire(bot, cible));
+            std::vector<std::pair<std::string, float>> lot;
+            std::vector<std::string> descriptions;
+            lot.reserve(candidats.size());
+            descriptions.reserve(candidats.size());
+            for (Unit* cible : candidats)
+            {
+                lot.emplace_back(Libelle(cible), 0.0f);
+                descriptions.push_back(Decrire(bot, cible));
+            }
+            // Pas de question annexe : elle doublerait le cout d'inference sans
+            // rien apporter au choix de la cible.
+            // Aucun datagramme parti (oracle eteint entre-temps, envoi refuse,
+            // options en double) : ne pas attendre une reponse qui ne viendra
+            // pas.
+            if (!oracle.Demander(guid, CoaLayaOracle::CANAL_CIBLE,
+                                 CoaDecrireEtatLaya(botAI, bot, choixMoteur), lot, descriptions,
+                                 false))
+                return choixMoteur;
+            if (!oracle.OuvrirAttente(guid, CoaLayaOracle::CANAL_CIBLE, libelleMoteur))
+                return choixMoteur;
+            oracle.CompterCibleAttente();
+            return nullptr;
         }
-        // Pas de question annexe : elle doublerait le cout d'inference sans
-        // rien apporter au choix de la cible.
-        oracle.Demander(guid, CoaLayaOracle::CANAL_CIBLE,
-                        CoaDecrireEtatLaya(botAI, bot, choixMoteur), lot, descriptions, false);
+        case CoaLayaOracle::Attente::Repondue:
+            break;
     }
 
     /* ---------------------------------------------------------------- */
-    /* 2. Lire le cache, et rien que le cache                            */
+    /* 2. La reponse est la : decider, ou l'ignorer sur le temoin         */
     /* ---------------------------------------------------------------- */
+
+    // Les deux compteurs au meme endroit, avant tout test sur la reponse :
+    // `cibles_decidees` et `cibles_temoins` doivent etre comparables.
+    if (!pilote)
+    {
+        oracle.CompterCibleTemoin();
+        return choixMoteur;
+    }
+    oracle.CompterCibleDecidee();
 
     float const meilleure = oracle.MeilleureProbabilite(guid, CoaLayaOracle::CANAL_CIBLE);
     if (meilleure <= 0.0f)
         return choixMoteur;
 
-    // La reponse en cache porte sur les candidats de la demande PRECEDENTE.
-    // Ceux qui ne sont plus la n'y repondent pas, et un libelle inconnu rend
-    // -1 : un candidat absent de la reponse ne peut donc pas gagner.
+    // La reponse porte sur les candidats de la demande, relevee un ou deux
+    // ticks plus tot. Un candidat mort ou sorti entre-temps n'est plus dans
+    // `candidats` et ne peut pas gagner ; un nouveau venu n'est pas dans la
+    // reponse, rend -1, et ne bat donc jamais la cible du moteur, gardee a
+    // un score >= 0 ci-dessous.
     Unit* elu = choixMoteur;
-    float scoreElu = oracle.Probabilite(guid, CoaLayaOracle::CANAL_CIBLE, Libelle(choixMoteur));
+    float scoreElu = oracle.Probabilite(guid, CoaLayaOracle::CANAL_CIBLE, libelleMoteur);
+    // Garde : la cible du moteur est dans la demande (Discordante l'a verifie),
+    // donc dans la reponse. Si elle ne l'etait pas, -1 la ferait battre par
+    // n'importe quel candidat, meme a zero : on ne decide pas sur cette base.
+    if (scoreElu < 0.0f)
+        return choixMoteur;
     for (Unit* cible : candidats)
     {
         if (cible == choixMoteur)

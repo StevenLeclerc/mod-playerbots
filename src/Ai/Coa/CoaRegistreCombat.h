@@ -120,6 +120,13 @@ public:
     // pilote. Hors combat — donc sans rencontre ouverte — rend false.
     bool EstPilotee(uint64 guid) const;
 
+    // Le bras de la rencontre en cours : -1 s'il n'y en a aucune, 0 pour le
+    // temoin, 1 pour le pilote. EstPilotee confond « temoin » et « hors
+    // rencontre » ; le canal cible doit les distinguer, parce que les DEUX bras
+    // y paient la meme attente de reponse et que seul le hors-rencontre en est
+    // dispense (voir CoaChoixCible.h).
+    int Bras(uint64 guid) const;
+
     // Le bot quitte le monde. La rencontre en cours est JETEE, pas close : la
     // cloture lit le Player (points de vie, classe, kills) et l'appel vient du
     // destructeur de PlayerbotAI, ou cet objet est en train de disparaitre.

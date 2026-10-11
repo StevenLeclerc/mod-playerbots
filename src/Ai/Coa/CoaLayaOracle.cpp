@@ -212,8 +212,13 @@ void CoaLayaOracle::Integrer(char const* datagramme, size_t taille)
         _illisibles.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // Le canal voyage dans le bit de poids faible du seq (voir l'en-tete).
-    uint64 const cle = Cle(static_cast<uint64>(lu), seq & 1u);
+    // Le canal voyage dans les DEUX bits de poids faible du seq (voir l'en-tete).
+    // `seq & 1u` y restait du temps ou il n'y avait que deux canaux : il rangeait
+    // chaque reponse CIBLE (canal 2) sous le canal ACTION (0), qui n'a pas
+    // d'entree quand le veto est eteint — reponse jetee en `desordre`, et
+    // `cibles_changees` bloque a zero. Mesure le 2026-09-25 : +176 `desordre`
+    // en dix minutes apres l'armement du canal, 0 avant.
+    uint64 const cle = Cle(static_cast<uint64>(lu), seq & (CANAL_MAX - 1u));
 
     size_t const finChoix = texte.find('|', finEntete + 1);
     std::string const champ = texte.substr(finEntete + 1,
@@ -285,13 +290,13 @@ void CoaLayaOracle::Integrer(char const* datagramme, size_t taille)
     entree.probabilites = std::move(probabilites);
 }
 
-void CoaLayaOracle::Demander(uint64 guid, uint32 canal, std::string const& etat,
+bool CoaLayaOracle::Demander(uint64 guid, uint32 canal, std::string const& etat,
                              std::vector<std::pair<std::string, float>> const& candidats,
                              std::vector<std::string> const& descriptions,
                              bool avecNoul)
 {
     if (!_actif.load(std::memory_order_acquire) || candidats.size() < 2)
-        return;
+        return false;
 
     uint64 const cle = Cle(guid, canal);
     uint32 seq = 0;
@@ -372,7 +377,7 @@ void CoaLayaOracle::Demander(uint64 guid, uint32 canal, std::string const& etat,
         ++posees;
     }
     if (posees < 2)
-        return;
+        return false;
 
     // La question annexe double le cout d'inference (27 ms contre 14 mesures
     // sur M1). On ne la pose que quand elle sert.
@@ -387,9 +392,12 @@ void CoaLayaOracle::Demander(uint64 guid, uint32 canal, std::string const& etat,
     // exactement le cas de repli prevu.
     ssize_t const envoye = send(_sock, message.c_str(), message.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
     if (envoye < 0)
+    {
         _echecsEnvoi.fetch_add(1, std::memory_order_relaxed);
-    else
-        _emises.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    _emises.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 float CoaLayaOracle::Probabilite(uint64 guid, uint32 canal, std::string const& libelle) const
@@ -447,10 +455,66 @@ bool CoaLayaOracle::PeutRedemander(uint64 guid, uint32 canal) const
     return GetMSTimeDiffToNow(trouve->second.msEmission) >= sPlayerbotAIConfig.layaPeriodMs;
 }
 
+CoaLayaOracle::Attente CoaLayaOracle::SuivreAttente(uint64 guid, uint32 canal,
+                                                    uint32 attenteMaxMs, uint32 repitMs,
+                                                    std::string const& libelleMoteur)
+{
+    std::lock_guard<std::mutex> tenu(_verrou);
+    auto trouve = _cache.find(Cle(guid, canal));
+    if (trouve == _cache.end())
+        return Attente::Libre;
+    Entree& e = trouve->second;
+    uint32 const maintenant = getMSTime();
+
+    if (e.seqAttendu != 0)
+    {
+        uint32 const age = getMSTimeDiff(e.msAttente, maintenant);
+        // seqRecu porte le canal dans ses deux bits bas, seqAttendu non.
+        bool const repondue =
+            e.seqRecu != 0 && (e.seqRecu >> 2) == e.seqAttendu && !e.probabilites.empty();
+
+        if (repondue && age <= sPlayerbotAIConfig.layaMaxAgeMs)
+        {
+            e.seqAttendu = 0;
+            // Le libelle passe par le meme assainisseur qu'a l'emission.
+            return LibelleSur(libelleMoteur) == e.libelleAttendu ? Attente::Repondue
+                                                                 : Attente::Discordante;
+        }
+        if (!repondue && age < attenteMaxMs)
+            return Attente::EnVol;
+
+        // Delai echu sans reponse, ou reponse trop vieille pour servir : un
+        // tick lent, ou une attente orpheline (le bot a acquis sa cible par un
+        // autre chemin et n'est jamais revenu). Dans TOUS ces cas on rend la
+        // main au moteur et on ouvre le repit — jamais une nouvelle demande
+        // dans le meme appel, sans quoi un bot qui repasse moins d'une fois
+        // par Laya.MaxAgeMs redemanderait a chaque fois sans jamais frapper.
+        e.seqAttendu = 0;
+        e.msRepli = maintenant;
+        return Attente::Expiree;
+    }
+
+    if (e.msRepli != 0 && getMSTimeDiff(e.msRepli, maintenant) < repitMs)
+        return Attente::Repit;
+    return Attente::Libre;
+}
+
+bool CoaLayaOracle::OuvrirAttente(uint64 guid, uint32 canal, std::string const& libelleMoteur)
+{
+    std::lock_guard<std::mutex> tenu(_verrou);
+    auto trouve = _cache.find(Cle(guid, canal));
+    if (trouve == _cache.end() || trouve->second.seqEmis == 0)
+        return false;
+    trouve->second.seqAttendu = trouve->second.seqEmis;
+    trouve->second.msAttente = getMSTime();
+    trouve->second.libelleAttendu = LibelleSur(libelleMoteur);
+    return true;
+}
+
 void CoaLayaOracle::Oublier(uint64 guid)
 {
     std::lock_guard<std::mutex> tenu(_verrou);
-    for (uint32 canal = 0; canal <= 1; ++canal)
+    for (uint32 canal = 0; canal < CANAL_MAX; ++canal)
         _cache.erase(Cle(guid, canal));
 }
 
@@ -477,6 +541,13 @@ std::string CoaLayaOracle::Compteurs() const
     sortie += " lectures_servies=" + std::to_string(_lecturesServies.load(std::memory_order_relaxed));
     sortie += " lectures_vides=" + std::to_string(_lecturesVides.load(std::memory_order_relaxed));
     sortie += " bots_suivis=" + std::to_string(suivis);
+    // Apres bots_suivis, et pas ailleurs : les lecteurs existants cherchent
+    // chaque champ par son nom, un ajout en fin de ligne ne casse aucun d'eux.
+    sortie += " cibles_attentes=" + std::to_string(_ciblesAttentes.load(std::memory_order_relaxed));
+    sortie += " cibles_expirees=" + std::to_string(_ciblesExpirees.load(std::memory_order_relaxed));
+    sortie += " cibles_discordantes=" + std::to_string(_ciblesDiscordantes.load(std::memory_order_relaxed));
+    sortie += " cibles_decidees=" + std::to_string(_ciblesDecidees.load(std::memory_order_relaxed));
+    sortie += " cibles_temoins=" + std::to_string(_ciblesTemoins.load(std::memory_order_relaxed));
     return sortie;
 }
 

@@ -30,8 +30,21 @@ bool AttackAction::Execute(Event /*event*/)
     // le moteur jugeait deja attaquables, et seulement a l'acquisition. Inerte
     // tant que `AiPlayerbot.Laya.Cibles` n'est pas arme, et le repli rend
     // `target` inchangee. Voir Ai/Coa/CoaChoixCible.h.
-    target = CoaChoisirCibleParLaya(botAI, bot, target);
+    //
+    // nullptr veut dire « reponse en vol » : on ne frappe pas ce tick-ci, sans
+    // passer par Attack(), qui prendrait l'absence de cible pour une erreur.
+    Unit* choisie = CoaChoisirCibleParLaya(botAI, bot, target);
+    if (!choisie)
+        return false;
 
+    // Si la cible de l'oracle est refusee (zone PvP interdite, hostilite qui a
+    // change), on frappe celle du moteur dans le meme tick : sans ce repli, le
+    // bras pilote pourrait redemander la meme cible refusee a chaque
+    // acquisition. Attack() ne touche a rien avant ses tests de refus.
+    if (choisie == target)
+        return Attack(target);
+    if (Attack(choisie))
+        return true;
     return Attack(target);
 }
 

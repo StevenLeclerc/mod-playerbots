@@ -34,6 +34,18 @@
  * vraiment : sur qui j'ouvre. Changer de cible EN COURS de combat est une
  * seconde decision, qui se mesurera separement si celle-ci donne quelque chose.
  *
+ * RECTIFICATION DU 2026-09-25 (P-133) : ARME, LE CANAL JETAIT 100 % DE SES
+ * REPONSES. La reception decodait le canal sur un bit au lieu de deux : chaque
+ * reponse CIBLE tombait sous le canal ACTION et partait en `desordre`. Et meme
+ * rangee au bon endroit, elle n'etait lue qu'a l'acquisition SUIVANTE, des
+ * secondes plus tard, donc toujours perimee. D'ou l'attente bornee du .cpp :
+ * la reponse sert l'acquisition qui l'a demandee, et le bras temoin paie la
+ * meme attente pour que le delai ne soit pas confondu avec l'effet.
+ *
+ * LIMITE CONNUE : l'acquisition d'OUVERTURE n'est pas pilotee quand le tirage
+ * est actif. Le registre ne tire le bras qu'une fois le bot en combat ; seules
+ * les re-acquisitions en cours de rencontre passent donc par l'oracle.
+ *
  * ETAT AU 2026-09-24 : EN SERVICE, JAMAIS ARME, JAMAIS MESURE — ET C'EST VOULU
  *
  * `AiPlayerbot.Laya.Cibles` vaut false par defaut et n'a jamais ete mis a true.
@@ -69,8 +81,13 @@ class PlayerbotAI;
 class Unit;
 
 // Rend la cible a frapper : celle de l'oracle s'il a une reponse fraiche et
-// utilisable, sinon `choixMoteur`, inchangee. Ne rend jamais nullptr quand
-// `choixMoteur` ne l'est pas.
+// utilisable, sinon `choixMoteur`, inchangee.
+//
+// PEUT RENDRE nullptr alors que `choixMoteur` ne l'est pas : cela veut dire
+// « une reponse est en vol, ne frappe pas encore ». L'appelant rend faux sans
+// rien faire, et l'action repasse au tick suivant. L'attente est bornee a
+// ATTENTE_MAX_MS par acquisition, et nulle hors rencontre ouverte quand le
+// tirage est actif (voir CoaChoixCible.cpp et P-133).
 Unit* CoaChoisirCibleParLaya(PlayerbotAI* botAI, Player* bot, Unit* choixMoteur);
 
 #endif
