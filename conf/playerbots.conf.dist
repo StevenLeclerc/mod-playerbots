@@ -4171,7 +4171,7 @@ AiPlayerbot.Directeur.EvenementArriveeCiel = 0
 
 #    AiPlayerbot.Directeur.EvenementAncreBot
 #        Autonomie des evenements (11/10/2026, coa-project/docs/CONCEPTION-autonomie-evenements.md § 5) :
-#        un BOT (aleatoire ou d'un joueur, en monde, JAMAIS un mercenaire) peut etre l'ANCRE d'un evenement
+#        un BOT ALEATOIRE (en monde, JAMAIS un mercenaire ni l'altbot d'un joueur) peut etre l'ANCRE d'un evenement
 #        (le joueur de reference des commandes), pour un evenement entre bots seuls ou le relais d'un humain
 #        parti. Vaut pour : `evenement` aux lieux `point` et `haut` (son, effet), `invoquer` et `ordre`, et
 #        la presence `peupler` F-/T-/L-/Q- (bots appeles, inscription mission `evenement`).

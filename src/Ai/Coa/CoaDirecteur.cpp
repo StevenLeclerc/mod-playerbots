@@ -2328,8 +2328,9 @@ bool AncreDEvenement(Player* p)
 {
     if (Humain(p))
         return true;
+    // Revue du 11/10 : bot ALEATOIRE seul (jamais l'altbot d'un compte humain, que le bus ne doit pas pouvoir viser).
     return sPlayerbotAIConfig.directeurEvenementAncreBot && p && GET_PLAYERBOT_AI(p) && p->IsInWorld() &&
-           !MercenaryRewards::EstMercenaire(p);
+           sRandomPlayerbotMgr.IsRandomBot(p) && !MercenaryRewards::EstMercenaire(p);
 }
 
 // ------------------------------------------------------------------ banc d'essai de prime (03/10/2026)
