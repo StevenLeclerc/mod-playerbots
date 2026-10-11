@@ -907,6 +907,8 @@ bool PlayerbotAIConfig::Initialize()
     // Variantes, retours du 09/10/2026 (« je pensais les voir surgir d'en haut ») : arrivee `ciel` d'invoquer
     // (pose en hauteur, descente au sol). Eteinte par defaut : `ciel` est alors posee au sol, comme `aucune`.
     directeurEvenementArriveeCiel = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementArriveeCiel", false);
+    // Autonomie des evenements (11/10/2026) : un bot pour ancre d'evenement. Eteinte par defaut : rien ne change.
+    directeurEvenementAncreBot = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementAncreBot", false);
     directeurEvenementInvoquesParJoueur =
         std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementInvoquesParJoueur", 12), 1, 24);
     directeurEvenementInvocationDistanceYd = std::clamp<uint32>(

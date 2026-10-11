@@ -579,6 +579,10 @@ public:
     std::string directeurEvenementCreatures;          // entrees permises (plage 9100000-9109999 imposee)
     std::string directeurEvenementSortsArrivee;       // sorts d'arrivee permis (7398 « naissance »)
     bool directeurEvenementArriveeCiel;               // arrivee `ciel` (pose en hauteur, descente) ; faux : au sol
+    // Autonomie des evenements (11/10/2026, coa-project/docs/CONCEPTION-autonomie-evenements.md § 5) : un BOT non
+    // mercenaire peut servir d'ANCRE (joueur de reference) a `evenement` aux lieux point/haut, a invoquer/ordre et a la
+    // presence `peupler` F-/T-/L-/Q- (CoaDirecteur.cpp, AncreDEvenement). Faux (defaut) : humain seul, comme avant.
+    bool directeurEvenementAncreBot;
     uint32 directeurEvenementInvoquesParJoueur;       // invoques vivants par joueur (1-24)
     uint32 directeurEvenementInvocationDistanceYd;    // point d'apparition a au plus N yd du joueur (20-250)
     // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas

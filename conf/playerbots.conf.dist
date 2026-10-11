@@ -4169,6 +4169,23 @@ AiPlayerbot.Directeur.EvenementSortsArrivee = "7398"
 #        Default: 0
 AiPlayerbot.Directeur.EvenementArriveeCiel = 0
 
+#    AiPlayerbot.Directeur.EvenementAncreBot
+#        Autonomie des evenements (11/10/2026, coa-project/docs/CONCEPTION-autonomie-evenements.md § 5) :
+#        un BOT (aleatoire ou d'un joueur, en monde, JAMAIS un mercenaire) peut etre l'ANCRE d'un evenement
+#        (le joueur de reference des commandes), pour un evenement entre bots seuls ou le relais d'un humain
+#        parti. Vaut pour : `evenement` aux lieux `point` et `haut` (son, effet), `invoquer` et `ordre`, et
+#        la presence `peupler` F-/T-/L-/Q- (bots appeles, inscription mission `evenement`).
+#        Reste reserve aux HUMAINS (refus `pas_humain`) : lieu `joueur` (ambiance, musique, son, effet,
+#        annonce), ciel, meteo, repondre, faire_parler, recompenser, coffre, portail, objectifs, groupe
+#        d'evenement, compagnons (C-) et toute autre presence.
+#        Un declencheur au point n'est visible que de son ancre : sous une ancre bot, son et effet au point
+#        sont poses (`execute`) mais AUCUN humain ne les voit ni ne les entend.
+#        Le service (faille_orage.py, evenements_auto.py, cle `evenements_bots_seuls`) lit CETTE ligne du
+#        fichier de conf : la passer a 1 sans que le binaire porte l'option ferait refuser `pas_humain`.
+#        Lue par PlayerbotAIConfig::Initialize seulement : `.reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0 (humain seul : comportement d'avant, a l'identique)
+AiPlayerbot.Directeur.EvenementAncreBot = 0
+
 #    AiPlayerbot.Directeur.EvenementInvoquesParJoueur
 #        invoques VIVANTS par joueur au plus (1-24), 64 en tout dans le royaume ; au-dela, refus `plein`.
 #        Default: 12

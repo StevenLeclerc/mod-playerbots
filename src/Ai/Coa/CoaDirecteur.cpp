@@ -2317,6 +2317,21 @@ bool Humain(Player* p)
     return p && !GET_PLAYERBOT_AI(p) && p->GetSession();
 }
 
+// Autonomie des evenements (11/10/2026, coa-project/docs/CONCEPTION-autonomie-evenements.md § 5) : l'ANCRE d'un
+// evenement (le joueur de reference des commandes `evenement` point/haut, invoquer, ordre, et de la presence F-/T-/L-/Q-).
+// Un humain, toujours ; un BOT en monde et non mercenaire, seulement si AiPlayerbot.Directeur.EvenementAncreBot vaut 1
+// (meme regle que le service : un mercenaire ne joue pas l'evenement, calibrage.recenser). Option eteinte : Humain(p),
+// a l'identique. Fil monde seul (EstMercenaire lit RandomPlayerbotMgr::currentBots, sans verrou : MercenaryRewards.h).
+// Ne remplace Humain NULLE PART ailleurs : ce qui s'adresse a l'ecran d'un client (ciel, meteo, paroles, recompense,
+// coffre, portail, objectifs, lieu `joueur`) reste reserve aux humains.
+bool AncreDEvenement(Player* p)
+{
+    if (Humain(p))
+        return true;
+    return sPlayerbotAIConfig.directeurEvenementAncreBot && p && GET_PLAYERBOT_AI(p) && p->IsInWorld() &&
+           !MercenaryRewards::EstMercenaire(p);
+}
+
 // ------------------------------------------------------------------ banc d'essai de prime (03/10/2026)
 //
 // Option Directeur.PrimeBanc. EstBanc : fil monde, le personnage est-il un BOT de la
@@ -4134,7 +4149,9 @@ void ExecuterEvenement(CoaDirCommande const& c)
         RefuserEvenement(c, lu, "hors_ligne");
         return;
     }
-    if (!Humain(p))
+    // Ancre bot (11/10) : aux seuls lieux `point` et `haut` ; au lieu `joueur` (aure, musique, son ou kit personnel,
+    // annonce), un client est requis : humain seul. Option eteinte : Humain(p) partout, comme avant.
+    if (lu.lieu == EvLieu::Joueur ? !Humain(p) : !AncreDEvenement(p))
     {
         RefuserEvenement(c, lu, "pas_humain");
         return;
@@ -5303,7 +5320,7 @@ void ExecuterApparition(CoaDirCommande const& c)
         RefuserApparition(c, lu, "hors_ligne");
         return;
     }
-    if (!Humain(p))
+    if (!AncreDEvenement(p))   // 11/10 : un bot non mercenaire si EvenementAncreBot (sinon humain seul)
     {
         RefuserApparition(c, lu, "pas_humain");
         return;
@@ -8509,7 +8526,15 @@ void ExecuterAffectation(CoaDirCommande const& recue)
             Refuser(c, "hors_ligne");
             return;
         }
-        if (!Humain(joueur))
+        // Ancre bot (11/10, EvenementAncreBot) : les prefixes des presences d'un evenement (faille_orage.py) --
+        // F- (vers la faille), T-/L- (sauts), Q- (finale, mission ou inscription) ; jamais un compagnon (C-) ni une
+        // etape E-, et jamais le bot lui-meme pour ancre. LIMITE : le prefixe ne distingue pas une animation
+        // (ecoute.py emet aussi T-/L-/Q-) ; c'est le service qui ne met un bot en `joueur` que pour un evenement.
+        // Option eteinte : Humain(joueur), a l'identique (un bot appele pour lui-meme tombait deja `pas_humain`).
+        bool const presenceDEvenement = c.action.size() > 2 && c.action[1] == '-' &&
+                                        (c.action[0] == 'F' || c.action[0] == 'T' || c.action[0] == 'L' ||
+                                         c.action[0] == 'Q');
+        if (!Humain(joueur) && (!presenceDEvenement || joueur == bot || !AncreDEvenement(joueur)))
         {
             Refuser(c, "pas_humain");
             return;
