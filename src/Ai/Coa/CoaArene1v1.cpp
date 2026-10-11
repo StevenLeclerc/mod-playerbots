@@ -1830,6 +1830,21 @@ public:
                     vainqueur = guid.GetCounter();
                     break;
                 }
+        // Fin d'arene 1v1 (11/10, « le jeu fige des que l'un de nous deux meurt ») : EndBattleground vient de couper le
+        // controle du deplacement a chaque joueur (BlockMovement -> SetClientControl(player, 0), Battleground.cpp:954 et
+        // :1026), dans le meme tick que cet appel (:991) et sur le meme fil. Le joueur humain le recupere ; le
+        // gladiateur, lui, n'est rendu immobile et inoffensif (Apaiser, IMMUNE_TO_PC : le joueur ne peut plus le cibler)
+        // qu'au tick suivant du suivi, au fil monde, soit environ une seconde plus tard ; d'ici la, combat arrete des
+        // deux cotes (CombatStopWithPets, :952) et aucune mort ne compte plus (Arena::HandleKillPlayer exige
+        // STATUS_IN_PROGRESS, EndBattleground sort sur STATUS_WAIT_LEAVE). Le cote client du controle est retabli par la
+        // teleportation de sortie de toute facon (commentaire de BlockMovement).
+        // Seulement s'il se pilote lui-meme : sous possession (il pilote une autre unite, m_mover != p),
+        // SetClientControl(p, true) ferait SetMover(p) et le client resterait sur l'unite possedee ; sous charme
+        // d'autrui, SetClientControl refuse et journalise une erreur (Player.cpp:13522). Peur ou confusion :
+        // SetClientControl force allowMove a faux, et Unit::SetFeared/SetConfused le rend a la fin de l'effet.
+        for (auto const& [guid, p] : bg->GetPlayers())
+            if (p && p->IsInWorld() && !GET_PLAYERBOT_AI(p) && p->m_mover == p && !p->IsCharmed())
+                p->SetClientControl(p, true);
         uint32 const maintenant = Maintenant();
         std::lock_guard<std::mutex> garde(verrou);
         for (Match& m : matchs)
