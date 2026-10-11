@@ -114,6 +114,21 @@ struct CoaAreneEtat
     // Revue c2 : un familier a ete vu vivant (pour reconnaitre sa perte), et l'instant de cette perte (0 : aucune).
     bool familierVu = false;
     uint32 familierPerduMs = 0;
+    // Combat contre un humain (11/10, CoaAreneIa.inc, arene 1v1 et duel, CoaArene.IaCommune) : interruption,
+    // dissipation sur soi, fenetre de burst apres un controle. Bilan : compteurs ci-dessous.
+    // Incantation adverse suivie par CoaAreneMaj (les deux bras) : identite de la derniere vue (sort et adresse du
+    // Spell, jamais dereferencee), pour compter chaque incantation une fois ; echec d'interruption deja note pour elle.
+    uint32 incantationAdvSort = 0;
+    uintptr_t incantationAdvSpell = 0;
+    bool incantationAdvRateeNotee = false;
+    uint32 prochaineInterruptionMs = 0;
+    uint32 prochainDispelSoiMs = 0;
+    // Fenetre de burst en cours : aura de controle qui l'a ouverte, fin prevue (getMSTime), un sort deja lance dedans.
+    uint32 fenetreAura = 0;
+    uint32 fenetreFinMs = 0;
+    bool fenetreExploitee = false;
+    uint32 incantationsVues = 0, soinsVus = 0, interruptions = 0, interruptionsSoin = 0, interruptionsRatees = 0;
+    uint32 dispelsSoi = 0, fenetresVues = 0, fenetresBurst = 0, fenetreSorts = 0;
 };
 
 /*

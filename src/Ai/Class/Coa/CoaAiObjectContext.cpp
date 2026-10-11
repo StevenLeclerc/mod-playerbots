@@ -2033,6 +2033,10 @@ public:
         CoaAreneBurst const burst = CoaAreneOrdonnerBurst(botAI, bot, target, usable);
         if (usable.empty())
             return RecordUsage(USAGE_ATTACK, nullptr);
+        // CoaArene (11/10, arene 1v1 et duel, IaCommune) : l'adversaire vient d'etre controle par le bot, ses plus gros
+        // sorts de degats passent devant. Ordre seulement, rien de retire ; jamais pour le Ranger de L1 (burst ci-dessus).
+        // Avant le rapprochement : une melee loin de sa cible controlee charge d'abord. Voir CoaAreneOrdonnerFenetre.
+        CoaAreneFenetre const fenetre = CoaAreneOrdonnerFenetre(botAI, bot, target, usable, burst.fenetre);
         // CoaArene (melee, duel ou arene 1v1) : adversaire a plus de 10 yd, charge et saut devant. Apres la copie du
         // tourniquet, comme le burst : l'index se relit sur l'ordre d'avant. Voir CoaAreneOrdonnerRapprochement.
         CoaAreneOrdonnerRapprochement(botAI, bot, target, usable);
@@ -2054,6 +2058,7 @@ public:
             if (itr != ordre.end())
                 next = start + size_t(std::distance(ordre.begin(), itr)) + 1;
             CoaAreneNoterBurst(botAI, bot, target, burst, cast);
+            CoaAreneNoterFenetre(botAI, bot, target, fenetre, cast);
         }
 
         return RecordUsage(USAGE_ATTACK, cast);

@@ -404,6 +404,169 @@ bool CoaAreneCacheurActif(Player* bot, CoaAreneEtat& etat)
     return etat.cacheurOui;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Combat contre un humain (11/10/2026) : interruption, dissipation sur soi, fenetre de burst. Retour du commanditaire
+// (Onyx, Chronomancer 30, arene 1v1 id=3 du 10/10 20:00:42-20:01:04 UTC contre Zolun, Ranger 2617) : soigne de 42 a
+// 100 % sans etre interrompu ; ses DoT tuent le bot sans reaction. Arene 1v1 (type CoaArene1v1::TYPE_ARENE) et duel
+// seulement, sous CoaArene.IaCommune, bras tire. Fil de l'IA du bot ; l'adversaire est lu sur la carte du bot (P-137).
+// ---------------------------------------------------------------------------------------------------------------
+
+// Duel en cours, ou arene 1v1 de CoaArene1v1 : jamais une 2v2/3v3/5v5 de bots, jamais le monde ouvert.
+bool CoaAreneUnContreUn(Player* bot)
+{
+    if (bot->duel && bot->duel->Opponent)
+        return true;
+    Battleground* bg = bot->InArena() ? bot->GetBattleground() : nullptr;
+    return bg && bg->isArena() && bg->GetArenaType() == CoaArene1v1::TYPE_ARENE;
+}
+
+// L'incantation adverse qu'un sort pourrait couper : sort a incantation en preparation (GetCastTime > 0), ou
+// canalisation en cours, que le coeur declare interruptible (Spell::IsInterruptable). Memes etats que
+// Spell::EffectInterruptCast (SpellEffects.cpp:4096-4098). Ni tir automatique ni sort de melee.
+Spell* CoaAreneIncantationAdverse(Unit* adv, bool& canalisee)
+{
+    canalisee = false;
+    if (!adv)
+        return nullptr;
+    if (Spell* spell = adv->GetCurrentSpell(CURRENT_GENERIC_SPELL))
+        if (spell->getState() == SPELL_STATE_PREPARING && spell->GetCastTime() > 0 && spell->IsInterruptable())
+            return spell;
+    if (Spell* spell = adv->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
+        if (spell->getState() == SPELL_STATE_CASTING && spell->IsInterruptable())
+        {
+            canalisee = true;
+            return spell;
+        }
+    return nullptr;
+}
+
+// Un soin : HEAL, HEAL_PCT, HEAL_MAX_HEALTH ou aura PERIODIC_HEAL, par ses effets ou par un sort qu'il declenche
+// (un niveau, auras de proc ecartees comme dans Classify). Sur soi ou sur un allie : l'adversaire se soigne lui-meme.
+bool CoaAreneEstSoin(SpellInfo const* info, uint8 profondeur = 0)
+{
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect())
+            continue;
+        if (effect.Effect == SPELL_EFFECT_HEAL || effect.Effect == SPELL_EFFECT_HEAL_PCT ||
+            effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH ||
+            (IsAuraEffect(effect) && effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL))
+            return true;
+        bool const proc = IsAuraEffect(effect) &&
+            (effect.ApplyAuraName == SPELL_AURA_PROC_TRIGGER_SPELL || effect.ApplyAuraName == SPELL_AURA_PROC_TRIGGER_SPELL_WITH_VALUE ||
+             effect.ApplyAuraName == SPELL_AURA_PROC_TRIGGER_DAMAGE || effect.ApplyAuraName == SPELL_AURA_ADD_TARGET_TRIGGER);
+        if (effect.TriggerSpell && !proc && !profondeur)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                if (CoaAreneEstSoin(declenche, 1))
+                    return true;
+    }
+    return false;
+}
+
+// Incantation qui merite une interruption PURE (le sort d'interruption a une recharge : ne pas le gacher) : un soin,
+// ou un sort NON positif (degats, controle) d'au moins 1,5 s d'incantation, ou une canalisation non positive. Un buff,
+// une monture, une invocation ou une incantation courte ne la meritent pas.
+constexpr int32 CoaAreneIncantationDigneMs = 1500;
+bool CoaAreneIncantationDigne(Spell const* spell, bool canalisee, bool soin)
+{
+    if (soin)
+        return true;
+    SpellInfo const* info = spell->GetSpellInfo();
+    if (info->IsPositive())
+        return false;
+    return canalisee || spell->GetCastTime() >= CoaAreneIncantationDigneMs;
+}
+
+constexpr uint8 COA_COUPE_NON = 0;
+constexpr uint8 COA_COUPE_PURE = 1;     // SPELL_EFFECT_INTERRUPT_CAST, ou silence
+constexpr uint8 COA_COUPE_CONTROLE = 2; // etourdissement, peur, desorientation
+
+/*
+ * Comment `info` (sort du bot) couperait `vise` (l'incantation adverse), lu dans les effets et dans le coeur :
+ *   - SPELL_EFFECT_INTERRUPT_CAST : Spell::EffectInterruptCast (SpellEffects.cpp:4096-4101) exige
+ *     PreventionType == SILENCE et SPELL_INTERRUPT_FLAG_INTERRUPT (incantation) ou CHANNEL_INTERRUPT_FLAG_INTERRUPT
+ *     (canalisation) sur le sort vise ;
+ *   - aura SILENCE ou PACIFY_SILENCE : AuraEffect::HandleAuraModSilence (SpellAuraEffects.cpp:3252-3257) coupe tout
+ *     sort dont PreventionType == SILENCE, quels que soient ses drapeaux ;
+ *   - aura STUN, FEAR, CONFUSE : Unit::SetStunned / SetControlled (Unit.cpp:15074, 15084, 15185) appellent CastStop.
+ * Seul un effet vise sur un ENNEMI compte (pas un etourdissement du lanceur), et pas un effet auquel la cible est
+ * immunisee (Unit::IsImmunedToSpellEffect, le test du coeur : mecanisme, etat, ecole). Sorts declenches : un niveau,
+ * auras de proc ecartees. La racine ne coupe rien. Une silence posee par SCRIPT (Toxic Dart 807237 -> 807821, du
+ * module, AscensionClassMechanics.cpp:778-789) n'est lisible nulle part dans le DBC : elle n'est pas vue.
+ */
+uint8 CoaAreneCoupe(Player* bot, SpellInfo const* info, SpellInfo const* vise, bool canalisee, Unit* cible,
+                    uint8 profondeur = 0)
+{
+    // Relecture : immunite au sort ENTIER (mecanisme du sort, dissipation, ecole -- bouclier divin), que le test par
+    // effet ne voit pas : Unit::IsImmunedToSpell, le test du coeur.
+    if (!profondeur && cible->IsImmunedToSpell(info, static_cast<Unit const*>(bot)))
+        return COA_COUPE_NON;
+    uint8 meilleur = COA_COUPE_NON;
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effect = info->Effects[i];
+        if (!effect.IsEffect())
+            continue;
+        bool const ennemi = IsEnemyTarget(effect.TargetA.GetTarget()) || IsEnemyTarget(effect.TargetB.GetTarget());
+        bool const silenceVise = vise->PreventionType == SPELL_PREVENTION_TYPE_SILENCE;
+        uint8 coupe = COA_COUPE_NON;
+        // Un effet qui ne vise pas l'adversaire ne coupe rien ; un sort qu'il declenche est juge plus bas, sur ses
+        // propres cibles.
+        if (ennemi && effect.Effect == SPELL_EFFECT_INTERRUPT_CAST)
+        {
+            if (silenceVise && (canalisee ? (vise->ChannelInterruptFlags & CHANNEL_INTERRUPT_FLAG_INTERRUPT)
+                                          : (vise->InterruptFlags & SPELL_INTERRUPT_FLAG_INTERRUPT)))
+                coupe = COA_COUPE_PURE;
+        }
+        else if (ennemi && IsAuraEffect(effect))
+        {
+            switch (effect.ApplyAuraName)
+            {
+                case SPELL_AURA_MOD_SILENCE: case SPELL_AURA_MOD_PACIFY_SILENCE:
+                    if (silenceVise)
+                        coupe = COA_COUPE_PURE;
+                    break;
+                case SPELL_AURA_MOD_STUN: case SPELL_AURA_MOD_FEAR: case SPELL_AURA_MOD_CONFUSE:
+                    coupe = COA_COUPE_CONTROLE;
+                    break;
+                default:
+                    break;
+            }
+        }
+        // Relecture : une zone autour du lanceur ou un cone (ni cible unite explicite ni point au sol, que CastFirst
+        // poserait sur l'adversaire) partirait dans le vide si l'adversaire est hors de son rayon -- une peur de zone a
+        // 8 yd lancee a 30 yd gachait l'interruption. Au premier niveau seulement : un sort declenche part de la cible.
+        if (coupe != COA_COUPE_NON && !profondeur &&
+            (IsEnemyAreaTarget(effect.TargetA.GetTarget()) || IsEnemyAreaTarget(effect.TargetB.GetTarget())) &&
+            !(info->GetExplicitTargetMask() & (TARGET_FLAG_UNIT_MASK | TARGET_FLAG_DEST_LOCATION)))
+        {
+            float const rayon = effect.CalcRadius(bot);
+            if (rayon <= 0.0f || !bot->IsWithinDistInMap(cible, rayon))
+                coupe = COA_COUPE_NON;
+        }
+        if (coupe != COA_COUPE_NON && !cible->IsImmunedToSpellEffect(info, i, bot))
+        {
+            if (coupe == COA_COUPE_PURE)
+                return COA_COUPE_PURE;
+            meilleur = coupe;
+        }
+
+        bool const proc = IsAuraEffect(effect) &&
+            (effect.ApplyAuraName == SPELL_AURA_PROC_TRIGGER_SPELL || effect.ApplyAuraName == SPELL_AURA_PROC_TRIGGER_SPELL_WITH_VALUE ||
+             effect.ApplyAuraName == SPELL_AURA_PROC_TRIGGER_DAMAGE || effect.ApplyAuraName == SPELL_AURA_ADD_TARGET_TRIGGER);
+        if (effect.TriggerSpell && !proc && !profondeur)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+            {
+                uint8 const sous = CoaAreneCoupe(bot, declenche, vise, canalisee, cible, 1);
+                if (sous == COA_COUPE_PURE)
+                    return COA_COUPE_PURE;
+                if (sous != COA_COUPE_NON)
+                    meilleur = sous;
+            }
+    }
+    return meilleur;
+}
+
 // Fin d'un recul : la distance atteinte se lit a l'arrivee, pas a la decision. `vise` est la distance que la
 // fenetre permettait d'atteindre (<= `vise_max`, la distance de confort) ; le succes se juge contre elle.
 // `arreter` : le bot court encore (ecart atteint, ou fenetre close) -- il s'arrete pour se retourner et tirer.
@@ -447,7 +610,13 @@ void CoaAreneClore(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* ad
                                                            "cacheur_aucun={} cacheur_vu={}", etat.cacheurCaches,
                                                            etat.cacheurTirs, etat.cacheurAucun, etat.cacheurVu)
                                      : std::string()) +
-                    Acore::StringFormat(" instance={} fin={} familiers={}", etat.instance, fin, etat.familiers));
+                    Acore::StringFormat(" instance={} fin={} familiers={}", etat.instance, fin, etat.familiers) +
+                    // Combat contre un humain (11/10) : champs ajoutes EN FIN de ligne (contrat de outils/banc-arene.py).
+                    Acore::StringFormat(" incantations_vues={} soins_vus={} interruptions={} interruptions_soin={} "
+                                        "interruptions_ratees={} dispels_soi={} fenetres_vues={} fenetres_burst={} "
+                                        "fenetre_sorts={}", etat.incantationsVues, etat.soinsVus, etat.interruptions,
+                                        etat.interruptionsSoin, etat.interruptionsRatees, etat.dispelsSoi,
+                                        etat.fenetresVues, etat.fenetresBurst, etat.fenetreSorts));
     etat.actif = false;
     etat.cacheurEnRouteMs = 0;
     etat.reculFinMs = 0;
@@ -537,6 +706,25 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
     Unit* adv = etat.adversaire ? ObjectAccessor::GetUnit(*bot, etat.adversaire) : nullptr;
     if (adv && !adv->IsInWorld())
         adv = nullptr;
+
+    // Combat contre un humain (11/10) : chaque incantation adverse comptee une fois (les deux bras : c'est la base de
+    // comparaison des interruptions), soins a part. Arene 1v1 et duel seulement.
+    {
+        bool canalisee = false;
+        Spell* incantation = (cadre == COA_ARENE_ARENE || cadre == COA_ARENE_DUEL) && !preparation && adv &&
+                             adv->IsAlive() && adv->GetMap() == bot->GetMap() && CoaAreneUnContreUn(bot)
+                                 ? CoaAreneIncantationAdverse(adv, canalisee) : nullptr;
+        uintptr_t const adresse = reinterpret_cast<uintptr_t>(incantation);
+        uint32 const sort = incantation ? incantation->GetSpellInfo()->Id : 0;
+        if (incantation && (adresse != etat.incantationAdvSpell || sort != etat.incantationAdvSort))
+        {
+            ++etat.incantationsVues;
+            etat.soinsVus += CoaAreneEstSoin(incantation->GetSpellInfo()) ? 1 : 0;
+            etat.incantationAdvRateeNotee = false;
+        }
+        etat.incantationAdvSpell = adresse;
+        etat.incantationAdvSort = sort;
+    }
 
     // Recul en cours : clos quand l'ecart vise est atteint (le bot s'arrete : courir plus loin le sortirait de
     // portee si la cible cesse de suivre), quand la cible peut de nouveau suivre (a vitesse egale, courir ne
@@ -1029,6 +1217,169 @@ void CoaAreneNoterBurst(PlayerbotAI* botAI, Player* bot, Unit* cible, CoaAreneBu
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Fenetre de burst (11/10, combat contre un humain) : le bot vient d'etourdir, d'effrayer ou -- s'il tire a distance
+// -- d'enraciner l'adversaire ; ses sorts de degats les plus lourds passent en tete de liste pendant le controle.
+// Generalisation PRUDENTE du burst du Ranger (CoaAreneOrdonnerBurst, qui reste seul juge pour le Ranger de L1) :
+//   - aucun sort n'est retire : seul l'ordre change (le tourniquet et CastFirst jugent le reste) ;
+//   - en tete : KIND_DAMAGE sans KIND_CONTROL (ne pas recontroler ni gacher le controle), pret (CoaAreneSortPret),
+//     incantation plus courte que le controle restant, et cible NON immunisee (Unit::IsImmunedToDamage et
+//     Unit::IsImmunedToSpell, les tests du coeur ; un bouclier d'immunite renvoie le sort en queue, pas a la porte) ;
+//   - ordre : degats de base lus dans les effets (CoaAreneDegatsDeBase), puis cout. Pas de rotation par specialisation.
+// Le controle compte s'il est pose par le bot ou par ce qu'il controle (familier), et s'il lui reste 0,5 s au moins.
+// ---------------------------------------------------------------------------------------------------------------
+struct CoaAreneFenetre
+{
+    bool ouverte = false;
+    uint32 aura = 0;
+    char const* controle = "";
+    int32 resteMs = 0;
+    std::vector<SpellInfo const*> tete;
+    std::vector<float> degats;
+};
+
+constexpr int32 CoaAreneFenetreResteMinMs = 500;
+
+// Degats de base d'un sort, lus dans ses effets : pour ORDONNER, jamais pour filtrer. Un sort scripte (effet DUMMY)
+// vaut 0 ici et se departage par son cout.
+float CoaAreneDegatsDeBase(Player* bot, SpellInfo const* info)
+{
+    WeaponAttackType const attaque = info->DmgClass == SPELL_DAMAGE_CLASS_RANGED ? RANGED_ATTACK : BASE_ATTACK;
+    float const arme = (bot->GetWeaponDamageRange(attaque, MINDAMAGE) + bot->GetWeaponDamageRange(attaque, MAXDAMAGE)) / 2.0f;
+    float total = 0.0f;
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect())
+            continue;
+        float const valeur = float(std::max(0, effect.CalcValue(bot)));
+        switch (effect.Effect)
+        {
+            case SPELL_EFFECT_SCHOOL_DAMAGE: case SPELL_EFFECT_HEALTH_LEECH:
+                total += valeur;
+                break;
+            case SPELL_EFFECT_WEAPON_DAMAGE: case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL: case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
+                total += arme + valeur;
+                break;
+            case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
+                total += arme * valeur / 100.0f;
+                break;
+            default:
+                if (IsAuraEffect(effect) && effect.Amplitude > 0 &&
+                    (effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE || effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH))
+                {
+                    int32 const duree = info->GetMaxDuration();
+                    if (duree > 0)
+                        total += valeur * float(duree / effect.Amplitude);
+                }
+                break;
+        }
+    }
+    return total;
+}
+
+// Le controle pose par le bot (ou son familier) sur la cible, le plus long qui reste. Faux s'il n'y en a pas.
+bool CoaAreneControleDuBot(Player* bot, Unit* cible, bool tireur, CoaAreneFenetre& fenetre)
+{
+    struct Genre { AuraType type; char const* nom; };
+    // Revue tour 7 : pas la peur -- le premier gros coup la briserait (fenetre qui gache son propre controle).
+    Genre const genres[] = { { SPELL_AURA_MOD_STUN, "etourdissement" }, { SPELL_AURA_MOD_ROOT, "racine" } };
+    for (Genre const& genre : genres)
+    {
+        if (genre.type == SPELL_AURA_MOD_ROOT && !tireur)
+            continue;
+        for (AuraEffect const* effet : cible->GetAuraEffectsByType(genre.type))
+        {
+            Aura const* aura = effet ? effet->GetBase() : nullptr;
+            if (!aura)
+                continue;
+            Unit* lanceur = aura->GetCaster();
+            if (!lanceur || lanceur->GetCharmerOrOwnerOrSelf() != bot)
+                continue;
+            int32 const duree = aura->GetDuration();
+            int32 const reste = duree > 0 ? duree : int32(CoaAreneFenetreParDefautMs);
+            if (reste < CoaAreneFenetreResteMinMs || reste <= fenetre.resteMs)
+                continue;
+            fenetre.aura = aura->GetId();
+            fenetre.resteMs = reste;
+            fenetre.controle = genre.nom;
+        }
+    }
+    return fenetre.aura != 0;
+}
+
+CoaAreneFenetre CoaAreneOrdonnerFenetre(PlayerbotAI* botAI, Player* bot, Unit* cible, std::vector<Usable>& usable,
+                                        bool burstRanger)
+{
+    CoaAreneFenetre fenetre;
+    if (!sPlayerbotAIConfig.coaAreneIaCommune || burstRanger || !cible || usable.empty() ||
+        CoaAreneEstRangerDistance(bot) || !CoaAreneUnContreUn(bot))
+        return fenetre;
+    CoaAreneEtat& etat = CoaAreneMaj(botAI, bot);
+    if (!CoaAreneL1Actif(etat) || !CoaAreneEstAdversaire(etat, cible) || cible->GetMap() != bot->GetMap())
+        return fenetre;
+    if (!CoaAreneControleDuBot(bot, cible, !CoaAreneRetourAuContact(botAI, bot), fenetre))
+        return fenetre;
+
+    uint32 const maintenant = getMSTime();
+    bool const echue = !etat.fenetreFinMs || getMSTimeDiff(etat.fenetreFinMs, maintenant) < 0x80000000u;
+    if (fenetre.aura != etat.fenetreAura || echue)
+    {
+        ++etat.fenetresVues;
+        etat.fenetreAura = fenetre.aura;
+        etat.fenetreExploitee = false;
+    }
+    uint32 const fin = maintenant + uint32(fenetre.resteMs);
+    etat.fenetreFinMs = fin ? fin : 1;
+    fenetre.ouverte = true;
+
+    auto const enTete = [&](Usable const& spell)
+    {
+        if (!(spell.kind & KIND_DAMAGE) || (spell.kind & KIND_CONTROL))
+            return false;
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        return int32(info->CalcCastTime(bot)) < fenetre.resteMs && !cible->IsImmunedToDamage(bot, info) &&
+               !cible->IsImmunedToSpell(info, static_cast<Unit const*>(bot)) && CoaAreneSortPret(botAI, bot, spell);
+    };
+    auto const finTete = std::stable_partition(usable.begin(), usable.end(), enTete);
+
+    std::vector<std::pair<std::pair<float, int32>, Usable>> classes;
+    for (auto itr = usable.begin(); itr != finTete; ++itr)
+    {
+        SpellInfo const* info = EffectiveSpell(bot, itr->info);
+        classes.push_back({ { CoaAreneDegatsDeBase(bot, info), info->CalcPowerCost(bot, info->GetSchoolMask()) }, *itr });
+    }
+    std::stable_sort(classes.begin(), classes.end(), [](auto const& a, auto const& b) { return a.first > b.first; });
+    for (size_t i = 0; i < classes.size(); ++i)
+    {
+        usable[i] = classes[i].second;
+        fenetre.tete.push_back(classes[i].second.info);
+        fenetre.degats.push_back(classes[i].first.first);
+    }
+    return fenetre;
+}
+
+void CoaAreneNoterFenetre(PlayerbotAI* botAI, Player* bot, Unit* cible, CoaAreneFenetre const& fenetre, SpellInfo const* cast)
+{
+    if (!fenetre.ouverte || !cast)
+        return;
+    auto const itr = std::find(fenetre.tete.begin(), fenetre.tete.end(), cast);
+    if (itr == fenetre.tete.end())
+        return;
+    CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+    if (!etat.fenetreExploitee)
+    {
+        etat.fenetreExploitee = true;
+        ++etat.fenetresBurst;
+    }
+    ++etat.fenetreSorts;
+    size_t const rang = size_t(std::distance(fenetre.tete.begin(), itr));
+    float const d = cible ? bot->GetExactDist2d(cible) : -1.0f;
+    CoaAreneJournal(bot, etat, "fenetre_burst", d, d,
+                    Acore::StringFormat(" sort={} controle={} aura={} reste_ms={} rang={} tete={} degats_base={:.0f} "
+                                        "pv_cible={:.0f}", cast->Id, fenetre.controle, fenetre.aura, fenetre.resteMs, rang,
+                                        fenetre.tete.size(), fenetre.degats[rang], cible ? cible->GetHealthPct() : -1.0f));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Trace des gladiateurs d'arene 1v1 (lot 3, 10/10 soir ; AiPlayerbot.Arene1v1.Trace, defaut 1).
 //
 // Pourquoi : le combat du 10/10 a 21:12 (Paris) n'a laisse que deux lignes (engagement, bilan) ; on ne savait ni
@@ -1438,6 +1789,10 @@ public:
             // « check mount state » monte ET descend : on ne lui laisse que la descente.
             if (nom == "check mount state" && !bot->IsMounted())
                 return 0.0f;
+            // Combat contre un humain (11/10) : en arene 1v1 et en duel, « coa arene interruption » remplace
+            // « coa interrupt », qui coupait toute incantation interruptible, meme courte (voir CoaAreneIncantationDigne).
+            if (nom == "coa interrupt" && CoaAreneUnContreUn(bot))
+                return 0.0f;
             // Lot 3 (« il se balade ») : en arene ou en duel, un bot a distance en vue de son adversaire et dans sa
             // plage de tir reste plante. Aucun de ces deplacements n'a alors d'objet : rapprocher (« reach spell »,
             // « reach melee »), ArenaTactics (repli au centre, poursuite hors de vue), « move random », « flee » amont.
@@ -1505,6 +1860,198 @@ public:
             return true;
         return pv < 80.0f && std::max(etat.pvPrec, etat.pvRef) - pv >= CoaAreneDefensifBurstPv;
     }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+// Interruption (11/10, combat contre un humain). Cause du 10/10 (id=3, Onyx soigne de 42 a 100 % en 4 s) : le Ranger
+// 2617 n'avait AUCUN sort que Classify marque KIND_INTERRUPT -- la silence de Toxic Dart est posee par script, et Toxic
+// Dart comme Bushwhack (etourdissement) exigent la furtivite (Stances = 1 << 29, refus ONLY_SHAPESHIFT a 20:00:52) --
+// donc « coa enemy casting » ne se levait jamais ; et un etourdissement n'etait jamais propose pour couper un soin.
+// Ici : interruption PURE (INTERRUPT_CAST compatible, silence) sur une incantation qui le merite
+// (CoaAreneIncantationDigne) ; contre un SOIN (incantation ou canalisation), tout sort qui coupe (etourdissement, peur,
+// desorientation) en repli, apres les pures (CastFirst prend la premiere qui part : une pure en recharge passe la main).
+// « coa interrupt » (40) est coupee en 1v1 par le multiplicateur, bras tire : elle frappait toute incantation
+// interruptible, aussi courte soit-elle, et sans lire PreventionType.
+// ---------------------------------------------------------------------------------------------------------------
+struct CoaAreneCoupeCandidats
+{
+    Unit* adv = nullptr;
+    Spell* incantation = nullptr;
+    bool canalisee = false;
+    bool soin = false;
+    uint32 pures = 0;
+    std::vector<Usable> sorts;
+};
+
+// Une echeance getMSTime() est passee (0 : aucune).
+bool CoaAreneEchu(uint32 echeance)
+{
+    return !echeance || getMSTimeDiff(echeance, getMSTime()) < 0x80000000u;
+}
+
+// Pret comme dans CastFirst, hors portee et vue (le pre-controle de CastFirst en juge) : recharge, banc, ressource,
+// forme, arme, aura de lanceur exigee, familier, refus certains lus sur la cible.
+bool CoaAreneSortPretContre(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* cible)
+{
+    SpellInfo const* info = EffectiveSpell(bot, spell.info);
+    if (info->CasterAuraSpell && !bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->CasterAuraSpell, bot)))
+        return false;
+    return CoaAreneSortPret(botAI, bot, spell) && !CoaExigeFamilierAbsent(bot, info) &&
+           !CoaRefusCibleCertain(bot, info, cible);
+}
+
+bool CoaAreneCandidatsInterruption(PlayerbotAI* botAI, Player* bot, CoaAreneCoupeCandidats& c)
+{
+    if (!sPlayerbotAIConfig.coaAreneIaCommune || !bot->IsAlive() || !CoaAreneUnContreUn(bot))
+        return false;
+    CoaAreneEtat& etat = CoaAreneMaj(botAI, bot);
+    if (!CoaAreneL1Actif(etat) || (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL) ||
+        !CoaAreneEchu(etat.prochaineInterruptionMs))
+        return false;
+    c.adv = CoaAreneAdversaireVivant(bot, etat);
+    if (!c.adv || c.adv->GetMap() != bot->GetMap())
+        return false;
+    c.incantation = CoaAreneIncantationAdverse(c.adv, c.canalisee);
+    if (!c.incantation)
+        return false;
+    SpellInfo const* vise = c.incantation->GetSpellInfo();
+    c.soin = CoaAreneEstSoin(vise);
+    if (!CoaAreneIncantationDigne(c.incantation, c.canalisee, c.soin))
+        return false;
+    int32 const reste = c.incantation->GetCastTimeRemaining();
+    if (reste <= 0)
+        return false;
+
+    std::vector<Usable> controles;
+    for (Usable const& spell : KnownAbilities(botAI, bot,
+             [](uint16 kind) { return (kind & (KIND_INTERRUPT | KIND_CONTROL | KIND_HOSTILE)) != 0; }))
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        // Un sort a incantation qui finirait apres celle de l'adversaire ne coupe rien (300 ms de marge).
+        uint32 const duree = info->CalcCastTime(bot);
+        if (duree && int32(duree) + 300 >= reste)
+            continue;
+        if (CoaAreneCiblePaisibleExigee(info, c.adv) || !CoaAreneSortPretContre(botAI, bot, spell, c.adv))
+            continue;
+        uint8 const coupe = CoaAreneCoupe(bot, info, vise, c.canalisee, c.adv);
+        if (coupe == COA_COUPE_PURE)
+            c.sorts.push_back(spell);
+        else if (coupe == COA_COUPE_CONTROLE && c.soin)
+            controles.push_back(spell);
+    }
+    c.pures = uint32(c.sorts.size());
+    c.sorts.insert(c.sorts.end(), controles.begin(), controles.end());
+    return !c.sorts.empty();
+}
+
+class CoaAreneInterruptionTrigger : public Trigger
+{
+public:
+    CoaAreneInterruptionTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa arene interruption") {}
+
+    bool IsActive() override
+    {
+        CoaAreneCoupeCandidats c;
+        return CoaAreneCandidatsInterruption(botAI, bot, c);
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+// Dissipation sur soi (11/10, « ses DoT tuent le bot sans que celui-ci reagisse »). « coa dispel » vise bien le bot
+// (NearbyGroup le met en tete, CoaDispelTrigger accepte member == bot pour toute dissipation) mais a la priorite 15
+// (DPS ; 26 soigneur) : sous « reach spell » (20), le retour (37,5), le recul (38), la cachette (39) -- en 1v1 elle ne
+// passait presque jamais. Ici, a 39,3 : des que les DoT que le kit sait dissiper sur le bot font 2 auras ou plus, ou
+// 15 % de sa vie prevus sur 6 s. Une tentative au plus toutes les 3 s apres un succes, 1 s apres un echec (pas de
+// boucle : un DoT reapplique aussitot ne fait pas tourner le bot sur sa dissipation).
+// ---------------------------------------------------------------------------------------------------------------
+constexpr uint32 CoaAreneDotsSeuil = 2;
+constexpr float CoaAreneDotsPvPct = 15.0f;
+constexpr int32 CoaAreneDotsHorizonMs = 6 * IN_MILLISECONDS;
+constexpr uint32 CoaAreneDispelSoiApresSuccesMs = 3 * IN_MILLISECONDS;
+constexpr uint32 CoaAreneDispelSoiApresEchecMs = IN_MILLISECONDS;
+
+// DoT nuisibles sur le bot que `masque` dissipe : nombre d'auras, degats prevus sur 6 s (montant courant par tick,
+// ticks entiers dans l'horizon ou la duree restante ; pourcentage de vie pour PERIODIC_DAMAGE_PERCENT).
+float CoaAreneDotsPrevus(Player* bot, uint32 masque, uint32& nombre)
+{
+    nombre = 0;
+    float total = 0.0f;
+    for (auto const& [id, application] : bot->GetAppliedAuras())
+    {
+        if (application->IsPositive())
+            continue;
+        Aura const* aura = application->GetBase();
+        SpellInfo const* auraInfo = aura->GetSpellInfo();
+        if (!auraInfo->Dispel || !(masque & (1u << auraInfo->Dispel)))
+            continue;
+        int32 const duree = aura->GetDuration();
+        int32 const horizon = duree > 0 ? std::min(duree, CoaAreneDotsHorizonMs) : CoaAreneDotsHorizonMs;
+        bool dot = false;
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        {
+            AuraEffect const* effet = aura->GetEffect(i);
+            if (!effet)
+                continue;
+            AuraType const type = effet->GetAuraType();
+            if (type != SPELL_AURA_PERIODIC_DAMAGE && type != SPELL_AURA_PERIODIC_LEECH &&
+                type != SPELL_AURA_PERIODIC_DAMAGE_PERCENT)
+                continue;
+            dot = true;
+            int32 const periode = effet->GetAmplitude();
+            if (periode <= 0)
+                continue;
+            float const parTick = type == SPELL_AURA_PERIODIC_DAMAGE_PERCENT
+                                      ? float(bot->GetMaxHealth()) * float(effet->GetAmount()) / 100.0f
+                                      : float(effet->GetAmount());
+            total += std::max(0.0f, parTick) * float(horizon / periode);
+        }
+        nombre += dot ? 1 : 0;
+    }
+    return total;
+}
+
+struct CoaAreneDispelCandidat
+{
+    Usable sort;
+    uint32 dots;
+    float prevu;
+};
+
+// Les dissipations du bot qui retireraient assez de DoT pour franchir le seuil, la plus utile d'abord. Vide sinon.
+std::vector<CoaAreneDispelCandidat> CoaAreneCandidatsDispelSoi(PlayerbotAI* botAI, Player* bot)
+{
+    std::vector<CoaAreneDispelCandidat> candidats;
+    if (!sPlayerbotAIConfig.coaAreneIaCommune || !bot->IsAlive() || !CoaAreneUnContreUn(bot) ||
+        !ClassHas(bot, KIND_DISPEL))
+        return candidats;
+    CoaAreneEtat& etat = CoaAreneMaj(botAI, bot);
+    if (!CoaAreneL1Actif(etat) || (etat.cadre != COA_ARENE_ARENE && etat.cadre != COA_ARENE_DUEL) ||
+        !CoaAreneEchu(etat.prochainDispelSoiMs))
+        return candidats;
+    float const seuilPv = float(bot->GetMaxHealth()) * CoaAreneDotsPvPct / 100.0f;
+    for (Usable const& spell : KnownAbilities(botAI, bot, IsFriendlyDispel))
+    {
+        if (!spell.dispelMask || !HasDispellable(bot, spell.dispelMask))
+            continue;
+        uint32 dots = 0;
+        float const prevu = CoaAreneDotsPrevus(bot, spell.dispelMask, dots);
+        if (!dots || (dots < CoaAreneDotsSeuil && prevu < seuilPv))
+            continue;
+        if (!CoaAreneSortPretContre(botAI, bot, spell, bot))
+            continue;
+        candidats.push_back({ spell, dots, prevu });
+    }
+    std::stable_sort(candidats.begin(), candidats.end(), [](CoaAreneDispelCandidat const& a, CoaAreneDispelCandidat const& b)
+                     { return a.dots != b.dots ? a.dots > b.dots : a.prevu > b.prevu; });
+    return candidats;
+}
+
+class CoaAreneDispelSoiTrigger : public Trigger
+{
+public:
+    CoaAreneDispelSoiTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa arene dispel soi") {}
+
+    bool IsActive() override { return !CoaAreneCandidatsDispelSoi(botAI, bot).empty(); }
 };
 
 // Au contact d'une cible qui peut suivre, et un sort de rupture est pret.
@@ -2589,6 +3136,92 @@ public:
     }
 };
 
+// Interruption (voir CoaAreneCandidatsInterruption). Une ligne `action=interruption` par sort parti, et une seule
+// `reussi=0` par incantation adverse ou rien n'est parti. Prochain essai : 1 s apres un succes, 250 ms apres un echec
+// (une recharge globale ne doit pas faire manquer un soin de 1,5 s).
+class CoaAreneInterruptionAction : public Action
+{
+public:
+    CoaAreneInterruptionAction(PlayerbotAI* botAI) : Action(botAI, "coa arene interruption") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        CoaAreneCoupeCandidats c;
+        if (!CoaAreneCandidatsInterruption(botAI, bot, c))
+            return false;
+        CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+        // Lu AVANT le lancer : l'incantation adverse peut etre annulee par lui (le Spell n'est plus relu ensuite).
+        SpellInfo const* vise = c.incantation->GetSpellInfo();
+        int32 const reste = c.incantation->GetCastTimeRemaining();
+        uintptr_t const adresse = reinterpret_cast<uintptr_t>(c.incantation);
+        float const d = bot->GetExactDist2d(c.adv);
+
+        SpellInfo const* lance = CastFirst(botAI, bot, c.sorts, c.adv, USAGE_INTERRUPT);
+        uint32 const prochain = getMSTime() + (lance ? IN_MILLISECONDS : 250u);
+        etat.prochaineInterruptionMs = prochain ? prochain : 1;
+        if (lance)
+        {
+            auto const itr = std::find_if(c.sorts.begin(), c.sorts.end(), [lance](Usable const& s) { return s.info == lance; });
+            bool const pure = itr != c.sorts.end() && size_t(std::distance(c.sorts.begin(), itr)) < c.pures;
+            bool canalisee = false;
+            bool const coupee = reinterpret_cast<uintptr_t>(CoaAreneIncantationAdverse(c.adv, canalisee)) != adresse;
+            ++etat.interruptions;
+            etat.interruptionsSoin += c.soin ? 1 : 0;
+            CoaAreneJournal(bot, etat, "interruption", d, d,
+                            Acore::StringFormat(" reussi=1 sort={} outil={} sort_adverse={} soin={} canalisee={} "
+                                                "reste_ms={} coupee={} candidats={} pv_adverse={:.0f}", lance->Id,
+                                                pure ? "pure" : "controle", vise->Id, c.soin ? 1 : 0,
+                                                c.canalisee ? 1 : 0, reste, coupee ? 1 : 0, c.sorts.size(),
+                                                c.adv->GetHealthPct()));
+        }
+        else if (!etat.incantationAdvRateeNotee)
+        {
+            etat.incantationAdvRateeNotee = true;
+            ++etat.interruptionsRatees;
+            CoaAreneJournal(bot, etat, "interruption", d, d,
+                            Acore::StringFormat(" reussi=0 sort_adverse={} soin={} canalisee={} reste_ms={} "
+                                                "candidats={} pures={}", vise->Id, c.soin ? 1 : 0, c.canalisee ? 1 : 0,
+                                                reste, c.sorts.size(), c.pures));
+        }
+        return RecordUsage(USAGE_INTERRUPT, lance);
+    }
+};
+
+// Dissipation sur soi (voir CoaAreneCandidatsDispelSoi). Une ligne `action=dispel_soi` par sort parti.
+class CoaAreneDispelSoiAction : public Action
+{
+public:
+    CoaAreneDispelSoiAction(PlayerbotAI* botAI) : Action(botAI, "coa arene dispel soi") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        std::vector<CoaAreneDispelCandidat> const candidats = CoaAreneCandidatsDispelSoi(botAI, bot);
+        if (candidats.empty())
+            return false;
+        std::vector<Usable> sorts;
+        for (CoaAreneDispelCandidat const& candidat : candidats)
+            sorts.push_back(candidat.sort);
+        CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+        SpellInfo const* lance = CastFirst(botAI, bot, sorts, bot, USAGE_DISPEL);
+        uint32 const prochain = getMSTime() + (lance ? CoaAreneDispelSoiApresSuccesMs : CoaAreneDispelSoiApresEchecMs);
+        etat.prochainDispelSoiMs = prochain ? prochain : 1;
+        if (lance)
+        {
+            auto const itr = std::find_if(candidats.begin(), candidats.end(),
+                                          [lance](CoaAreneDispelCandidat const& c) { return c.sort.info == lance; });
+            ++etat.dispelsSoi;
+            CoaAreneJournal(bot, etat, "dispel_soi", -1.0f, -1.0f,
+                            Acore::StringFormat(" sort={} dots={} prevu={:.0f} prevu_pct={:.0f} pv_bot={:.0f}", lance->Id,
+                                                itr != candidats.end() ? itr->dots : 0,
+                                                itr != candidats.end() ? itr->prevu : 0.0f,
+                                                itr != candidats.end() && bot->GetMaxHealth()
+                                                    ? itr->prevu * 100.0f / float(bot->GetMaxHealth()) : 0.0f,
+                                                bot->GetHealthPct()));
+        }
+        return RecordUsage(USAGE_DISPEL, lance);
+    }
+};
+
 class CoaArenePreparationAction : public Action
 {
 public:
@@ -2680,6 +3313,11 @@ constexpr float CoaAreneCacheurPriority = ACTION_MOVE + 9.2f;
 // « coa defensive » (26-28), les soins (30+) et tous les deplacements d'arene (37,5-39,5). En preparation, sous l'ouverture
 // et la furtivite (57).
 constexpr float CoaAreneFamilierPriority = ACTION_HIGH + 4.0f;
+// Combat contre un humain (11/10) : interruption 40,5, devant « coa interrupt » (40, coupee en 1v1 par le
+// multiplicateur) et tout deplacement d'arene ; dissipation sur soi 39,3, sous le defensif (39,5), devant le cacheur
+// (39,2), la cachette (39), le recul (38) et le retour (37,5).
+constexpr float CoaAreneInterruptionPriority = ACTION_INTERRUPT + 0.5f;
+constexpr float CoaAreneDispelSoiPriority = ACTION_MOVE + 9.3f;
 
 class CoaAreneStrategy : public Strategy
 {
@@ -2704,6 +3342,8 @@ public:
         triggers.push_back(new TriggerNode("coa arene defensif", { NextAction("coa arene defensif", CoaAreneDefensifPriority) }));
         triggers.push_back(new TriggerNode("coa arene cacheur", { NextAction("coa arene cacheur", CoaAreneCacheurPriority) }));
         triggers.push_back(new TriggerNode("coa arene familier", { NextAction("coa arene familier", CoaAreneFamilierPriority) }));
+        triggers.push_back(new TriggerNode("coa arene interruption", { NextAction("coa arene interruption", CoaAreneInterruptionPriority) }));
+        triggers.push_back(new TriggerNode("coa arene dispel soi", { NextAction("coa arene dispel soi", CoaAreneDispelSoiPriority) }));
     }
 };
 
@@ -2730,6 +3370,8 @@ public:
         creators["coa arene defensif"] = &CoaAreneActionFactoryInternal::defensif;
         creators["coa arene cacheur"] = &CoaAreneActionFactoryInternal::cacheur;
         creators["coa arene familier"] = &CoaAreneActionFactoryInternal::familier;
+        creators["coa arene interruption"] = &CoaAreneActionFactoryInternal::interruption;
+        creators["coa arene dispel soi"] = &CoaAreneActionFactoryInternal::dispelSoi;
     }
 
 private:
@@ -2742,6 +3384,8 @@ private:
     static Action* defensif(PlayerbotAI* botAI) { return new CoaAreneDefensifAction(botAI); }
     static Action* cacheur(PlayerbotAI* botAI) { return new CoaAreneCacheurAction(botAI); }
     static Action* familier(PlayerbotAI* botAI) { return new CoaAreneFamilierAction(botAI); }
+    static Action* interruption(PlayerbotAI* botAI) { return new CoaAreneInterruptionAction(botAI); }
+    static Action* dispelSoi(PlayerbotAI* botAI) { return new CoaAreneDispelSoiAction(botAI); }
 };
 
 class CoaAreneTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -2758,6 +3402,8 @@ public:
         creators["coa arene defensif"] = &CoaAreneTriggerFactoryInternal::defensif;
         creators["coa arene cacheur"] = &CoaAreneTriggerFactoryInternal::cacheur;
         creators["coa arene familier"] = &CoaAreneTriggerFactoryInternal::familier;
+        creators["coa arene interruption"] = &CoaAreneTriggerFactoryInternal::interruption;
+        creators["coa arene dispel soi"] = &CoaAreneTriggerFactoryInternal::dispelSoi;
     }
 
 private:
@@ -2770,4 +3416,6 @@ private:
     static Trigger* defensif(PlayerbotAI* botAI) { return new CoaAreneDefensifTrigger(botAI); }
     static Trigger* cacheur(PlayerbotAI* botAI) { return new CoaAreneCacheurTrigger(botAI); }
     static Trigger* familier(PlayerbotAI* botAI) { return new CoaAreneFamilierTrigger(botAI); }
+    static Trigger* interruption(PlayerbotAI* botAI) { return new CoaAreneInterruptionTrigger(botAI); }
+    static Trigger* dispelSoi(PlayerbotAI* botAI) { return new CoaAreneDispelSoiTrigger(botAI); }
 };
