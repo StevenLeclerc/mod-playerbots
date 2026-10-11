@@ -1238,10 +1238,40 @@ SpellCastResult CoaPreControleCible(Player* bot, SpellInfo const* info, Unit* ta
     if (!target || target == bot || bot->GetVehicleBase() == target || !target->IsInWorld() ||
         target->GetMap() != bot->GetMap() || info->HasAttribute(SPELL_ATTR0_PASSIVE))
         return SPELL_CAST_OK;
-    if (info->Targets & (TARGET_FLAG_DEST_LOCATION | TARGET_FLAG_SOURCE_LOCATION | TARGET_FLAG_ITEM |
-                         TARGET_FLAG_GAMEOBJECT_ITEM))
+    if (info->Targets & (TARGET_FLAG_ITEM | TARGET_FLAG_GAMEOBJECT_ITEM))
         return SPELL_CAST_OK;
     if (info->Effects[0].Effect == SPELL_EFFECT_OPEN_LOCK || info->Effects[0].Effect == SPELL_EFFECT_SKINNING)
+        return SPELL_CAST_OK;
+    /*
+     * Sort au sol (champ Targets de Spell.dbc = TARGET_FLAG_DEST_LOCATION) : PlayerbotAI::CastSpell le lance sur la
+     * POSITION de la cible (targets.SetDst(*target), PlayerbotAI.cpp:3965), et Spell::CheckRange (strict, Spell.cpp:7251-
+     * 7254) refuse OUT_OF_RANGE si cette position est a plus de max_range + GetLeewayBonusRadius() (+ taille du lanceur,
+     * IsWithinDist3d) du lanceur. Tour 8 du banc (11/10 01:22-01:42 UTC) : Tranquil Circle 801205 (portee 20, refus a
+     * 24,7 yd) x14, Standard of Might 706805 (portee 25, refus a 28,5-29,9 yd) x7, Resonance Rune 803679 (portee 20) x4,
+     * tous rendus par StrictCheck a chaque tour, sans banc.
+     * RECOPIE de la branche destination seule, jamais plus stricte :
+     *   - seulement si le coeur garde la destination : InitExplicitTargets (Spell.cpp:773-787) la retire quand le masque
+     *     explicite ne demande pas TARGET_FLAG_DEST_LOCATION ;
+     *   - portee maximale : le coeur sans cible unite prend GetMaxRange(true) (amie, Unit.cpp:12552), StrictCheck prend
+     *     celle de la cible ; on garde la PLUS GRANDE des deux, SPELLMOD_RANGE compris (fonction croissante) ;
+     *   - ni portee minimale, ni vue, ni la branche unite que StrictCheck ajoute (il pose aussi la cible unite) : laisses
+     *     a StrictCheck, comme avant. Pas de trajectoire (HasTraj) : m_speed n'est pose que par un paquet client.
+     */
+    if (info->Targets & TARGET_FLAG_DEST_LOCATION)
+    {
+        if (!(info->GetExplicitTargetMask() & TARGET_FLAG_DEST_LOCATION) || !info->RangeEntry ||
+            info->RangeEntry->ID == 1)
+            return SPELL_CAST_OK;
+        float portee = std::max(bot->GetSpellMaxRangeForTarget(target, info),
+                                bot->GetSpellMaxRangeForTarget(nullptr, info));
+        if (Player* modOwner = bot->GetSpellModOwner())
+            modOwner->ApplySpellMod(info->Id, SPELLMOD_RANGE, portee);
+        if (!bot->IsWithinDist3d(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(),
+                                 portee + bot->GetLeewayBonusRadius()))
+            return SPELL_FAILED_OUT_OF_RANGE;
+        return SPELL_CAST_OK;
+    }
+    if (info->Targets & TARGET_FLAG_SOURCE_LOCATION)
         return SPELL_CAST_OK;
     bool const ignoreVue = info->HasAttribute(SPELL_ATTR2_IGNORE_LINE_OF_SIGHT) ||
                            info->HasAttribute(SPELL_ATTR5_ALWAYS_AOE_LINE_OF_SIGHT);
@@ -1253,14 +1283,12 @@ SpellCastResult CoaPreControleCible(Player* bot, SpellInfo const* info, Unit* ta
     // explicite (cibles implicites lues dans Spell.dbc : Eclipse of Fury 570218 = 22 SRC_CASTER, Celestial Cleave
     // 802435 = 104 cone, Vigil of the Moon 802797 = 87 DEST_DEST, Stellar Drift 800501 et Starshatter 801135 = 1
     // CASTER). Les ecarter ici rend le MEME verdict que StrictCheck, sans construire de Spell : aucun changement de jeu.
-    if (!(info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK))
-    {
-        if (ignoreVue)
-            return SPELL_CAST_OK;
-        if (vue < 0)
-            vue = bot->IsWithinLOSInMap(target, VMAP::ModelIgnoreFlags::M2, LINEOFSIGHT_ALL_CHECKS) ? 1 : 0;
-        return vue ? SPELL_CAST_OK : SPELL_FAILED_LINE_OF_SIGHT;
-    }
+    // Tour 8 du banc (11/10 01:22-01:42 UTC) : meme raisonnement pour la PORTEE. Hoarfrost 572733 (Runemaster, cibles
+    // implicites 104 cone, portee 8, champ Targets 0) : x57 OUT_OF_RANGE de StrictCheck a 24-110 yd, a chaque tour. Le
+    // coeur, lui, lancerait le cone dans le vide (cible unite retiree, aucun test de portee) ; StrictCheck le refuse par
+    // la branche unite de CheckRange, recopiee plus bas. La portee est donc jugee ici comme StrictCheck la juge (rien de
+    // ce qu'il accepte n'est ecarte) ; l'orientation non : StrictCheck la refuse, mais ici elle ferait TOURNER le bot.
+    bool const uniteExplicite = info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK;
 
     if (!ignoreVue)
     {
@@ -1287,8 +1315,8 @@ SpellCastResult CoaPreControleCible(Player* bot, SpellInfo const* info, Unit* ta
     else if (!bot->IsWithinCombatRange(target, maxRange))
         return SPELL_FAILED_OUT_OF_RANGE;
 
-    if ((info->FacingCasterFlags & SPELL_FACING_FLAG_INFRONT) && !bot->HasInArc(static_cast<float>(M_PI), target) &&
-        !bot->IsWithinBoundaryRadius(target))
+    if (uniteExplicite && (info->FacingCasterFlags & SPELL_FACING_FLAG_INFRONT) &&
+        !bot->HasInArc(static_cast<float>(M_PI), target) && !bot->IsWithinBoundaryRadius(target))
         return SPELL_FAILED_UNIT_NOT_INFRONT;
 
     if (rangeType == SPELL_RANGE_RANGED && !bot->IgnoresSpellMinRange(info))
