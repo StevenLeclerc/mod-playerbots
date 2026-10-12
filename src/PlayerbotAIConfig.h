@@ -563,6 +563,13 @@ public:
     // (defaut) : la demande est consommee sans reponse, l'addon n'affiche rien.
     bool directeurTraqueur;
     uint32 directeurTraqueurIntervalleMs;     // une lecture par joueur au plus toutes les N ms (1000-60000)
+    // Lot T3 (12/10/2026) : lignes `W` (avis de recherche, table coa_dir_avis ecrite par contrats.py) dans
+    // l'onglet. Faux (defaut) : aucune requete sur la table (elle peut ne pas exister).
+    bool directeurAvis;
+    // Lots T4-T5 (12/10/2026) : REACTIONS des cibles de contrat (params.reaction de l'arc `contrat`, tiree par
+    // contrats.py) : `defense` (engage le chasseur a vue), `fuite_gardes` (fuit une fois, ses gardes l'engagent).
+    // Faux (defaut) : aucune lecture, la cible reste passive (C1).
+    bool directeurReactions;
     // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3) :
     // inertes tant que `evenement` n'est pas dans directeurVerbes. LISTES BLANCHES FERMEES des ids
     // qu'une commande `evenement` peut jouer (« id,id », lecture stricte : un morceau mal forme et

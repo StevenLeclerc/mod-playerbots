@@ -4242,3 +4242,26 @@ AiPlayerbot.Directeur.Traqueur = 0
 #        serveur l'annonce a l'addon, qui demande a ce rythme. Une demande trop tot reste sans reponse.
 #        Default: 2000
 AiPlayerbot.Directeur.TraqueurIntervalleMs = 2000
+
+#    AiPlayerbot.Directeur.Avis
+#        Lot T3 (12/10/2026) : l'onglet Bounty Hunting montre les AVIS DE RECHERCHE du joueur (lignes `W` du
+#        protocole COABH : rang, nom, niveau, zone, prime, temps restant, rival), lus dans la table coa_dir_avis
+#        (ecrite par le service, contrats.py, recit.conf `contrats_avis = 1`). EXIGE la migration
+#        exploitation/directeur/sql/2026_10_12_01_coa_dir_avis.sql (coa-project) : sans la table, la requete
+#        echouerait a chaque rafraichissement. 0 : aucune requete. A chaud : `.reload config` PUIS
+#        `playerbots rndbot reload` (P-125).
+#        Default: 0
+AiPlayerbot.Directeur.Avis = 0
+
+#    AiPlayerbot.Directeur.Reactions
+#        Lots T4-T5 (12/10/2026) : la CIBLE d'un contrat sur un bot reagit selon `params.reaction` de son arc
+#        (tiree au hasard par contrats.py, recit.conf `contrats_reactions`). Lu toutes les 5 s, agi chaque seconde :
+#          defense      : le chasseur vu a 40 yd (ligne de vue), elle l'engage la premiere ;
+#          fuite_gardes : tant que le chasseur est a plus de 250 yd et qu'aucun humain n'est a 150 yd, ses gardes
+#                         (params.gardes, prepares au niveau du chasseur) la rejoignent par un saut cache ; le
+#                         chasseur a 60 yd en vue (ou aux prises avec elle), elle fuit une fois a 120 yd et ses gardes
+#                         a 100 yd du chasseur l'engagent.
+#        Une reaction inconnue de ce binaire : journalisee une fois, la cible reste passive.
+#        Ligne `coa directeur reaction:` dans CoaBots.log a chaque etape. 0 : rien n'est lu.
+#        Default: 0
+AiPlayerbot.Directeur.Reactions = 0

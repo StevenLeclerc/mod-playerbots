@@ -866,6 +866,9 @@ bool PlayerbotAIConfig::Initialize()
     directeurTraqueur = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Traqueur", false);
     directeurTraqueurIntervalleMs = std::max<uint32>(
         1000, std::min<uint32>(60000, sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.TraqueurIntervalleMs", 2000)));
+    // Lots T3, T4-T5 (12/10/2026) : avis de recherche dans l'onglet, reactions des cibles. Eteints par defaut.
+    directeurAvis = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Avis", false);
+    directeurReactions = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Reactions", false);
     // Lot C des evenements (04/10/2026) : defauts = ids notes ✔ au banc du 04/10 (verdicts :
     // coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md), sauf 10008 (« rien » au banc, volume
     // 0,12 au DBC). 45213 (nuage d'orage, ✘ au banc pose sur le joueur) n'est dans AUCUN defaut :
