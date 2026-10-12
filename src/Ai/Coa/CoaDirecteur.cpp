@@ -13,6 +13,7 @@
 #include "Corpse.h"
 #include "CreatureTextMgr.h"
 #include "DatabaseEnv.h"
+#include "DBCStores.h"
 #include "GameTime.h"
 #include "GridDefines.h"
 #include "GridTerrainData.h"
@@ -57,6 +58,7 @@
 #include <deque>
 #include <future>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -3070,11 +3072,16 @@ void ExecuterRecompense(CoaDirCommande const& c)
     // 06/10 : `intensite` = 1 marque une part de la Faille d'orage (service : recompenses.MARQUE_FAILLE).
     // 09/10 : `intensite` = 2, une part de la Nuit des morts (recompenses.MARQUE_NUIT ; versee a la victoire, sans
     // objet a cliquer). Toute autre valeur : la prime, comme avant.
+    // 12/10 (lot T2, coa-project/docs/CONCEPTION-primes-traqueur-bots.md) : `intensite` = 3, la prime d'un CONTRAT
+    // sur un bot rempli (service : contrats.py, source `contrat_bot`). Aucun service ne l'envoie avant T2.
     bool const faille = c.intensite == 1.0f;
     bool const nuit = c.intensite == 2.0f;
-    char const* const titre = faille ? "La faille d'orage" : nuit ? "La nuit des morts" : "Votre prime";
+    bool const contrat = c.intensite == 3.0f;
+    char const* const titre = faille ? "La faille d'orage" : nuit ? "La nuit des morts" : contrat ? "Contrat rempli"
+                                                                                                  : "Votre prime";
     char const* const corps = faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
                               : nuit ? "Vous avez tenu jusqu'à l'aube. Voici votre part. Le Directeur."
+                              : contrat ? "Votre cible est tombée. Voici la prime du contrat. Le Directeur."
                                      : "Le contrat sur votre tête est soldé. Le Directeur.";
     // 08/10 : en jeu, dans les sacs et la bourse ; le reste (et tout, hors ligne) par courrier (VerserRecompense).
     RemiseRecompense const r =
@@ -3090,6 +3097,7 @@ void ExecuterRecompense(CoaDirCommande const& c)
     CharacterDatabase.CommitTransaction(trans);
     DireRemise(p, r, faille ? "Votre part de la faille d'orage"
                      : nuit ? "Votre part de la nuit des morts"
+                     : contrat ? "La prime de votre contrat"
                             : "Votre prime");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Journaliser(c, "execute", nullptr);
@@ -10506,6 +10514,158 @@ std::string CorpsOnglet(uint32 guid)
     corps += "^F";
     return corps;
 }
+
+// ---- traqueur de contrat, lot T1 (12/10/2026, coa-project/docs/CONCEPTION-primes-traqueur-bots.md)
+//
+// L'addon chuchote `COABH\tTRAQUE` a soi-meme ; le serveur repond UN chuchotement d'addon
+// `COABT\t<ligne>` (prefixe distinct de COABH : jamais melange au reassemblage des morceaux de TOUT) :
+//   T|-                                                    aucun contrat actif
+//   T|arc|etat|nom|distance_yd|angle_deg|zone|reste_s|intervalle_ms
+//     etat : `prep` (contrat en preparation, cible pas encore confirmee), `piste` (meme carte, vivante),
+//            `refuge` (meme carte, sans drapeau FFA : lieu sans PvP), `carte` (autre carte : zone seule),
+//            `mort`, `absent` (cible hors ligne) ;
+//     distance_yd : 2D, arrondie (5 yd sous 100, 10 sous 500, 50 au-dela) ; angle_deg : 0-359, direction
+//     ABSOLUE du joueur vers la cible (0 = nord, sens trigonometrique, comme GetPlayerFacing du client) ;
+//     vides hors `piste` et `refuge` ; zone : nom de la zone de la cible (vide si `prep`, `absent`) ;
+//     reste_s : fin_prevue - 600 s (ARC_MARGE_S de contrats.py), -1 si illisible.
+// Lecture seule : une requete bornee (LIMIT 1) sur coa_dir_arc (ecrite par contrats.py, P-134), la
+// cible lue par ObjectAccessor. CMSG_MESSAGECHAT est traite par le fil monde (PROCESS_THREADUNSAFE,
+// Opcodes.cpp) : les cartes sont a l'arret, la position du bot se lit sans course (P-137).
+constexpr char TRAQUE_PREFIXE[] = "COABT\t";
+constexpr char TRAQUE_DEMANDE[] = "TRAQUE";
+constexpr uint32 TRAQUE_MARGE_ARC_S = 600;   // contrats.ARC_MARGE_S
+
+std::unordered_map<uint32, uint32> derniereTraque;       // guid -> getMSTime(), sous verrouOnglet
+// guid -> (arc, etat) de la derniere ligne journalisee, sous verrouOnglet : une ligne par changement d'etat
+// d'un contrat (prep -> piste, piste <-> refuge, carte, mort...), jamais une par lecture.
+std::unordered_map<uint32, std::pair<uint32, std::string>> traqueJournalisee;
+
+uint32 DistanceTraqueur(float d)
+{
+    if (!std::isfinite(d) || d < 0.0f)
+        return 0;
+    if (d < 100.0f)
+        return static_cast<uint32>(std::lround(d / 5.0f)) * 5;
+    if (d < 500.0f)
+        return static_cast<uint32>(std::lround(d / 10.0f)) * 10;
+    return static_cast<uint32>(std::lround(d / 50.0f)) * 50;
+}
+
+std::string NomZoneTraqueur(uint32 zoneId)
+{
+    AreaTableEntry const* zone = sAreaTableStore.LookupEntry(zoneId);
+    return zone ? ChampOnglet(PlayerbotAI::GetLocalizedAreaName(zone)) : std::string();
+}
+
+// Un guid lu en texte (JSON) : chiffres seuls, 1 a 10, <= UINT32_MAX ; sinon 0.
+uint32 GuidTraqueur(std::string const& v)
+{
+    if (v.empty() || v.size() > 10 || !std::all_of(v.begin(), v.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+        return 0;
+    uint64 const n = std::stoull(v);
+    return n <= std::numeric_limits<uint32>::max() ? static_cast<uint32>(n) : 0;
+}
+
+// La ligne du traqueur pour `joueur`. Sorties, pour le journal : arc et cible lus, etat, distance.
+std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, uint32& cibleLue, std::string& etatLu,
+                          uint32& distanceLue)
+{
+    arcLu = cibleLue = distanceLue = 0;
+    etatLu = "-";
+    uint32 const guid = joueur->GetGUID().GetCounter();
+    QueryResult a = CharacterDatabase.Query(
+        "SELECT id, IFNULL(etape, ''),"
+        " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.cible')), 'null'), ''),"
+        " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.cible_nom')), 'null'), ''),"
+        " CAST(IFNULL(GREATEST(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue) - {}, 0), -1) AS CHAR)"
+        " FROM coa_dir_arc WHERE joueur = {} AND genre = 'contrat' AND statut = 'actif'"
+        " ORDER BY id DESC LIMIT 1",
+        TRAQUE_MARGE_ARC_S, guid);
+    if (!a)
+        return "T|-";
+    Field* f = a->Fetch();
+    arcLu = f[0].Get<uint32>();
+    std::string const etape = ChampOnglet(f[1]);
+    uint32 const cible = GuidTraqueur(f[2].IsNull() ? std::string() : f[2].Get<std::string>());
+    std::string const nom = ChampOnglet(f[3]);
+    std::string const reste = ChampOnglet(f[4]);
+    std::string etat;
+    std::string distance;
+    std::string angle;
+    std::string zone;
+    Player* bot = cible ? JoueurConnecte(cible) : nullptr;
+    cibleLue = cible;
+    if (etape != "piste")
+        etat = "prep";   // preparation (`chasser P-0`) : la cible n'est pas encore confirmee hors de vue
+    else if (!bot || !bot->IsInWorld() || Humain(bot) || bot == joueur)
+        etat = "absent";   // jamais la position d'un humain : la cible d'un contrat est un bot de la reserve
+    else
+    {
+        zone = NomZoneTraqueur(bot->GetZoneId());
+        if (bot->GetMapId() != joueur->GetMapId() || bot->GetInstanceId() != joueur->GetInstanceId())
+            etat = "carte";
+        else if (!bot->IsAlive())
+            etat = "mort";
+        else
+        {
+            etat = bot->IsFFAPvP() ? "piste" : "refuge";
+            uint32 const d = DistanceTraqueur(joueur->GetExactDist2d(bot));
+            float const rad = joueur->GetAbsoluteAngle(bot);   // [0, 2 pi[, 0 = nord (+x), sens trigonometrique
+            uint32 const deg = static_cast<uint32>(std::lround(rad * 180.0f / static_cast<float>(M_PI))) % 360;
+            distanceLue = d;
+            distance = std::to_string(d);
+            angle = std::to_string(deg);
+        }
+    }
+    etatLu = etat;
+    return Acore::StringFormat("T|{}|{}|{}|{}|{}|{}|{}|{}", arcLu, etat, nom, distance, angle, zone, reste,
+                               intervalleMs);
+}
+
+// Repond a `COABH\tTRAQUE`. Option eteinte, ou demande trop rapprochee : rien n'est envoye.
+void RepondreTraqueur(Player* player)
+{
+    if (!sPlayerbotAIConfig.directeurTraqueur)
+        return;
+    uint32 const guid = player->GetGUID().GetCounter();
+    uint32 const intervalleMs = sPlayerbotAIConfig.directeurTraqueurIntervalleMs;
+    uint32 const maintenantMs = getMSTime();
+    {
+        std::lock_guard<std::mutex> garde(verrouOnglet);
+        auto it = derniereTraque.find(guid);
+        // Tolerance d'un quart : le minuteur de l'addon (OnUpdate) arrive parfois quelques ms avant.
+        if (it != derniereTraque.end() && getMSTimeDiff(it->second, maintenantMs) < intervalleMs - intervalleMs / 4)
+            return;
+        if (derniereTraque.size() > 512)
+            derniereTraque.clear();
+        derniereTraque[guid] = maintenantMs;
+    }
+    uint32 arc = 0;
+    uint32 cible = 0;
+    uint32 distance = 0;
+    std::string etat;
+    std::string const ligne = CorpsTraqueur(player, intervalleMs, arc, cible, etat, distance);
+    if (arc)
+    {
+        bool change = false;
+        {
+            std::lock_guard<std::mutex> garde(verrouOnglet);
+            if (traqueJournalisee.size() > 512)
+                traqueJournalisee.clear();
+            auto [it, neuf] = traqueJournalisee.try_emplace(guid, arc, etat);
+            change = neuf || it->second.first != arc || it->second.second != etat;
+            it->second = {arc, etat};
+        }
+        if (change)
+            LOG_INFO("playerbots", "coa directeur traqueur: joueur={} arc={} cible={} etat={} distance={} intervalle_ms={}",
+                     guid, arc, cible, etat, distance, intervalleMs);
+    }
+    std::string const texte = std::string(TRAQUE_PREFIXE) + ligne;
+    WorldPacket paquet;
+    ChatHandler::BuildChatPacket(paquet, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(), texte, 0,
+                                 player->GetName(), player->GetName(), 0, false);
+    player->SendDirectMessage(&paquet);
+}
 }  // namespace
 
 class coa_directeur_onglet_playerscript : public PlayerScript
@@ -10527,7 +10687,13 @@ public:
         // Le protocole est consomme dans tous les cas : jamais transmis a un autre joueur.
         if (receiver != player || message.size() > 255)
             return false;
-        if (message.substr(sizeof(ONGLET_PREFIXE) - 1) != "TOUT")
+        std::string const demande = message.substr(sizeof(ONGLET_PREFIXE) - 1);
+        if (demande == TRAQUE_DEMANDE)
+        {
+            RepondreTraqueur(player);   // lot T1 : traqueur de contrat (option Directeur.Traqueur)
+            return false;
+        }
+        if (demande != "TOUT")
             return false;
         uint32 const guid = player->GetGUID().GetCounter();
         uint32 const maintenantMs = getMSTime();

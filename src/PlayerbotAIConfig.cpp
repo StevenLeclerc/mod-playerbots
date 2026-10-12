@@ -862,6 +862,10 @@ bool PlayerbotAIConfig::Initialize()
     // Lot R3 (03/10/2026) : Adventurer's Cache (1397885) seulement ; 20 po par commande au plus.
     directeurRecompenseObjets = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.RecompenseObjets", "1397885");
     directeurRecompenseMaxCuivre = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.RecompenseMaxCuivre", 200000);
+    // Lot T1 (12/10/2026) : traqueur de contrat, eteint par defaut ; cadence bornee a [1 s, 60 s].
+    directeurTraqueur = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Traqueur", false);
+    directeurTraqueurIntervalleMs = std::max<uint32>(
+        1000, std::min<uint32>(60000, sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.TraqueurIntervalleMs", 2000)));
     // Lot C des evenements (04/10/2026) : defauts = ids notes ✔ au banc du 04/10 (verdicts :
     // coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md), sauf 10008 (« rien » au banc, volume
     // 0,12 au DBC). 45213 (nuage d'orage, ✘ au banc pose sur le joueur) n'est dans AUCUN defaut :

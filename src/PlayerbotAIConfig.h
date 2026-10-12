@@ -557,6 +557,12 @@ public:
     // forme, aucun objet) et plafond d'argent d'UNE commande, en cuivres.
     std::string directeurRecompenseObjets;
     uint32 directeurRecompenseMaxCuivre;
+    // Traqueur de contrat, lot T1 (12/10/2026, coa-project/docs/CONCEPTION-primes-traqueur-bots.md) :
+    // l'addon CoABounty demande `COABH\tTRAQUE` (chuchotement d'addon a soi) ; le serveur repond
+    // (prefixe COABT) la distance et la direction de la cible du contrat ACTIF du joueur. Faux
+    // (defaut) : la demande est consommee sans reponse, l'addon n'affiche rien.
+    bool directeurTraqueur;
+    uint32 directeurTraqueurIntervalleMs;     // une lecture par joueur au plus toutes les N ms (1000-60000)
     // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3) :
     // inertes tant que `evenement` n'est pas dans directeurVerbes. LISTES BLANCHES FERMEES des ids
     // qu'une commande `evenement` peut jouer (« id,id », lecture stricte : un morceau mal forme et

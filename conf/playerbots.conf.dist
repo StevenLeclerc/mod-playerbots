@@ -4223,3 +4223,22 @@ AiPlayerbot.Directeur.EvenementInvocationDistanceYd = 220
 #        `playerbots rndbot reload` (P-125) ; le Directeur relit la valeur chaque seconde.
 #        Default: "" (aucun : rien ne change)
 AiPlayerbot.Directeur.PrimeBanc = ""
+
+#    AiPlayerbot.Directeur.Traqueur
+#        Traqueur de contrat, lot T1 (12/10/2026, coa-project/docs/CONCEPTION-primes-traqueur-bots.md).
+#        L'addon client CoABounty (1.5 et plus) chuchote `COABH` / `TRAQUE` a soi-meme ; le serveur
+#        repond par un chuchotement d'addon de prefixe `COABT` : la distance (arrondie) et la direction
+#        de la cible du contrat sur un bot ACTIF du joueur (coa_dir_arc, genre `contrat`, ecrit par le
+#        service contrats.py ; le jeu ne fait que LIRE). L'addon affiche une fleche et la distance.
+#        Ligne `coa directeur traqueur:` dans CoaBots.log a chaque changement d'etat d'un contrat (prep,
+#        piste, refuge, carte, mort, absent), jamais une par lecture.
+#        0 : la demande est consommee sans reponse (l'addon ne montre rien). A chaud : `.reload config`
+#        PUIS `playerbots rndbot reload` (P-125).
+#        Default: 0
+AiPlayerbot.Directeur.Traqueur = 0
+
+#    AiPlayerbot.Directeur.TraqueurIntervalleMs
+#        Traqueur : une lecture par joueur au plus toutes les N millisecondes (borne 1000-60000) ; le
+#        serveur l'annonce a l'addon, qui demande a ce rythme. Une demande trop tot reste sans reponse.
+#        Default: 2000
+AiPlayerbot.Directeur.TraqueurIntervalleMs = 2000
