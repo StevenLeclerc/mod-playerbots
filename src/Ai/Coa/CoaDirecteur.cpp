@@ -10408,8 +10408,9 @@ public:
 // Une demande par joueur toutes les ONGLET_INTERVALLE_MS au plus (le reste est
 // ignore, sans reponse). Requetes synchrones bornees (LIMIT), au fil du joueur,
 // sur des tables de quelques lignes : seulement a l'ouverture de l'onglet et a
-// son rafraichissement (10 s, addon). Aucun objet de jeu n'est lu, hors le
-// joueur lui-meme (son propre fil).
+// son rafraichissement (10 s, addon). `TOUT` ne lit aucun objet de jeu, hors le
+// joueur lui-meme ; `TRAQUE` (lot T1, plus bas) lit aussi la position du bot cible,
+// au fil monde (cartes a l'arret).
 namespace
 {
 constexpr char ONGLET_PREFIXE[] = "COABH\t";
@@ -10534,6 +10535,7 @@ std::string CorpsOnglet(uint32 guid)
 constexpr char TRAQUE_PREFIXE[] = "COABT\t";
 constexpr char TRAQUE_DEMANDE[] = "TRAQUE";
 constexpr uint32 TRAQUE_MARGE_ARC_S = 600;   // contrats.ARC_MARGE_S
+constexpr uint32 TRAQUE_RESTE_MAX_S = 2100;  // contrats.DUREE_S + PREP_MAX_S
 
 std::unordered_map<uint32, uint32> derniereTraque;       // guid -> getMSTime(), sous verrouOnglet
 // guid -> (arc, etat) de la derniere ligne journalisee, sous verrouOnglet : une ligne par changement d'etat
@@ -10588,7 +10590,11 @@ std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, ui
     std::string const etape = ChampOnglet(f[1]);
     uint32 const cible = GuidTraqueur(f[2].IsNull() ? std::string() : f[2].Get<std::string>());
     std::string const nom = ChampOnglet(f[3]);
-    std::string const reste = ChampOnglet(f[4]);
+    // Pendant une pause en donjon, contrats.py repousse fin_prevue d'une heure de plus (PAUSE_MAX_S) : au-dela de
+    // la duree d'un contrat (30 min + 5 min de preparation), l'echeance n'est pas lisible ici, `-1`.
+    std::string reste = ChampOnglet(f[4]);
+    if (uint32 const r = GuidTraqueur(reste); r > TRAQUE_RESTE_MAX_S)
+        reste = "-1";
     std::string etat;
     std::string distance;
     std::string angle;
@@ -10597,8 +10603,8 @@ std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, ui
     cibleLue = cible;
     if (etape != "piste")
         etat = "prep";   // preparation (`chasser P-0`) : la cible n'est pas encore confirmee hors de vue
-    else if (!bot || !bot->IsInWorld() || Humain(bot) || bot == joueur)
-        etat = "absent";   // jamais la position d'un humain : la cible d'un contrat est un bot de la reserve
+    else if (!bot || !bot->IsInWorld() || bot == joueur || !sRandomPlayerbotMgr.IsRandomBot(bot))
+        etat = "absent";   // jamais la position d'un humain ni d'un altbot : la cible est un bot aleatoire de la reserve
     else
     {
         zone = NomZoneTraqueur(bot->GetZoneId());
