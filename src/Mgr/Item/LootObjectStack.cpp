@@ -317,6 +317,13 @@ bool LootObject::IsLootPossible(Player* bot)
     if (go && (go->GetEntry() == 9100024 || go->GetEntry() == 9100026))
         return false;
 
+    // CoA, refonte de l'artisanat, lot 1 (12/10/2026) : les noeuds de recolte de l'artisanat (gameobject_template
+    // 9101000-9101099, docs/CONCEPTION-artisanat-A-cadre.md, plages d'ids) s'ouvrent avec un outil utilise sur le
+    // noeud (verrou « objet seul ») ; un bot qui porterait l'outil echouerait en boucle (LootAction, cas
+    // LOCK_KEY_ITEM non gere). Ils sont reserves aux joueurs.
+    if (go && go->GetEntry() >= 9101000 && go->GetEntry() <= 9101099)
+        return false;
+
     // Conditional objects (quest chests, goobers, ...) are gated client-side on quest state.
     // A bot has no client, so make the same call the server makes for one.
     if (go && go->HasFlag(GAMEOBJECT_FLAGS, GO_FLAG_INTERACT_COND) && !go->ActivateToQuest(bot))
