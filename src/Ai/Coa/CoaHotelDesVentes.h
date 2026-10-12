@@ -43,6 +43,8 @@
 #ifndef PLAYERBOTS_COAHOTELDESVENTES_H
 #define PLAYERBOTS_COAHOTELDESVENTES_H
 
+#include "Define.h"
+
 #include <vector>
 
 class Player;
@@ -92,6 +94,33 @@ namespace CoaHotelDesVentes
     // RandomTeleportForLevel a aussi des appelants sur fil de carte
     // (AutoMaintenanceOnLevelupAction) : la, rend faux sans rien toucher.
     bool DestinationsCommissaire(Player* bot, std::vector<WorldLocation>& locs);
+
+    // RESSOURCES D'EVENEMENT (12/10/2026, coa-project/docs/CONCEPTION-ressources-rares-evenements.md § 4.2, lot 4).
+    // Option AiPlayerbot.Coa.HotelDesVentes.Ressources (defaut 0, exige Enable) ; liste des objets :
+    // AiPlayerbot.Directeur.ButinObjets. Allumee :
+    //   - categorie propre (qualite 4 comprise), coefficients Ressources.CoefMin/Max x SellPrice, meme plafond
+    //     marchand (BuyPrice x n - 1), plancher, bruit et sous-enchere ;
+    //   - EN PRIORITE : triees avant tout autre candidat du bot ;
+    //   - PLACE RESERVEE : hors de MaxParMaison / MaxParModele / MaxActivesParBot, bornees par
+    //     Ressources.MaxParMaison / MaxParModele ; les autres objets gardent tout MaxParMaison ;
+    //   - une ligne `coa hv ressource:` par ressource retenue, et des champs ressources_* EN FIN de `coa hv:`.
+
+    // Vente anticipee (Ressources.VenteAnticipee, defaut 0) : a appeler dans RandomPlayerbotMgr::ProcessBot(Player*),
+    // apres ReleverCourrier. Si le bot porte une ressource et passe les gardes d'AvantDestruction (fil monde, bot
+    // aleatoire sans groupe ni maitre humain ni affectation, hors BG et instance), il depose ses ressources SEULES
+    // (motif « ressources »), sans attendre le prochain vidage de sacs. Hors fil monde : ne fait rien.
+    void VendreRessources(Player* bot);
+
+    // Tout fil : la ressource est-elle protegee du vidage des sacs (DestroyItemsVisitor de PlayerbotFactory) et
+    // gardee par le bot (ItemUsageValue -> ITEM_USAGE_KEEP : ni vendue au marchand, ni detruite sac plein) ?
+    // Vrai seulement si Enable = 1, Simulation = 0 et Ressources = 1 : en simulation rien n'est vendu, la garder
+    // ne ferait que remplir les sacs.
+    bool RessourceProtegee(uint32 itemId);
+    // Tout fil (atomique) : une ressource protegee gardee (vrai) ou detruite au-dela de Ressources.GarderMaxPiles
+    // (faux) au vidage des sacs. Bilan `coa hv:` (ressources_gardees, ressources_detruites). Compte des DECISIONS par
+    // passage de visiteur : PlayerbotFactory::Reset enchaine ClearAllItems puis ClearInventory, une pile gardee y
+    // est donc comptee deux fois (et le plafond vaut par visiteur ; tous deux ne voient que sacs et equipement).
+    void NoterRessourceAuVidage(bool gardee);
 }
 
 #endif

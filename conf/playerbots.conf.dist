@@ -3611,6 +3611,37 @@ AiPlayerbot.Coa.HotelDesVentes.TeleportVisible = 0
 AiPlayerbot.Coa.HotelDesVentes.TeleportVisiblePct = 100
 
 ###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.VenteAnticipee
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMin / Ressources.CoefMax
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParMaison / Ressources.MaxParModele
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.GarderMaxPiles
+#        Ressources d'evenement (12/10/2026, CONCEPTION-ressources-rares-evenements.md § 4.2, lot 4). Exige
+#        Enable = 1 ; liste des objets : AiPlayerbot.Directeur.ButinObjets. A 1 :
+#        - vendues EN PRIORITE (avant tout autre objet du bot), qualite 4 (epique) comprise ;
+#        - PLACE RESERVEE : hors de MaxParMaison, MaxParModele et MaxActivesParBot, bornees par
+#          Ressources.MaxParMaison (encheres de ressources de bots par maison, EN PLUS de MaxParMaison : les autres
+#          objets gardent tout MaxParMaison) et Ressources.MaxParModele (par ressource et par maison) ;
+#        - prix unitaire = SellPrice x [CoefMin ; CoefMax], bruit, sous-enchere et plancher communs, plafond marchand
+#          BuyPrice x n - 1 (ici 6 x SellPrice) ;
+#        - en depot REEL seulement (Simulation = 0) : PROTEGEES du vidage des sacs (ClearInventory : refresh, revive,
+#          randomize ; au plus GarderMaxPiles piles, au-dela detruites comme avant) et gardees par le bot (ni
+#          vendues au marchand, ni detruites sac plein).
+#        VenteAnticipee : a 1, un bot libre (sans groupe, maitre humain ni affectation) qui porte une ressource la
+#        depose des son prochain passage dans ProcessBot, sans attendre le vidage des sacs (30 min a 2 h 30).
+#        Trace : une ligne `coa hv ressource:` par ressource retenue ; champs ressources_* en fin de `coa hv:`.
+#        Retour arriere : Ressources = 0 (les ressources gardees seront detruites au vidage suivant, comme avant),
+#        puis .reload config et playerbots rndbot reload.
+#        Default: 0, 0, 3, 5, 60, 15, 12
+AiPlayerbot.Coa.HotelDesVentes.Ressources = 0
+AiPlayerbot.Coa.HotelDesVentes.Ressources.VenteAnticipee = 0
+AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMin = 3
+AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMax = 5
+AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParMaison = 60
+AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParModele = 15
+AiPlayerbot.Coa.HotelDesVentes.Ressources.GarderMaxPiles = 12
+
+###################################################################################################
 ###################################################################################################
 #    DIRECTEUR -- BUS DE COMMANDES (lot D2a)
 #
@@ -4196,6 +4227,26 @@ AiPlayerbot.Directeur.EvenementAncreBot = 0
 #        Lue par PlayerbotAIConfig::Initialize seulement : `.reload config` PUIS `playerbots rndbot reload`.
 #        Default: 0 (rien n'est touche : comportement d'avant, a l'identique)
 AiPlayerbot.Directeur.RessourcesNiveauMonstre = 0
+
+#    AiPlayerbot.Directeur.ButinObjets
+#    AiPlayerbot.Directeur.ButinBots
+#    AiPlayerbot.Directeur.ButinTrace
+#        Butin des bots aux evenements (12/10/2026, coa-project/docs/CONCEPTION-ressources-rares-evenements.md § 4.1,
+#        lot 3, decisions D2 et D6).
+#        ButinObjets : les ressources d'evenement (ids d'item_template, separes par des virgules). Lue aussi par
+#        l'HV des bots (AiPlayerbot.Coa.HotelDesVentes.Ressources). Defaut : les six objets V2.
+#        ButinBots : a 1, un bot d'un groupe en butin LIBRE (le groupe d'evenement du Directeur), qui ne ramassait
+#        rien (FreeMethodLoot = 0), ramasse sur un corps de CREATURE D'EVENEMENT (9100000-9109999) et la seulement :
+#        sa copie des ressources MULTI_DROP (rare, epique), et la verte (exemplaire unique) seulement si aucun membre
+#        du groupe n'est humain. Jamais l'or, jamais un autre objet. Hors groupe ou groupe hors FFA : inchange.
+#        ButinTrace : a 1, une ligne `coa directeur butin:` dans CoaBots.log par ressource ramassee, humain ou bot
+#        (pilleur, bot, inscrit, groupe, objet, qualite, copie, n, source, evenement, carte, zone).
+#        Lues par PlayerbotAIConfig::Initialize seulement : `.reload config` PUIS `playerbots rndbot reload`.
+#        Ligne de preuve a chaque lecture : `coa directeur butin: sous_action=config bots= trace= objets= hv_ressources=`.
+#        Default: (les six objets), 0, 0
+AiPlayerbot.Directeur.ButinObjets = 9100101,9100106,9100107,9100111,9100116,9100117
+AiPlayerbot.Directeur.ButinBots = 0
+AiPlayerbot.Directeur.ButinTrace = 0
 
 #    AiPlayerbot.Directeur.EvenementInvoquesParJoueur
 #        invoques VIVANTS par joueur au plus (1-24), 64 en tout dans le royaume ; au-dela, refus `plein`.

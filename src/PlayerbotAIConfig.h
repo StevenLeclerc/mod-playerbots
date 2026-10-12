@@ -451,6 +451,16 @@ public:
     uint32 coaHvBilanSecondes;         // periode de la ligne `coa hv:` ; 0 = jamais
     bool coaHvTeleportVisible;         // lot 4 : apres un depot reel, branche ville -> commissaire-priseur
     uint32 coaHvTeleportVisiblePct;    // lot 4 : part (0-100) des bots marques envoyes au commissaire
+    // Ressources d'evenement a l'HV (12/10/2026, CONCEPTION-ressources-rares-evenements.md § 4.2, lot 4). Exigent
+    // Enable. LUES AUSSI DEPUIS LES FILS DE CARTE (RessourceProtegee : DestroyItemsVisitor, ItemUsageValue) : sans
+    // course pour la meme raison que coaHvEnable (Initialize ecrit, fils de carte a l'arret).
+    bool coaHvRessources;              // 0 : rien ne change ; 1 : ressources prioritaires, place reservee, protegees
+    bool coaHvRessourcesVenteAnticipee; // 1 : ProcessBot depose les ressources sans attendre le vidage des sacs
+    float coaHvRessourcesCoefMin;      // prix = SellPrice x [min ; max] (plafond BuyPrice x n - 1 inchange)
+    float coaHvRessourcesCoefMax;
+    uint32 coaHvRessourcesMaxParMaison;  // encheres de ressources de BOTS par maison, EN PLUS de MaxParMaison
+    uint32 coaHvRessourcesMaxParModele;  // encheres de bots par ressource et par maison
+    uint32 coaHvRessourcesGarderMaxPiles; // piles gardees au plus par vidage de sacs (au-dela : detruites)
 
     // Directeur, lot D2a (Ai/Coa/CoaDirecteur.cpp, SPEC-directeur-D2.md § 2.3).
     // TOUT EST ETEINT PAR DEFAUT : absentes de la conf en service, ces options
@@ -587,6 +597,12 @@ public:
     // decision D4a) : au tirage du butin d'une creature, une ressource 9100100-9100149 n'est gardee que si sa tranche
     // est celle du NIVEAU DE LA CREATURE (CoaDirecteurRessources.inc). Faux (defaut) : rien n'est touche.
     bool directeurRessourcesNiveauMonstre;
+    // Butin des bots aux evenements (12/10/2026, CONCEPTION-ressources-rares-evenements.md § 4.1, lot 3, D2 et D6).
+    // directeurButinObjets : les ressources d'evenement (ids d'item_template), lues par le ramassage, la trace ET
+    // l'HV des bots (coaHvRessources). Lues depuis les fils de carte ; ecrites par Initialize seul (fils a l'arret).
+    std::vector<uint32> directeurButinObjets;
+    bool directeurButinBots;    // 1 : un bot d'un groupe en butin libre ramasse SA part des ressources d'un corps d'evenement
+    bool directeurButinTrace;   // 1 : ligne `coa directeur butin:` a chaque ressource ramassee (humain ou bot)
     uint32 directeurEvenementInvoquesParJoueur;       // invoques vivants par joueur (1-24)
     uint32 directeurEvenementInvocationDistanceYd;    // point d'apparition a au plus N yd du joueur (20-250)
     // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas

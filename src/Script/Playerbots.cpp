@@ -90,8 +90,13 @@ public:
     // its bots wants to know what dropped, not to read every piece of linen cloth. The bar is
     // AiPlayerbot.LootLogMinQuality (3, rare, by default; 4 for epics only).
     // Off unless worldserver.conf points "playerbots.loot" at an appender.
-    void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid /*lootguid*/) override
+    void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid lootguid) override
     {
+        // CoA -- trace `coa directeur butin:` des ressources d'evenement, pour TOUT pilleur (humain ou bot), avant
+        // le filtre « bots seulement » ci-dessous. Option Directeur.ButinTrace eteinte : rend la main aussitot.
+        if (player && item)
+            CoaDirecteur::TracerButin(player, item->GetEntry(), count, lootguid);
+
         if (!player || !item || !GET_PLAYERBOT_AI(player))
             return;
 

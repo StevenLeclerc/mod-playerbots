@@ -799,6 +799,19 @@ bool PlayerbotAIConfig::Initialize()
         coaHvTeleportVisible = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.TeleportVisible", false);
         coaHvTeleportVisiblePct =
             std::min<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.TeleportVisiblePct", 100));
+
+        // Ressources d'evenement (12/10/2026) : eteint par defaut. Liste des objets : AiPlayerbot.Directeur.ButinObjets.
+        coaHvRessources = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.Ressources", false);
+        coaHvRessourcesVenteAnticipee =
+            sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.Ressources.VenteAnticipee", false);
+        lireBornes("AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMin", "AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMax",
+                   3.0f, 5.0f, coaHvRessourcesCoefMin, coaHvRessourcesCoefMax);
+        coaHvRessourcesMaxParMaison =
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParMaison", 60);
+        coaHvRessourcesMaxParModele =
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParModele", 15);
+        coaHvRessourcesGarderMaxPiles =
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.Ressources.GarderMaxPiles", 12);
     }
 
     // Directeur, lot D2a : inerte par defaut (SPEC-directeur-D2.md § 2.3).
@@ -915,6 +928,22 @@ bool PlayerbotAIConfig::Initialize()
     // Preuve lisible de la valeur CHARGEE (prerequis de la migration du butin 2026_10_11_11) : une ligne par lecture.
     LOG_INFO("playerbots", "coa directeur ressources: sous_action=config niveau_monstre={}",
              directeurRessourcesNiveauMonstre ? 1 : 0);
+    // Butin des bots aux evenements (12/10/2026) : eteint par defaut. La liste est VIDEE avant relecture (LoadList
+    // ajoute) ; un id nul ou illisible (atoi -> 0) est ecarte.
+    {
+        std::vector<uint32> objets;
+        LoadList<std::vector<uint32>>(
+            sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.ButinObjets",
+                                               "9100101,9100106,9100107,9100111,9100116,9100117"),
+            objets);
+        objets.erase(std::remove(objets.begin(), objets.end(), 0u), objets.end());
+        directeurButinObjets = std::move(objets);
+    }
+    directeurButinBots = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ButinBots", false);
+    directeurButinTrace = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ButinTrace", false);
+    LOG_INFO("playerbots", "coa directeur butin: sous_action=config bots={} trace={} objets={} hv_ressources={}",
+             directeurButinBots ? 1 : 0, directeurButinTrace ? 1 : 0, directeurButinObjets.size(),
+             coaHvRessources ? 1 : 0);
     directeurEvenementInvoquesParJoueur =
         std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementInvoquesParJoueur", 12), 1, 24);
     directeurEvenementInvocationDistanceYd = std::clamp<uint32>(

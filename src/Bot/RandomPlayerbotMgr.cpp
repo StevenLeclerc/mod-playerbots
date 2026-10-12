@@ -1494,6 +1494,8 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
     // garde de fil que AvantDestruction plus bas (CoaHotelDesVentes.h) : appele
     // ici depuis un fil de carte (RandomBotUpdateAction), il ne fait rien.
     CoaHotelDesVentes::ReleverCourrier(bot);
+    // CoA -- ressources d'evenement (12/10/2026) : vente anticipee, meme garde de fil (Ressources.VenteAnticipee).
+    CoaHotelDesVentes::VendreRessources(bot);
 
     // if death revive
     if (bot->isDead())

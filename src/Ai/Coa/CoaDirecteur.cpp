@@ -10614,6 +10614,9 @@ public:
     }
 };
 
+// Butin des bots aux evenements (12/10/2026) : fonctions publiques, hors de l'espace de noms anonyme.
+#include "CoaDirecteurButin.inc"
+
 void AddSC_coa_directeur()
 {
     new coa_directeur_niveau_creaturescript();

@@ -10,6 +10,7 @@
 #include "AiObjectContext.h"
 #include "ArenaTeam.h"
 #include "ArenaTeamMgr.h"
+#include "CoaHotelDesVentes.h"
 #include "CoaSpecLookup.h"
 #include "CoaSpecStatWeights.h"
 #include "CoaSpecialization.h"
@@ -1944,7 +1945,20 @@ public:
     bool Visit(Item* item) override
     {
         uint32 id = item->GetTemplate()->ItemId;
-        if (CanKeep(id))
+
+        // CoA -- ressources d'evenement (12/10/2026, option Coa.HotelDesVentes.Ressources) : gardees pour l'HV des
+        // bots, au plus Ressources.GarderMaxPiles piles par vidage (au-dela : detruites, comme avant).
+        if (CoaHotelDesVentes::RessourceProtegee(id))
+        {
+            bool const garder = ressourcesGardees < sPlayerbotAIConfig.coaHvRessourcesGarderMaxPiles;
+            CoaHotelDesVentes::NoterRessourceAuVidage(garder);
+            if (garder)
+            {
+                ++ressourcesGardees;
+                return true;
+            }
+        }
+        else if (CanKeep(id))
         {
             keep.insert(id);
             return true;
@@ -1968,6 +1982,7 @@ private:
 
     Player* bot;
     std::set<uint32> keep;
+    uint32 ressourcesGardees = 0;
 };
 
 bool PlayerbotFactory::CanEquipArmor(ItemTemplate const* proto)

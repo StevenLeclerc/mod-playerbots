@@ -7,6 +7,7 @@
 #include "LootAction.h"
 #include "BroadcastHelper.h"
 #include "ChatHelper.h"
+#include "CoaDirecteur.h"
 #include "Event.h"
 #include "GuildMgr.h"
 #include "GuildTaskMgr.h"
@@ -34,6 +35,20 @@ bool LootAction::Execute(Event /*event*/)
         // bot->GetSession()->HandleLootReleaseOpcode(packet);
     }
 
+    // CoA -- butin des bots aux evenements (12/10/2026, D2) : en ramassage RESTREINT (groupe en butin libre, ou
+    // l'amont refusait tout), seul un corps de creature d'evenement est vise. Tout autre candidat est retire de la
+    // pile, pour ne pas le reproposer a chaque tick ; le suivant sera examine au prochain passage.
+    // Revue du 12/10 : et seulement s'il y reste une ressource pour CE bot (sinon il rouvrirait, chaque LootDelay, un
+    // corps ou ne reste que la verte d'un humain).
+    if (CoaDirecteur::RamassageRestreint(bot) &&
+        (!lootObject.guid.IsCreatureOrVehicle() || !CoaDirecteur::EstCreatureDEvenement(lootObject.guid.GetEntry()) ||
+         !CoaDirecteur::ResteAPrendre(bot, botAI->GetCreature(lootObject.guid))))
+    {
+        if (!lootObject.guid.IsEmpty())
+            AI_VALUE(LootObjectStack*, "available loot")->Remove(lootObject.guid);
+        return false;
+    }
+
     if (lootObject.guid.IsGameObject() &&
         sPlayerbotAIConfig.disallowedGameObjects.contains(lootObject.guid.GetEntry()))
     {
@@ -48,8 +63,11 @@ bool LootAction::Execute(Event /*event*/)
 
 bool LootAction::isUseful()
 {
+    // CoA -- butin des bots aux evenements (12/10/2026, D2 voie a) : l'exception ne s'ouvre QUE la ou l'amont
+    // rendait faux (CoaDirecteur::RamassageRestreint en est la negation exacte, plus l'option Directeur.ButinBots),
+    // et Execute / StoreLootAction la restreignent aux ressources des corps d'evenement. Option eteinte : inchange.
     return sPlayerbotAIConfig.freeMethodLoot || !bot->GetGroup() ||
-    bot->GetGroup()->GetLootMethod() != FREE_FOR_ALL || IsSelfBot(bot);
+    bot->GetGroup()->GetLootMethod() != FREE_FOR_ALL || IsSelfBot(bot) || CoaDirecteur::RamassageRestreint(bot);
 }
 
 enum ProfessionSpells
@@ -377,7 +395,14 @@ bool StoreLootAction::Execute(Event event)
 
     bot->SetLootGUID(guid);
 
-    if (gold > 0)
+    // CoA -- butin des bots aux evenements (12/10/2026, D6) : en ramassage restreint (groupe en butin libre), ni or
+    // ni objet hors des ressources d'evenement, et la verte (exemplaire unique) seulement sans humain au groupe.
+    // Revue du 12/10 : seulement pour la fenetre d'un CORPS D'EVENEMENT. Toute autre fenetre (conteneur ouvert par
+    // OpenItemAction, sacoche, palourde) garde le chemin d'avant, or compris.
+    bool const restreint = CoaDirecteur::RamassageRestreint(bot) && guid.IsCreatureOrVehicle() &&
+                           CoaDirecteur::EstCreatureDEvenement(guid.GetEntry());
+
+    if (gold > 0 && !restreint)
     {
         WorldPacket* packet = new WorldPacket(CMSG_LOOT_MONEY, 0);
         bot->GetSession()->QueuePacket(packet);
@@ -402,7 +427,12 @@ bool StoreLootAction::Execute(Event event)
         if (lootslot_type != LOOT_SLOT_TYPE_ALLOW_LOOT && lootslot_type != LOOT_SLOT_TYPE_OWNER)
             continue;
 
-        if (loot_type != LOOT_SKINNING && !IsLootAllowed(itemid, botAI))
+        if (restreint)
+        {
+            if (!CoaDirecteur::PeutPrendreEnButinLibre(bot, itemid))
+                continue;
+        }
+        else if (loot_type != LOOT_SKINNING && !IsLootAllowed(itemid, botAI))
             continue;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemid);
