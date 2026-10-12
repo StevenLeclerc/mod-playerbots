@@ -20,6 +20,7 @@
 #include "Group.h"
 #include "GroupMgr.h"
 #include "LastMovementValue.h"
+#include "PositionValue.h"
 #include "LFGMgr.h"
 #include "Item.h"
 #include "Log.h"
@@ -7646,6 +7647,17 @@ float FuirChasseur(Player* bot, Player* chasseur)
             continue;
         if (bot->IsMounted())
             bot->RemoveAurasByType(SPELL_AURA_MOUNTED);
+        // Relecture (M3) : aux prises, le moteur de COMBAT poursuivrait le chasseur (ChaseTo ne consulte pas la
+        // priorite du dernier mouvement) et Reconstruire saute un bot en combat (« stay » resterait). On le sort du
+        // combat : il fuit, et ne riposte que si le chasseur le rattrape.
+        if (bot->IsInCombat())
+        {
+            bot->AttackStop();
+            bot->CombatStop(true);
+            ia->GetAiObjectContext()->GetValue<Unit*>("current target")->Set(nullptr);
+            bot->SetSelection(ObjectGuid::Empty);
+            ia->ChangeEngine(BOT_STATE_NON_COMBAT);
+        }
         bot->GetMotionMaster()->MovePoint(0, px, py, sol, FORCED_MOVEMENT_RUN);
         float const vitesse = std::max(1.0f, bot->GetSpeed(MOVE_RUN));
         uint32 const delai = std::min(REACTION_FUITE_MAX_MS, std::max(REACTION_FUITE_MIN_MS,
@@ -7698,7 +7710,11 @@ bool SauterGardePres(Player* garde, Player* cible)
             continue;
         if (HumainProcheSauf(WorldPosition(carte, px, py, sol), carte, REACTION_SAUT_HUMAIN_YD, 0))
             return false;
-        return CoaDirecteur::Sauter(garde, WorldLocation(carte, px, py, sol, a + float(M_PI)));
+        // Relecture (M4) : une position « stay » posee (commande de chat) ramenerait le garde a son ancien point
+        // (ReturnToStayPositionTrigger) : oubliee. +0,5 yd au-dessus du sol, comme les autres sauts du fichier.
+        if (PlayerbotAI* ia = GET_PLAYERBOT_AI(garde))
+            ia->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get()["stay"].Reset();
+        return CoaDirecteur::Sauter(garde, WorldLocation(carte, px, py, sol + 0.5f, a + float(M_PI)));
     }
     return false;
 }
@@ -7740,9 +7756,11 @@ void SuivreReactions()
             continue;
         if (e.declenchee)
         {
-            // Une preparation `P-0` de renouvellement (contrats.py, repos echu) la remettrait au repos et immobile.
+            // Une preparation `P-0` de renouvellement (contrats.py, repos echu) la remettrait immobile (et, pour la
+            // defense, au repos). La fuyarde GARDE son repos (relecture M2) : elle ne vise aucun joueur, elle riposte.
             LeverImmobile(e.cible);
-            LeverRepos(e.cible);
+            if (defense)
+                LeverRepos(e.cible);
             continue;
         }
         bool const memeCarte = chasseur->GetMapId() == cible->GetMapId() &&
@@ -7765,7 +7783,7 @@ void SuivreReactions()
         }
         if (!memeCarte || !chasseur->IsAlive())
             continue;
-        bool const vu = cible->IsWithinLOSInMap(chasseur);
+        bool const vu = d <= REACTION_FUITE_YD && cible->IsWithinLOSInMap(chasseur);   // de pres seulement : couteux
         // « Deja aux prises » : en combat AVEC le chasseur (il a tire le premier, de loin) -- jamais un combat contre
         // une creature, qui declencherait la reaction le chasseur a l'autre bout de la carte.
         bool const auxPrises = d <= REACTION_ENGAGE_YD && cible->IsInCombatWith(chasseur);
@@ -7783,8 +7801,8 @@ void SuivreReactions()
         }
         else if (fuite && ((d <= REACTION_FUITE_YD && vu) || auxPrises))
         {
+            // Relecture (M2) : la fuyarde GARDE son repos (PossibleTargetsValue : elle ne vise aucun joueur).
             LeverImmobile(e.cible);
-            LeverRepos(e.cible);
             float const pas = FuirChasseur(cible, chasseur);
             uint32 engages = 0;
             for (uint32 g : e.gardes)
@@ -7797,6 +7815,8 @@ void SuivreReactions()
                 if (EngagerChasseur(garde, chasseur))
                     ++engages;
             }
+            if (pas <= 0.0f && !engages)
+                continue;   // aucun sol sec ou fuir, aucun garde a portee : on reessaie la seconde suivante
             e.declenchee = true;
             JournaliserReaction(e, "fuite", Acore::StringFormat(" fuite_yd={:.0f} gardes={} gardes_engages={} distance={:.0f}",
                                                                 pas, e.gardes.size(), engages, d));
