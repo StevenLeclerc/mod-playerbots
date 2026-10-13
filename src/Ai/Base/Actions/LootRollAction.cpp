@@ -40,6 +40,14 @@ bool LootRollAction::Execute(Event /*event*/)
         if (!proto)
             continue;
 
+        // CoA (D-PO-23) : materiaux de monde et Eclat d'eveil reserves aux joueurs, quel que soit le mode de butin.
+        if (itemId >= 9101212 && itemId <= 9101215)
+        {
+            group->CountRollVote(bot->GetGUID(), guid, PASS);
+            voted = true;
+            continue;
+        }
+
         std::string itemUsageParam;
         if (randomProperty != 0)
             itemUsageParam = std::to_string(itemId) + "," + std::to_string(randomProperty);

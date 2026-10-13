@@ -479,6 +479,12 @@ bool StoreLootAction::IsLootAllowed(uint32 itemid, PlayerbotAI* botAI)
     if (!proto)
         return false;
 
+    // CoA, refonte de l'artisanat (D-PO-23) : les materiaux de monde (9101212 vert, 9101213 rare, 9101214 epique) et
+    // l'Eclat d'eveil (9101215) sont reserves aux joueurs, comme les noeuds 9101000-9101099 (LootObjectStack.cpp) :
+    // un bot ne les ramasse pas et passe au tirage (LootRollAction appelle IsLootAllowed).
+    if (itemid >= 9101212 && itemid <= 9101215)
+        return false;
+
     std::set<uint32>& lootItems = AI_VALUE(std::set<uint32>&, "always loot list");
     if (lootItems.find(itemid) != lootItems.end())
         return true;
