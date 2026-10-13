@@ -526,6 +526,57 @@ bool EnsureCoaSpecialization(Player* bot)
     return true;
 }
 
+/*
+ * Lot 20 (13/10/2026) -- CLASSES DONT LE GLADIATEUR JOUE A DISTANCE. Une table, pas des cas disperses : le gladiateur
+ * d'une classe listee ne prend qu'une specialisation de degats qui n'est pas de melee (Style de Profiles[]).
+ *   - Ranger (21) : L1 de l'IA d'arene ne joue que 28 et 29 ; le gladiateur 682 (specialisation 30, melee) a joue le 10/10
+ *     a 21:12 (Paris) sans aucun geste de L1 (CoaAreneEstRangerDistance), ni ouverture, ni recul, ni burst garde.
+ *   - Starcaller (26) : sur le banc du 12/10 (docs/ANALYSE-classes-faibles-arene-20261013.md § 4), le seul gladiateur joue, 435,
+ *     a joue ses 8 matchs en Warden (45, melee, aucune approche) : 3 matchs sur 8 sans jamais atteindre le contact, 350
+ *     degats subis par seconde, 31 sorts de zone ecartes hors de portee. Sentinel (44) est sa specialisation par defaut
+ *     (CoaSpecStrategies.h) et la seule autre de degats.
+ * Une classe ajoutee ici sans specialisation de degats a distance garde la regle commune (candidats vides : rien ne
+ * change).
+ */
+static constexpr uint8 GladiateursADistance[] = { CLASS_RANGER, CLASS_STARCALLER };
+
+static bool GladiateurADistance(uint8 classId)
+{
+    return std::find(std::begin(GladiateursADistance), std::end(GladiateursADistance), classId) !=
+           std::end(GladiateursADistance);
+}
+
+// Lot 20 : signal seulement. Specialisation `spec` de melee, la classe en a une de degats a distance, et le bot ne connait
+// aucun sort qui le porte vers l'ennemi (CHARGE, CHARGE_DEST, JUMP, JUMP_DEST visant une cible ennemie ou un point sur
+// elle : meme lecture que CoaAreneSortDeRapprochement, CoaAreneIa.inc).
+static bool MeleeSansApproche(Player* bot, uint32 spec)
+{
+    SpecializationProfile const* profile = FindProfile(spec);
+    if (!profile || profile->Style != CoaStyle::Melee)
+        return false;
+    bool distanceExiste = false;
+    for (uint32 autre : SpecializationsByRole(bot->getClass())[uint8(CoaRole::Dps)])
+        if (SpecializationProfile const* p = FindProfile(autre))
+            distanceExiste = distanceExiste || p->Style != CoaStyle::Melee;
+    if (!distanceExiste)
+        return false;
+    auto versAdversaire = [](uint32 t) { return t == 6 || t == 25 || t == 53 || (t >= 63 && t <= 71); };
+    for (AscensionClassAbility const& a : GetAscensionClassAbilities(bot->getClass()))
+    {
+        if ((a.SpecId && a.SpecId != spec) || !bot->HasSpell(a.SpellId))
+            continue;
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(a.SpellId);
+        if (!info || info->IsPassive() || !(info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK))
+            continue;
+        for (SpellEffectInfo const& effet : info->Effects)
+            if ((effet.Effect == SPELL_EFFECT_CHARGE || effet.Effect == SPELL_EFFECT_CHARGE_DEST ||
+                 effet.Effect == SPELL_EFFECT_JUMP || effet.Effect == SPELL_EFFECT_JUMP_DEST) &&
+                (versAdversaire(effet.TargetA.GetTarget()) || versAdversaire(effet.TargetB.GetTarget())))
+                return false;
+    }
+    return true;
+}
+
 uint32 CoaSpecialiserGladiateur(Player* bot)
 {
     if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel ||
@@ -533,9 +584,8 @@ uint32 CoaSpecialiserGladiateur(Player* bot)
         return 0;
 
     std::vector<uint32> candidates = SpecializationsByRole(bot->getClass())[uint8(CoaRole::Dps)];
-    // Le Ranger : seulement a distance. Le gladiateur 682 (specialisation 30, melee) a joue le 10/10 a 21:12
-    // (Paris) sans aucun geste de L1 (CoaAreneEstRangerDistance), ni ouverture, ni recul, ni burst garde.
-    if (bot->getClass() == CLASS_RANGER)
+    bool const distance = GladiateurADistance(bot->getClass());
+    if (distance)
         candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](uint32 spec)
             {
                 SpecializationProfile const* profile = FindProfile(spec);
@@ -546,7 +596,14 @@ uint32 CoaSpecialiserGladiateur(Player* bot)
 
     uint32 const avant = GetAscensionActiveSpecialization(bot);
     if (std::find(candidates.begin(), candidates.end(), avant) != candidates.end())
+    {
+        // Lot 20 : la specialisation gardee est tracee aussi (meme ligne, changee=0), pour que le banc lise le signal
+        // « melee sans approche » a chaque preparation.
+        LOG_INFO("playerbots.coa", "coa arene ia: guid={} action=gladiateur_spe classe={} spe={} avant={} niveau={} "
+                 "changee=0 distance={} melee_sans_approche={}", bot->GetGUID().GetCounter(), bot->getClass(), avant, avant,
+                 bot->GetLevel(), distance ? 1 : 0, MeleeSansApproche(bot, avant) ? 1 : 0);
         return 0;
+    }
 
     uint32 const choisie = candidates[Hash(bot->GetGUID().GetCounter(), 0x474C4144u) % candidates.size()];   // 'GLAD'
     if (!SwitchAscensionSpecialization(bot, choisie))
@@ -558,6 +615,12 @@ uint32 CoaSpecialiserGladiateur(Player* bot)
     uint32 const points = ApplyCoaTalents(bot);
     LOG_INFO("playerbots", "coa: {} (class {}, level {}) took gladiator specialization {} (was {}), {} talent entries raised",
              bot->GetName(), bot->getClass(), bot->GetLevel(), choisie, avant, points);
+    // Lot 20 : la meme decision au format des lignes d'IA d'arene (champs nommes), pour le banc. `distance` : la classe
+    // est dans GladiateursADistance ; `melee_sans_approche` : la specialisation posee est de melee, la classe en a une de
+    // degats a distance, et le bot ne connait aucune charge ni aucun saut vers l'ennemi (signale, rien n'est change).
+    LOG_INFO("playerbots.coa", "coa arene ia: guid={} action=gladiateur_spe classe={} spe={} avant={} niveau={} changee=1 "
+             "distance={} melee_sans_approche={}", bot->GetGUID().GetCounter(), bot->getClass(), choisie, avant,
+             bot->GetLevel(), distance ? 1 : 0, MeleeSansApproche(bot, choisie) ? 1 : 0);
     return choisie;
 }
 

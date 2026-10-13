@@ -417,6 +417,15 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
                 sous.kind = 0;
                 sous.dispelMask = 0;
                 Classify(triggered, sous, depth + 1);
+                // LOT 20 (13/10/2026, docs/ANALYSE-classes-faibles-arene-20261013.md § 1) : un soin porte par une aura
+                // qui DECLENCHE periodiquement un soin est un soin periodique, comme une aura PERIODIC_HEAL. Vital Shield
+                // 504849 (Bloodmage) : aura 23 (PERIODIC_TRIGGER_SPELL) -> 804309 (HEAL_PCT 2 % toutes les 5 s), 30 min.
+                // Sans la marque, la survie d'arene ne testait pas son aura (test reserve a KIND_HOT) et le relancait a
+                // chaque palier : 19 lancers en 54 s, 62 % des sorts du Bloodmage sur le banc du 12/10.
+                if (aura && (effect.ApplyAuraName == SPELL_AURA_PERIODIC_TRIGGER_SPELL ||
+                             effect.ApplyAuraName == SPELL_AURA_PERIODIC_TRIGGER_SPELL_WITH_VALUE) &&
+                    (sous.kind & KIND_HEAL))
+                    sous.kind |= KIND_HOT;
                 if (reserveAuxMarques)
                     sous.kind &= ~uint16(KIND_HEAL | KIND_SELF_HEAL | KIND_GROUP_HEAL | KIND_HOT | KIND_ALLY_CAST);
                 ability.kind |= sous.kind;
@@ -762,6 +771,78 @@ bool CoaRefusCibleCertain(Player* bot, SpellInfo const* info, Unit* target)
             return true;
     }
     return false;
+}
+
+/*
+ * LOT 20 (13/10/2026) -- SOIN OU BOUCLIER DEJA POSE, pour tous les bots CoA.
+ *
+ * Banc d'arene du 12/10 (docs/ANALYSE-classes-faibles-arene-20261013.md § 1) : Vital Shield 504849 relance jusqu'a 19 fois
+ * en 54 s alors que son aura dure 30 min. Deux causes : Classify ne le marquait pas KIND_HOT (son soin passe par une aura
+ * 23 qui declenche 804309 ; corrige dans Classify), et le controle « aura deja posee » de la survie ne valait QUE pour
+ * KIND_HOT. La regle est desormais generale, sans id : un sort de soin ou de defense dont TOUT l'effet passe par une aura
+ * (aucun soin direct, voir CoaSoinDirect) n'est pas relance tant que cette aura -- la sienne, ou celle d'un sort qu'il
+ * declenche sans aura -- est posee PAR LE BOT sur la cible et dure encore plus d'une seconde (ou est permanente). Une
+ * aura d'un AUTRE lanceur ne bloque rien (elle se cumule par lanceur). Un sort qui soigne aussi directement (soin + HoT,
+ * Fleshcraft 801952 : HEAL_PCT + aura de hate) reste lancable : le relancer soigne.
+ */
+
+// Le sort soigne DIRECTEMENT (HEAL, HEAL_PCT, HEAL_MAX_HEALTH), lui-meme ou par un sort qu'il declenche sans aura
+// (TRIGGER_SPELL, TRIGGER_SPELL_WITH_VALUE, declenchement differe Ascension 183), sur deux niveaux. Un soin porte par une
+// aura (PERIODIC_HEAL, declencheur periodique, aura factice qui soigne au prochain coup comme Dark Infusion 570249) n'en
+// est pas un.
+bool CoaSoinDirect(SpellInfo const* info, uint8 profondeur = 0)
+{
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect())
+            continue;
+        if (effect.Effect == SPELL_EFFECT_HEAL || effect.Effect == SPELL_EFFECT_HEAL_PCT ||
+            effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH)
+            return true;
+        bool const declencheSansAura = effect.Effect == SPELL_EFFECT_TRIGGER_SPELL ||
+                                       effect.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE ||
+                                       effect.Effect == SPELL_EFFECT_ASCENSION_TRIGGER_SPELL_DELAYED;
+        if (declencheSansAura && effect.TriggerSpell && effect.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                if (CoaSoinDirect(declenche, profondeur + 1))
+                    return true;
+    }
+    return false;
+}
+
+// Marge sous laquelle une aura posee se renouvelle : relancer a moins d'une seconde de la fin ne gaspille presque rien.
+constexpr int32 CoaAuraRenouvelerMs = 1000;
+
+// L'aura du sort, ou celle d'un sort qu'il declenche sans aura (un niveau), posee par `lanceur` sur `cible` et encore
+// la pour plus de CoaAuraRenouvelerMs (ou permanente).
+bool CoaAuraPoseePar(Unit* cible, ObjectGuid lanceur, SpellInfo const* info)
+{
+    auto posee = [cible, lanceur](uint32 id)
+    {
+        Aura const* aura = cible->GetAura(id, lanceur);
+        return aura && (aura->GetDuration() < 0 || aura->GetDuration() > CoaAuraRenouvelerMs);
+    };
+    if (posee(info->Id))
+        return true;
+    for (SpellEffectInfo const& effect : info->Effects)
+        if ((effect.Effect == SPELL_EFFECT_TRIGGER_SPELL || effect.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE) &&
+            effect.TriggerSpell && effect.TriggerSpell != info->Id && posee(effect.TriggerSpell))
+            return true;
+    return false;
+}
+
+// Soin ou bouclier (KIND_HEAL ou KIND_DEFENSIVE, ni hostile ni degats) sans soin direct, dont l'aura est deja posee par
+// le bot sur `cible`. Juge sur `info`, le sort EFFECTIF (EffectiveSpell), celui que PlayerbotAI::CastSpell lance : un
+// remplacement qui pose une AUTRE aura n'est pas ecarte parce que l'aura du sort de base est la (meme regle que
+// CoaAreneRefusTactique, revue du 11/10). `spell.kind` : les marques du sort de la liste.
+bool CoaSoinDejaPose(Player* bot, Usable const& spell, SpellInfo const* info, Unit* cible)
+{
+    if (!cible || !cible->IsInWorld() || !(spell.kind & (KIND_HEAL | KIND_DEFENSIVE)) ||
+        (spell.kind & (KIND_HOSTILE | KIND_DAMAGE)))
+        return false;
+    if (CoaSoinDirect(info))
+        return false;
+    return CoaAuraPoseePar(cible, bot->GetGUID(), info);
 }
 
 // Whether a spell is still set aside. The bench is keyed by the id that was actually checked,
@@ -1236,6 +1317,9 @@ bool CoaAreneSurvieRefuseIncantation(PlayerbotAI* botAI, Player* bot, SpellInfo 
 // Survie d'arene (11/10) : sort ecarte faute de ressource (CoaPeutPayer) par un gladiateur trace -- une ligne
 // « refus_ressource » par sort et par 5 s, et le compte du bilan. Defini dans CoaAreneIa.inc.
 void CoaAreneNoterRefusRessource(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target);
+// Lot 20 : soin ou bouclier deja pose ecarte (CoaSoinDejaPose) en arene 1v1 ou en duel -- une ligne « deja_pose » par
+// sort et par 5 s, et le compte du bilan. Defini dans CoaAreneIa.inc.
+void CoaAreneNoterDejaPose(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target, bool trace);
 
 /*
  * Pre-controle de la cible, pour tous les bots CoA (banc d'arene du 10/10/2026 23:31-23:37 Paris : OUT_OF_RANGE 61,
@@ -1472,6 +1556,16 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // ni echec consigne : le sort repart des que le familier, l'etat ou l'aura est la.
         if (CoaExigeFamilierAbsent(bot, info) || CoaRefusCibleCertain(bot, info, target))
             continue;
+
+        // Lot 20 (13/10) : soin ou bouclier dont l'aura est deja posee par le bot sur la cible (CoaSoinDejaPose), pour
+        // tous les bots CoA. Ecarte sans banc ni echec consigne : il repart des que l'aura tombe. Trace en arene 1v1 et en
+        // duel seulement (advTactique).
+        if (CoaSoinDejaPose(bot, spell, info, target))
+        {
+            if (advTactique)
+                CoaAreneNoterDejaPose(botAI, bot, info, target, trace);
+            continue;
+        }
 
         // The global cooldown blocks every spell alike: try again on a later tick.
         if (bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))

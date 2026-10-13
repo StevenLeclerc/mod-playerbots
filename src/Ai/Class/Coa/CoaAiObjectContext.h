@@ -193,6 +193,12 @@ struct CoaAreneEtat
     // Sorts ecartes faute de ressource (CoaPeutPayer) : bilan, et derniere trace par sort (une toutes les 5 s au plus).
     uint32 refusRessource = 0;
     std::unordered_map<uint32, uint32> refusRessourceTraceMs;
+    // Lot 20 (13/10) : soins ou boucliers deja poses ecartes (CoaSoinDejaPose), generateurs de ressource lances par la
+    // survie, soins a aura retenus par la reserve de mana du meilleur outil de survie -- bilan (par sort et par 5 s pour
+    // les deux refus), et derniere trace par sort.
+    uint32 dejaPose = 0, survieGenerateurs = 0, survieReserveMana = 0;
+    std::unordered_map<uint32, uint32> dejaPoseTraceMs;
+    std::unordered_map<uint32, uint32> reserveManaTraceMs;
     // Etendards et autres sorts au sol de soutien poses sur soi (« coa arene soutien ») : prochain essai, poses.
     uint32 prochainSoutienMs = 0;
     uint32 soutiens = 0;

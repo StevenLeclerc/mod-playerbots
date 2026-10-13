@@ -734,7 +734,11 @@ void CoaAreneClore(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* ad
                                         etat.survieSorts[1], etat.survieSorts[2], etat.survieSorts[3], etat.soinsSoi,
                                         etat.survieFuites, etat.dispelRefus[1], etat.dispelRefus[2], etat.dispelRefus[3],
                                         etat.dispelRefus[4], etat.refusRessource, etat.soutiens, etat.sourcesHorsVue,
-                                        etat.survieControles));
+                                        etat.survieControles) +
+                    // Lot 20 (13/10) : soins ou boucliers deja poses ecartes (par sort et par 5 s), generateurs de ressource
+                    // lances par la survie, soins retenus par la reserve de mana (par sort et par 5 s). EN FIN de ligne.
+                    Acore::StringFormat(" deja_pose={} survie_generateurs={} survie_reserve_mana={}", etat.dejaPose,
+                                        etat.survieGenerateurs, etat.survieReserveMana));
     etat.actif = false;
     etat.survieNiveau = 0;
     etat.survieFuiteDebutMs = 0;
@@ -1977,6 +1981,14 @@ bool CoaAreneEffetAccessoire(SpellEffectInfo const& effet)
     switch (effet.Effect)
     {
         case SPELL_EFFECT_TRIGGER_SPELL:
+        // Lot 20 (13/10, banc du 12/10 : Waves of Time 801277 du Chronomancer lance 3 fois sur 6 a 106-119 yd). Son effet 0
+        // est le declenchement DIFFERE Ascension (183) du recul en cone 802600 (KNOCK_BACK, cible 24, rayon 13 yd), pose
+        // sur le lanceur ; l'effet 1 est le cone (TRIGGER_SPELL, cible 24) du visuel 65633. Le 183 n'etait ni zone ni
+        // accessoire : il comptait comme « valeur propre » et le sort n'etait jamais ecarte, alors que sa portee est
+        // « soi » (RangeEntry 1 : le pre-controle de portee ne juge rien) et que tout son effet est dans le cone. Le
+        // declenchement differe est lu comme un declenchement immediat : accessoire si le sort declenche n'est pas
+        // benefique (ou inerte), sinon il garde sa valeur propre.
+        case SPELL_EFFECT_ASCENSION_TRIGGER_SPELL_DELAYED:
             return declencheNonBenefique(effet.TriggerSpell);
         case SPELL_EFFECT_APPLY_AURA:
             if (effet.TargetA.GetTarget() != TARGET_UNIT_CASTER)
@@ -3288,6 +3300,109 @@ bool CoaAreneSousDefensif(PlayerbotAI* botAI, Player* bot)
     return false;
 }
 
+// Lot 20 (13/10) : soin DIRECT estime du sort (a la difference de CoaAreneSoinEstime, qui compte aussi les soins
+// periodiques sur toute leur duree : Vital Shield y vaudrait 360 ticks de 2 %), sans bonus de puissance des sorts (HEAL : valeur de base au niveau du
+// bot ; HEAL_PCT : part de la vie maximale du bot ; HEAL_MAX_HEALTH : vie maximale), lui-meme et ses sorts declenches
+// sans aura (deux niveaux). 0 pour un soin a aura (periodique, differe) ou un soin fait par script (valeur 1 au DBC) :
+// sert a ORDONNER les soins directs de la survie, jamais a en ecarter un.
+float CoaAreneSoinDirectEstime(Player* bot, SpellInfo const* info, uint8 profondeur = 0)
+{
+    float total = 0.0f;
+    for (SpellEffectInfo const& effet : info->Effects)
+    {
+        if (!effet.IsEffect())
+            continue;
+        if (effet.Effect == SPELL_EFFECT_HEAL)
+            total += std::max(0, effet.CalcValue(bot));
+        else if (effet.Effect == SPELL_EFFECT_HEAL_PCT)
+            total += std::max(0, effet.CalcValue(bot)) * float(bot->GetMaxHealth()) / 100.0f;
+        else if (effet.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH)
+            total += float(bot->GetMaxHealth());
+        else if ((effet.Effect == SPELL_EFFECT_TRIGGER_SPELL || effet.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE ||
+                  effet.Effect == SPELL_EFFECT_ASCENSION_TRIGGER_SPELL_DELAYED) &&
+                 effet.TriggerSpell && effet.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effet.TriggerSpell))
+                total += CoaAreneSoinDirectEstime(bot, declenche, profondeur + 1);
+    }
+    return total;
+}
+
+/*
+ * Lot 20 (13/10, banc du 12/10, Cultist niveau 60 : trois Dark Infusion 570249 par match, 30 % de la mana de base chacun,
+ * pour 207 de soin au prochain coup recu ; la mana tombait a 0-10 % et Eldritch Mending 574325 puis Abyssal Ward 804670
+ * etaient refuses faute de mana pendant que la vie s'effondrait). RESERVE DE MANA DU MEILLEUR OUTIL DE SURVIE, en survie
+ * d'arene et de duel :
+ *   - outil principal : soin direct sur soi (CoaSoinDirect) ou defensif, paye en mana, hors recharge, ni entrave ni
+ *     sort de forme ; la reserve est le cout du PLUS CHER d'entre eux (le meilleur outil, qu'il faut pouvoir payer) ;
+ *   - un soin SANS soin direct (aura periodique, differe, conditionnel), paye en mana, n'est pas lance s'il laisserait la
+ *     mana sous cette reserve, ou sous CoaAreneSurvieReserveOutilPct de la mana maximale.
+ * Sans outil principal paye en mana (classe sans mana, ou dont tous les vrais soins se paient autrement), rien n'est
+ * retenu. Rien hors de la survie d'arene et de duel.
+ */
+constexpr float CoaAreneSurvieReserveOutilPct = 40.0f;
+
+int32 CoaAreneReserveOutilMana(PlayerbotAI* botAI, Player* bot)
+{
+    if (!bot->GetMaxPower(POWER_MANA))
+        return 0;
+    int32 reserve = 0;
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+             { return (kind & KIND_DEFENSIVE) || ((kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE))); }))
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        if (info->PowerType != POWER_MANA || bot->HasSpellCooldown(info->Id) || CoaAreneSortEntrave(info) ||
+            CoaAreneSortFormeUsable(bot, spell))
+            continue;
+        if (!(spell.kind & KIND_DEFENSIVE) && !CoaSoinDirect(info) && !CoaSoinDirect(spell.info))
+            continue;
+        reserve = std::max(reserve, info->CalcPowerCost(bot, info->GetSchoolMask()));
+    }
+    return reserve;
+}
+
+// Le soin `spell` (sort effectif `info`) serait retenu par la reserve `reserve` (CoaAreneReserveOutilMana).
+bool CoaAreneSousReserveOutil(Player* bot, Usable const& spell, SpellInfo const* info, int32 reserve)
+{
+    if (reserve <= 0 || !(spell.kind & KIND_HEAL) || (spell.kind & KIND_DEFENSIVE) || info->PowerType != POWER_MANA ||
+        CoaSoinDirect(info) || CoaSoinDirect(spell.info))
+        return false;
+    uint32 const maxMana = bot->GetMaxPower(POWER_MANA);
+    int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+    if (!maxMana || cout <= 0)
+        return false;
+    int32 const apres = int32(bot->GetPower(POWER_MANA)) - cout;
+    // Hors de portee de toute facon (mana sous le cout) : CastFirst l'ecarte deja (refus_ressource), rien a retenir.
+    if (apres < 0)
+        return false;
+    return apres < reserve || float(apres) * 100.0f / float(maxMana) < CoaAreneSurvieReserveOutilPct;
+}
+
+// Lot 20 : le sort rend au LANCEUR la ressource `pouvoir` -- ENERGIZE ou ENERGIZE_PCT de ce type, ou aura PERIODIC_ENERGIZE,
+// visant le lanceur -- lui-meme ou par un sort qu'il declenche sans aura (deux niveaux). Bloodmoon Blast 501611/501614
+// (Bloodmage) : effet 142 (TRIGGER_SPELL_WITH_VALUE) -> 804092, ENERGIZE MiscValue 1 (rage) sur le lanceur, 4 a 10 de
+// rage. Un generateur fait par script seul (Sanguine Rupture, « Rage for each enemy hit ») n'est pas vu.
+bool CoaAreneGenereRessource(SpellInfo const* info, Powers pouvoir, uint8 profondeur = 0)
+{
+    for (SpellEffectInfo const& effet : info->Effects)
+    {
+        if (!effet.IsEffect())
+            continue;
+        uint32 const cible = effet.TargetA.GetTarget();
+        bool const surSoi = !cible || cible == TARGET_UNIT_CASTER;
+        if (surSoi && effet.MiscValue == int32(pouvoir) &&
+            (effet.Effect == SPELL_EFFECT_ENERGIZE || effet.Effect == SPELL_EFFECT_ENERGIZE_PCT ||
+             effet.IsAura(SPELL_AURA_PERIODIC_ENERGIZE)))
+            return true;
+        if ((effet.Effect == SPELL_EFFECT_TRIGGER_SPELL || effet.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE ||
+             effet.Effect == SPELL_EFFECT_ASCENSION_TRIGGER_SPELL_DELAYED) &&
+            effet.TriggerSpell && effet.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effet.TriggerSpell))
+                if (CoaAreneGenereRessource(declenche, pouvoir, profondeur + 1))
+                    return true;
+    }
+    return false;
+}
+
 // Les sorts de survie du palier : `defensifs` puis `mobiles` (soins utilisables en courant), et a part `incantes` (soins
 // incantes). Defensif deja actif et soin periodique deja pose par le bot retires ; au palier pression, seuls les
 // defensifs a recharge courte, le moins cher d'abord.
@@ -3355,7 +3470,9 @@ CoaAreneSurvieListes CoaAreneSurvieSorts(PlayerbotAI* botAI, Player* bot, uint8 
              { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
-        if (((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaAreneSortFormeUsable(bot, spell))
+        // Lot 20 : aussi tout soin sans soin direct dont l'aura est deja posee par le bot (CoaSoinDejaPose ; Vital Shield).
+        if (((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaSoinDejaPose(bot, spell, info, bot) ||
+            CoaAreneSortFormeUsable(bot, spell))
             continue;
         if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
             continue;
@@ -3369,6 +3486,14 @@ CoaAreneSurvieListes CoaAreneSurvieSorts(PlayerbotAI* botAI, Player* bot, uint8 
         }
         (CoaAreneSortMobile(bot, info) ? l.mobiles : l.incantes).push_back(spell);
     }
+    // Lot 20 (13/10, banc du 12/10 : le Bloodmage lancait Vital Shield, soin de 2 % toutes les 5 s, avant Fleshcraft 801952,
+    // 50 % de la vie) : aux paliers danger et critique, le soin DIRECT le plus fort d'abord (CoaAreneSoinDirectEstime), puis les
+    // soins a aura (periodiques, differes) dans leur ordre. Au palier pression, l'ordre du kit reste (le soin periodique y
+    // est le premier outil).
+    if (niveau >= COA_SURVIE_DANGER)
+        for (std::vector<Usable>* soins : { &l.mobiles, &l.incantes })
+            std::stable_sort(soins->begin(), soins->end(), [bot](Usable const& a, Usable const& b)
+                { return CoaAreneSoinDirectEstime(bot, EffectiveSpell(bot, a.info)) > CoaAreneSoinDirectEstime(bot, EffectiveSpell(bot, b.info)); });
     return l;
 }
 
@@ -3382,13 +3507,21 @@ bool CoaAreneSoinPret(PlayerbotAI* botAI, Player* bot)
 {
     Unit* adv = CoaAreneAdversaireVivant(bot, CoaAreneEtatDe(botAI));
     int8 incanteLibre = -1;  // lu une fois, et seulement si un soin incante est pret
+    int32 reserveOutil = -1; // lot 20 : lue une fois, et seulement si un soin est pret
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
              { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
         if (CoaAreneSortEntrave(info) || CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id) ||
             CoaAreneSortFormeUsable(bot, spell) ||
-            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || !CoaAreneSortPret(botAI, bot, spell))
+            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaSoinDejaPose(bot, spell, info, bot) ||
+            !CoaAreneSortPret(botAI, bot, spell))
+            continue;
+        // Lot 20 : un soin que la reserve de mana du meilleur outil retient n'est pas pret pour la survie (sinon il
+        // bloquerait les attaques longues sans jamais partir).
+        if (reserveOutil < 0)
+            reserveOutil = CoaAreneReserveOutilMana(botAI, bot);
+        if (CoaAreneSousReserveOutil(bot, spell, info, reserveOutil))
             continue;
         if (CoaAreneSortMobile(bot, info))
             return true;
@@ -3607,7 +3740,7 @@ void CoaAreneReserveSoin(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& u
         if (bot->HasSpellCooldown(info->Id) || CoaAreneSortEntrave(info) || CoaAreneSortFormeUsable(bot, spell) ||
             (!soinDirect && !(spell.kind & KIND_HOT)) ||
             (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id))) ||
-            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)))
+            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaSoinDejaPose(bot, spell, info, bot))
             continue;
         if (!CoaAreneSortMobile(bot, info))
         {
@@ -3675,6 +3808,30 @@ void CoaAreneNoterRefusRessource(PlayerbotAI* botAI, Player* bot, SpellInfo cons
     derniere = maintenant ? maintenant : 1;
     ++etat.refusRessource;
     CoaAreneTracerSort(botAI, bot, info, target, SPELL_FAILED_NO_POWER, "refus_ressource");
+}
+
+// Lot 20 : soin ou bouclier ecarte parce que son aura est deja posee par le bot (CastFirst, CoaSoinDejaPose), en arene 1v1
+// ou en duel : une ligne « deja_pose » par sort et par 5 s, comptee au bilan ; et la trace du sort pour un gladiateur trace.
+void CoaAreneNoterDejaPose(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target, bool trace)
+{
+    CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+    if (!etat.actif)
+        return;
+    uint32 const maintenant = getMSTime();
+    uint32& derniere = etat.dejaPoseTraceMs[info->Id];
+    if (derniere && getMSTimeDiff(derniere, maintenant) < 5 * IN_MILLISECONDS)
+        return;
+    derniere = maintenant ? maintenant : 1;
+    ++etat.dejaPose;
+    Aura const* aura = target ? target->GetAura(info->Id, bot->GetGUID()) : nullptr;
+    Unit* adv = CoaAreneAdversaireVivant(bot, etat);
+    float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
+    CoaAreneJournal(bot, etat, "deja_pose", d, d,
+                    Acore::StringFormat(" niveau={} sort={} cible_soi={} reste_ms={} pv={:.0f}",
+                                        CoaAreneSurvieNom(etat.survieNiveau), info->Id, target == bot ? 1 : 0,
+                                        aura ? aura->GetDuration() : -2, bot->GetHealthPct()));
+    if (trace)
+        CoaAreneTracerSort(botAI, bot, info, target, SPELL_CAST_OK, "deja_pose");
 }
 
 // Au contact d'une cible qui peut suivre, et un sort de rupture est pret.
@@ -5015,6 +5172,9 @@ public:
             for (Usable const& spell : l.defensifs)
                 if (!defensifsCourts || CoaAreneRechargeMs(EffectiveSpell(bot, spell.info)) <= CoaAreneSurvieRechargeLegereMs)
                     liste.push_back(spell);
+        // Lot 20 : reserve de mana du meilleur outil de survie (CoaAreneReserveOutilMana), lue une fois par tour.
+        int32 const reserveOutil = CoaAreneReserveOutilMana(botAI, bot);
+        Reserver(etat, adv, reserveOutil, liste);
         if (Noter(etat, adv, CastFirst(botAI, bot, liste, bot, USAGE_DEFENSIVE)))
             return true;
 
@@ -5026,9 +5186,21 @@ public:
                                                  [&](Usable const& spell) { return CoaAreneSortPret(botAI, bot, spell); });
             if (incantePret && Fuir(etat, adv))
                 return true;
-            if (niveau == COA_SURVIE_CRITIQUE && Noter(etat, adv, CastFirst(botAI, bot, l.incantes, bot, USAGE_DEFENSIVE)))
-                return true;
+            if (niveau == COA_SURVIE_CRITIQUE)
+            {
+                std::vector<Usable> incantes = l.incantes;
+                Reserver(etat, adv, reserveOutil, incantes);
+                if (Noter(etat, adv, CastFirst(botAI, bot, incantes, bot, USAGE_DEFENSIVE)))
+                    return true;
+            }
         }
+        // Lot 20 (13/10, banc du 12/10, Bloodmage : Fleshcraft 801952 et ses autres soins refuses faute de rage -- 0 a 44
+        // au refus --, alors que Bloodmoon Blast, qui en genere, partait 0 a 2 fois par match) : aux paliers danger et
+        // critique, rien n'ayant pu partir, si un soin ou un defensif du palier n'attend QUE sa ressource, lancer d'abord
+        // un sort qui la genere (CoaAreneGenereRessource). Le soin passe devant des que la ressource le permet : il est
+        // tente avant, a chaque tour.
+        if (niveau >= COA_SURVIE_DANGER && Generer(etat, adv, l, liste))
+            return true;
         // Ni soin ni defensif n'a pu partir (11/10, match humain id=11 : Stormancer 488, a 44 % puis 33 %, n'a rien lance --
         // son seul soin, Invigorating Surge, coute 25 « Static », une ressource de script que le bot ne suit pas) : aux
         // paliers danger et critique, un CONTROLE sur l'adversaire pour casser la pression (etourdir, effrayer, enraciner,
@@ -5087,6 +5259,101 @@ public:
 
 private:
     uint8 niveau;
+
+    // Lot 20 : retire de `liste` les soins que la reserve de mana du meilleur outil retient (CoaAreneSousReserveOutil) ;
+    // une ligne « survie_reserve_mana » par sort et par 5 s, comptee au bilan.
+    void Reserver(CoaAreneEtat& etat, Unit* adv, int32 reserve, std::vector<Usable>& liste)
+    {
+        if (reserve <= 0 || liste.empty())
+            return;
+        uint32 const maintenant = getMSTime();
+        liste.erase(std::remove_if(liste.begin(), liste.end(), [&](Usable const& spell)
+            {
+                SpellInfo const* info = EffectiveSpell(bot, spell.info);
+                if (!CoaAreneSousReserveOutil(bot, spell, info, reserve))
+                    return false;
+                uint32& derniere = etat.reserveManaTraceMs[info->Id];
+                if (!derniere || getMSTimeDiff(derniere, maintenant) >= 5 * IN_MILLISECONDS)
+                {
+                    derniere = maintenant ? maintenant : 1;
+                    ++etat.survieReserveMana;
+                    float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
+                    CoaAreneJournal(bot, etat, "survie_reserve_mana", d, d,
+                                    Acore::StringFormat(" niveau={} sort={} cout={} mana={} reserve={} mana_pct={:.0f} pv={:.0f}",
+                                                        CoaAreneSurvieNom(niveau), info->Id,
+                                                        info->CalcPowerCost(bot, info->GetSchoolMask()),
+                                                        bot->GetPower(POWER_MANA), reserve, bot->GetPowerPct(POWER_MANA),
+                                                        bot->GetHealthPct()));
+                }
+                return true;
+            }), liste.end());
+    }
+
+    // Lot 20 : generateur de la ressource qui manque au premier soin ou defensif du palier (voir Execute).
+    bool Generer(CoaAreneEtat& etat, Unit* adv, CoaAreneSurvieListes const& l, std::vector<Usable> const& liste)
+    {
+        // Par ressource, le premier sort de survie (ordre du palier : liste du tour, puis soins incantes, puis defensifs)
+        // qui n'attend qu'elle : ni en recharge, ni payable, paye dans une ressource autre que la vie. Une ressource dont
+        // aucun generateur ne part laisse sa chance a la suivante (un soin bloque par la mana sans generateur ne doit pas
+        // masquer un soin bloque par la rage qui en a un).
+        struct Manque { SpellInfo const* pour; Powers pouvoir; int32 manque; };
+        std::vector<Manque> manques;
+        auto examiner = [&](std::vector<Usable> const& sorts)
+        {
+            for (Usable const& spell : sorts)
+            {
+                SpellInfo const* info = EffectiveSpell(bot, spell.info);
+                if (info->PowerType >= MAX_POWERS || info->PowerType == POWER_HEALTH || bot->HasSpellCooldown(info->Id) ||
+                    CoaPeutPayer(bot, info) ||
+                    std::any_of(manques.begin(), manques.end(), [info](Manque const& m) { return m.pouvoir == Powers(info->PowerType); }))
+                    continue;
+                int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+                if (cout > 0)
+                    manques.push_back({ info, Powers(info->PowerType), cout - int32(bot->GetPower(Powers(info->PowerType))) });
+            }
+        };
+        examiner(liste);
+        examiner(l.incantes);
+        examiner(l.defensifs);
+        SpellInfo const* cast = nullptr;
+        Manque const* retenu = nullptr;
+        for (Manque const& m : manques)
+        {
+            // Les generateurs : tout sort connu (attaque ou sort sans marque) qui rend cette ressource au lanceur et ne se
+            // paie pas dans cette ressource ; ni soin (deja tente), ni posture, ni furtivite, ni entrave, ni sort de forme.
+            std::vector<Usable> surAdv, surSoi;
+            for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+                     { return !(kind & (KIND_HEAL | KIND_STANCE | KIND_STEALTH)); }))
+            {
+                SpellInfo const* info = EffectiveSpell(bot, spell.info);
+                if (info->PowerType == uint32(m.pouvoir) || CoaAreneSortEntrave(info) || CoaAreneSortFormeUsable(bot, spell) ||
+                    !CoaAreneGenereRessource(info, m.pouvoir))
+                    continue;
+                ((spell.kind & KIND_HOSTILE) ? surAdv : surSoi).push_back(spell);
+            }
+            if (adv && !surAdv.empty())
+                cast = CastFirst(botAI, bot, surAdv, adv, USAGE_ATTACK);
+            if (!cast && !surSoi.empty())
+                cast = CastFirst(botAI, bot, surSoi, bot, USAGE_ATTACK);
+            if (cast)
+            {
+                retenu = &m;
+                break;
+            }
+        }
+        if (!RecordUsage(USAGE_ATTACK, cast) || !retenu)
+            return false;
+        SpellInfo const* pour = retenu->pour;
+        Powers const pouvoir = retenu->pouvoir;
+        int32 const manque = retenu->manque;
+        ++etat.survieGenerateurs;
+        float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
+        CoaAreneJournal(bot, etat, "survie_generateur", d, d,
+                        Acore::StringFormat(" niveau={} sort={} pour={} ressource={} manque={} pv={:.0f}",
+                                            CoaAreneSurvieNom(niveau), cast->Id, pour->Id, uint32(pouvoir), manque,
+                                            bot->GetHealthPct()));
+        return true;
+    }
 
     bool Noter(CoaAreneEtat& etat, Unit* adv, SpellInfo const* cast)
     {
