@@ -4381,3 +4381,19 @@ AiPlayerbot.Directeur.Avis = 0
 #        Ligne `coa directeur reaction:` dans CoaBots.log a chaque etape. 0 : rien n'est lu.
 #        Default: 0
 AiPlayerbot.Directeur.Reactions = 0
+
+#    AiPlayerbot.Directeur.ReactionsT6
+#        Lot T6 (13/10/2026), exige Directeur.Reactions = 1 :
+#          fuite_monture : le chasseur a 60 yd en vue (ou aux prises), elle MONTE (sorts de monture terrestre qu'elle
+#                          connait, comme l'action « check mount state » ; en exterieur, hors combat) puis fuit a
+#                          200 yd ; sans monture, a pied a 120 yd. A l'arrivee elle descend et reste sur place ; apres
+#                          6 s de souffle, le chasseur de nouveau a 60 yd en vue, elle fuit UNE seconde fois, a pied,
+#                          dans une autre direction si le sol le permet (etape=fuite2), puis ne fuit plus ;
+#          fuite_gardes  : comme T5, plus la meme seconde fuite (et ses gardes a 100 yd du chasseur l'engagent) ;
+#          soudoiement   : le chasseur a 40 yd en vue, elle s'arrete, ne l'attaque pas et lui CHUCHOTE un pot-de-vin
+#                          (params.pot_de_vin_c de l'arc). L'addon CoABounty (traqueur, Directeur.Traqueur = 1)
+#                          montre l'offre et deux boutons ; le service tranche (accepte : contrat clos, elle repart ;
+#                          refus ou 30 s : params.reaction devient `defense`). S'il la frappe : elle se defend.
+#        0 : `fuite_monture` et `soudoiement` sont inconnus (cible passive) et `fuite_gardes` fuit une fois.
+#        Default: 0
+AiPlayerbot.Directeur.ReactionsT6 = 0

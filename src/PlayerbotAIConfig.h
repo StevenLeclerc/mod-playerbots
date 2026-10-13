@@ -587,6 +587,10 @@ public:
     // contrats.py) : `defense` (engage le chasseur a vue), `fuite_gardes` (fuit une fois, ses gardes l'engagent).
     // Faux (defaut) : aucune lecture, la cible reste passive (C1).
     bool directeurReactions;
+    // Lot T6 (13/10/2026) : `fuite_monture` (monte, fuit loin, descend et attend ; deux fuites), `soudoiement` (offre
+    // un pot-de-vin au chasseur), et la seconde fuite de `fuite_gardes`. Faux (defaut) : ces deux noms sont inconnus
+    // (cible passive, journalise une fois) et `fuite_gardes` fuit une seule fois, comme T5.
+    bool directeurReactionsT6;
     // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3) :
     // inertes tant que `evenement` n'est pas dans directeurVerbes. LISTES BLANCHES FERMEES des ids
     // qu'une commande `evenement` peut jouer (« id,id », lecture stricte : un morceau mal forme et

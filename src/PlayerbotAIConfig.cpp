@@ -893,6 +893,8 @@ bool PlayerbotAIConfig::Initialize()
     // Lots T3, T4-T5 (12/10/2026) : avis de recherche dans l'onglet, reactions des cibles. Eteints par defaut.
     directeurAvis = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Avis", false);
     directeurReactions = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Reactions", false);
+    // Lot T6 (13/10/2026) : fuite montee, seconde fuite, soudoiement. Eteint par defaut (sans effet sans Reactions).
+    directeurReactionsT6 = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ReactionsT6", false);
     // Lot C des evenements (04/10/2026) : defauts = ids notes ✔ au banc du 04/10 (verdicts :
     // coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md), sauf 10008 (« rien » au banc, volume
     // 0,12 au DBC). 45213 (nuage d'orage, ✘ au banc pose sur le joueur) n'est dans AUCUN defaut :
