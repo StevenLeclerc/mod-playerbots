@@ -178,12 +178,17 @@ void ExecuterOrdreConvoi(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         Creature* cr = CreatureInvoquee(v);
         if (!cr || !cr->IsAlive() || !cr->AI() || cr->GetMapId() != cible->GetMapId())
             continue;
+        // L'immunite aux PNJ doit tomber AVANT le test (Unit::_IsValidAttackTarget la juge) ; relecture : un assaillant
+        // qui ne peut pas frapper la reprend et n'est pas arme (sinon agressif et frappable par les gardes du monde).
+        cr->SetImmuneToNPC(false);
+        if (!cr->IsValidAttackTarget(cible))
+        {
+            cr->SetImmuneToNPC(true);
+            continue;
+        }
         v.attaqueS = 0;                  // garde des egares desarmee (comme charger_vers)
         v.egareDepuisS = 0;
-        cr->SetImmuneToNPC(false);
         cr->SetReactState(REACT_AGGRESSIVE);
-        if (!cr->IsValidAttackTarget(cible))
-            continue;
         cr->AI()->AttackStart(cible);
         ++appliques;
     }
