@@ -3080,11 +3080,14 @@ void ExecuterRecompense(CoaDirCommande const& c)
     bool const faille = c.intensite == 1.0f;
     bool const nuit = c.intensite == 2.0f;
     bool const contrat = c.intensite == 3.0f;
+    // 13/10 (lot V, CoaDirecteurConvoi.inc) : `intensite` = 4, une part du CONVOI de bandits (recompenses.MARQUE_CONVOI).
+    bool const convoi = c.intensite == 4.0f;
     char const* const titre = faille ? "La faille d'orage" : nuit ? "La nuit des morts" : contrat ? "Contrat rempli"
-                                                                                                  : "Votre prime";
+                              : convoi ? "Le convoi des Sept Routes" : "Votre prime";
     char const* const corps = faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
                               : nuit ? "Vous avez tenu jusqu'à l'aube. Voici votre part. Le Directeur."
                               : contrat ? "Votre cible est tombée. Voici la prime du contrat. Le Directeur."
+                              : convoi ? "Le convoi est arrivé. Voici votre part. La Compagnie des Sept Routes."
                                      : "Le contrat sur votre tête est soldé. Le Directeur.";
     // 08/10 : en jeu, dans les sacs et la bourse ; le reste (et tout, hors ligne) par courrier (VerserRecompense).
     RemiseRecompense const r =
@@ -4619,7 +4622,8 @@ std::vector<EvRenfortVu> evRenfortsVus;               // sous evRenfortsVerrou
 uint32 evRenfortsPerdus = 0;                          // sous evRenfortsVerrou : file pleine
 
 enum class EvApp : uint8 { Aucune, Invoquer, Ordre, Retirer };
-enum class EvOrdre : uint8 { Aucun, Attaquer, Tenir, Errer, ChargerVers };
+// 13/10 (lot V, convoi de bandits, CoaDirecteurConvoi.inc) : Escorter et Assaillir.
+enum class EvOrdre : uint8 { Aucun, Attaquer, Tenir, Errer, ChargerVers, Escorter, Assaillir };
 
 struct EvAppLu
 {
@@ -4639,12 +4643,17 @@ struct EvAppLu
     // Chefs a mecaniques (10/10/2026, CoaDirecteurBoss.inc) : 7e morceau `meca1` | `meca2` | `meca3` (palier du public,
     // seul / 2 a 5 / 5 et plus). 0 : absent.
     uint8 meca = 0;
+    // Lot V (13/10/2026, CoaDirecteurConvoi.inc) : `ordre:assaillir:<protege>` -- la commande `invoquer` du protege.
+    uint32 protege = 0;
 };
 
 // Lot G des evenements (08/10/2026) : definis dans CoaDirecteurGardien.inc, inclus apres le lot P.
 bool LireMorceauxGardien(std::string const& pv, std::string const& degats, std::string const& renfort, EvAppLu& lu);
 // Chefs a mecaniques (10/10/2026) : definis dans CoaDirecteurBoss.inc, inclus apres le lot G.
 bool LireMeca(std::string const& m, EvAppLu& lu);
+// Convoi de bandits (13/10/2026) : definie dans CoaDirecteurConvoi.inc, incluse apres les chefs a mecaniques. Grammaire
+// A PART de celle du lot D (son epreuve la compare au service : SOUS_ACTIONS_EV_D).
+bool LireOrdreConvoi(std::string const& t, EvAppLu& lu);
 
 char const* NomEvOrdre(EvOrdre o)
 {
@@ -4654,6 +4663,8 @@ char const* NomEvOrdre(EvOrdre o)
         case EvOrdre::Tenir:       return "tenir";
         case EvOrdre::Errer:       return "errer";
         case EvOrdre::ChargerVers: return "charger_vers";
+        case EvOrdre::Escorter:    return "escorter";
+        case EvOrdre::Assaillir:   return "assaillir";
         default:                   return "-";
     }
 }
@@ -4680,6 +4691,8 @@ bool LireApparition(std::string const& t, EvAppLu& lu)
     if (t == "ordre:tenir")        { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::Tenir; return true; }
     if (t == "ordre:errer")        { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::Errer; return true; }
     if (t == "ordre:charger_vers") { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::ChargerVers; return true; }
+    if (LireOrdreConvoi(t, lu))      // 13/10 : lot V (escorter, assaillir:<protege>)
+        return true;
     static constexpr char const PREFIXE[] = "invoquer:";
     size_t const n = sizeof(PREFIXE) - 1;
     if (t.size() <= n || t.compare(0, n, PREFIXE) != 0)
@@ -4750,6 +4763,9 @@ struct EvInvoque
     bool bouclierActif = false;  // chef : bouclier lie aux renforts du palier 50 pose par le C++, pas encore juge fini
     uint32 bouclierDepuisS = 0;  // chef : Maintenant() de la pose du bouclier
     ObjectGuid chefGuid;         // renfort de palier : son chef
+    // Convoi de bandits (13/10/2026, CoaDirecteurConvoi.inc).
+    bool protege = false;        // gabarit de EV_CONVOI_PROTEGES : passif, jamais cible publiee, jamais egare
+    uint32 etatConvoiS = 0;      // protege : Maintenant() de la derniere ligne `sous_action=convoi motif=etat`
     uint8 palier = 0;            // renfort de palier : 75, 50 ou 25 ; 0 : autre
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
@@ -4997,6 +5013,14 @@ void DeclencherPaliers();
 void SuivreBoucliers();
 bool PctMeca(Unit const* attaquant, uint32 sort, bool tic, uint8& pct);
 bool Insensible(Unit const* u);
+// Convoi de bandits (CoaDirecteurConvoi.inc) : garde de la pose d'un protege, armement, ordres escorter/assaillir,
+// etat du protege, et l'exemption de la garde des egares.
+char const* RefusConvoi(EvAppLu const& lu, uint32 entree);
+void ArmerProtege(Creature* cr, EvInvoque& v);
+void ExecuterOrdreConvoi(CoaDirCommande const& c, EvAppLu const& lu, Player* p);
+void JournaliserProtege(EvInvoque const& v, Creature* cr, char const* motif);
+void SuivreProtege(EvInvoque& v, Creature* cr, uint32 maintenant);
+bool EstProtegeDe(Unit const* u, uint32 joueur);
 
 void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 {
@@ -5023,6 +5047,11 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
     if (char const* refusM = RefusMeca(lu, entree))      // 10/10 : `meca<k>` (option, chef de la table, nombre 1)
     {
         RefuserApparition(c, lu, refusM);
+        return;
+    }
+    if (char const* refusV = RefusConvoi(lu, entree))    // 13/10 : protege du convoi (option, nombre 1)
+    {
+        RefuserApparition(c, lu, refusV);
         return;
     }
     float sol = 0.0f;
@@ -5134,6 +5163,7 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
             break;
         }
         DoserInvoque(s, lu.pv, lu.degats);   // lot G : rien sans la forme etendue
+        ArmerProtege(s, poses.back());       // 13/10 : protege du convoi (passif, au pas, sans IMMUNE_TO_NPC)
         if (lu.meca)
             ArmerMeca(s, lu.meca);           // 10/10 : marque des degats en % et palier du public au SmartAI (SetData)
         if (lu.naissance)
@@ -5165,6 +5195,11 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 
 void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 {
+    if (lu.ordre == EvOrdre::Escorter || lu.ordre == EvOrdre::Assaillir)
+    {
+        ExecuterOrdreConvoi(c, lu, p);   // 13/10 : lot V (CoaDirecteurConvoi.inc)
+        return;
+    }
     uint32 const vise = static_cast<uint32>(c.valeur);   // 0 : tous les invoques du joueur
     float sol = 0.0f;
     if (lu.ordre == EvOrdre::Errer &&
@@ -5191,7 +5226,8 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
     uint32 const maintenant = std::max<uint32>(Maintenant(), 1);
     for (EvInvoque& v : evInvoques)
     {
-        if (v.joueur != c.cible || v.mort || (vise && v.id != vise))
+        // 13/10 : un protege du convoi n'obeit qu'a `escorter` (jamais attaquer, tenir, errer, charger_vers).
+        if (v.joueur != c.cible || v.mort || v.protege || (vise && v.id != vise))
             continue;
         ++vises;
         Creature* cr = CreatureInvoquee(v);
@@ -5363,7 +5399,9 @@ bool SuivreEgare(EvInvoque& v, Creature* cr, uint32 maintenant)
         return false;
     }
     Unit* victime = cr->GetVictim();
-    bool const pnj = cr->IsInCombat() && victime && !victime->HasUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
+    // 13/10 : aux prises avec un PROTEGE du convoi de son joueur, il fait ce qu'on lui a dit (`assaillir`) : pas un PNJ.
+    bool const pnj = cr->IsInCombat() && victime && !victime->HasUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED) &&
+                     !EstProtegeDe(victime, v.joueur);
     float const d = cr->GetExactDist2d(p);
     if (!pnj && (cr->IsInCombat() || d <= EV_EGARE_YD))
     {
@@ -5439,11 +5477,17 @@ void SuivreInvoques()
             auto l = evLots.find(v.id);
             if (!v.mort && l != evLots.end())
                 ++l->second.disparus;
+            if (v.protege && !v.mort)
+                JournaliserProtege(v, nullptr, "disparu");   // 13/10 : le convoi perdu sans mort vue (grille, echeance)
             it = evInvoques.erase(it);
             continue;
         }
         if (!v.mort && !cr->IsAlive())
+        {
             NoterMort(v, cr);
+            if (v.protege)
+                JournaliserProtege(v, cr, "mort");             // 13/10 : tout de suite (le lot finit a la passe)
+        }
         else if (!v.mort && cr->GetLevel() != v.niveau)
         {
             // Niveau reecrit apres la pose : le coeur ne porte pas l'exclusion CanScale de la plage
@@ -5473,6 +5517,8 @@ void SuivreInvoques()
                 cr->SetDisableGravity(false);
             v.cielDepuisS = 0;
         }
+        // 13/10 : protege du convoi -- reaction passive, et son etat toutes les EV_CONVOI_ETAT_S secondes.
+        SuivreProtege(v, cr, maintenant);
         // 10/10 : garde des egares (relance, puis retrait compte).
         if (!v.mort && v.attaqueS && !v.retraitDepuisS && SuivreEgare(v, cr, maintenant))
         {
@@ -5528,6 +5574,8 @@ void SuivreInvoques()
 #include "CoaDirecteurObjectifs.inc"
 // Chefs a mecaniques (10/10/2026) : paliers, bouclier lie, degats en % (fragment a part, meme espace).
 #include "CoaDirecteurBoss.inc"
+// Convoi de bandits (13/10/2026, lot V) : protege, escorter, assaillir, etat du protege (fragment a part, meme espace).
+#include "CoaDirecteurConvoi.inc"
 // Ressources rares des evenements (11/10/2026) : la tranche suit le niveau du MONSTRE (fragment a part).
 #include "CoaDirecteurRessources.inc"
 
@@ -6538,7 +6586,8 @@ void PublierCiblesEvenement()
     std::unordered_map<uint32, std::vector<ObjectGuid>> neuf;
     if (sPlayerbotAIConfig.directeurEvenementBots)
         for (EvInvoque const& v : evInvoques)
-            if (!v.mort && !v.retraitDepuisS)   // relecture : un invoque en cours de retrait n'est plus une cible
+            // relecture : un invoque en cours de retrait n'est plus une cible ; 13/10 : un protege du convoi jamais.
+            if (!v.mort && !v.retraitDepuisS && !v.protege)
             {
                 neuf[v.joueur].push_back(v.guid);
                 // Bots reactifs (08/10) : engagement reel, lu ici (fil monde, cartes a l'arret, P-137).
