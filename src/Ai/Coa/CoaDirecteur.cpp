@@ -7859,12 +7859,23 @@ bool MonterPourFuir(Player* bot, PlayerbotAI* ia)
 
 void LireReactions();
 
-// Lot T6 : un soudoiement accepte (l'arc a disparu des arcs actifs : le service l'a clos) -> la cible REPART :
-// immobilite levee (son IA reprend), quelques pas loin du chasseur. Elle GARDE son repos : elle ne l'attaque pas.
+// Lot T6 : l'arc a quitte les arcs actifs en `piste` (contrat fini). Soudoiement accepte -- l'arc est CLOS avec la raison
+// `soudoye` (relu ici, une requete, rare) -- : la cible REPART : immobilite levee (son IA reprend), quelques pas loin du
+// chasseur ; elle GARDE son repos : elle ne l'attaque pas. Fuite montee finie (relecture m1) : l'immobilite posee a son
+// arrivee est levee (sinon « stay » jusqu'a 30 min hors contrat).
 void RepartirApresSoudoiement(ReactionContrat const& e)
 {
+    if (e.reaction == "fuite_monture" && e.fuites)
+    {
+        LeverImmobile(e.cible);
+        return;
+    }
     if (e.reaction != "soudoiement" || !e.offre || e.frappe || e.defenseLocale)
         return;
+    QueryResult clos = CharacterDatabase.Query(
+        "SELECT 1 FROM coa_dir_arc WHERE id = {} AND genre = 'contrat' AND statut = 'clos' AND raison = 'soudoye'", e.arc);
+    if (!clos)
+        return;   // fini autrement (expire, abandon, joueur parti...) : elle reste ou elle est
     Player* cible = JoueurConnecte(e.cible);
     if (!cible || !cible->IsInWorld() || cible->IsBeingTeleported() || !cible->IsAlive() ||
         !sRandomPlayerbotMgr.IsRandomBot(cible))
@@ -7891,6 +7902,10 @@ void LireReactions()
         " FROM coa_dir_arc WHERE genre = 'contrat' AND statut = 'actif' AND etape = 'piste'"
         " AND JSON_EXTRACT(params, '$.reaction') IS NOT NULL ORDER BY id LIMIT {}",
         REACTIONS_MAX);
+    // Relecture T6 (M2) : `nullptr` dit aussi bien « aucun contrat » que « requete en echec ». Une requete temoin
+    // tranche : en echec, rien n'est oublie (sinon une cible perdrait ses fuites, ou repartirait sans marche conclu).
+    if (!r && !reactionsContrat.empty() && !CharacterDatabase.Query("SELECT 1"))
+        return;
     std::unordered_set<uint32> vus;
     if (r)
     {
@@ -8109,14 +8124,23 @@ void SuivreFuiteMontee(ReactionContrat& e, Player* cible, Player* chasseur, Play
             }
             if (cible->IsMounted())
             {
-                Fuite const f = FuirChasseur(cible, chasseur, REACTION_FUITE_MONTEE_PAS_YD, true);
+                // Relecture T6 (M4) : sans sol sec a 200 yd, 120 yd montee, puis (3 s plus tard) a pied.
+                Fuite f = FuirChasseur(cible, chasseur, REACTION_FUITE_MONTEE_PAS_YD, true);
                 if (f.pas <= 0.0f)
-                    return;   // aucun sol sec a 200 yd : reessai (elle reste montee, sur place)
+                    f = FuirChasseur(cible, chasseur, REACTION_FUITE_PAS_YD, ecoule < REACTION_MONTE_MAX_S + 3);
+                if (f.pas <= 0.0f)
+                {
+                    if (ecoule >= REACTION_MONTE_MAX_S + 6)
+                        e.phase = FUITE_ATTENTE;   // aucun sol sec : tout reprend (elle descend a sa prochaine fuite)
+                    return;
+                }
+                bool const montee = cible->IsMounted();
                 LeverImmobile(e.cible);
-                NoterFuite(e, f, maintenant, true);
-                JournaliserReaction(e, "fuite", Acore::StringFormat(" fuite_yd={:.0f} monture=1 incantation_s={}"
+                NoterFuite(e, f, maintenant, montee);
+                JournaliserReaction(e, "fuite", Acore::StringFormat(" fuite_yd={:.0f} monture={} incantation_s={}"
                                                                     " distance={:.0f}",
-                                                                    f.pas, ecoule, chasseur->GetExactDist2d(cible)));
+                                                                    f.pas, montee ? 1 : 0, ecoule,
+                                                                    chasseur->GetExactDist2d(cible)));
                 return;
             }
             bool const rate = cible->IsInCombat() || ecoule >= REACTION_MONTE_MAX_S ||
