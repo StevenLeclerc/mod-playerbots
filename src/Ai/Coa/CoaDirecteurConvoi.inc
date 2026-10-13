@@ -231,10 +231,15 @@ void ExecuterOrdreConvoi(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         if (lu.vitesse)
         {
             // V2 : il COURT, a lu.vitesse % de la course de base (Unit::GetSpeed : taux x 7 yd/s), envoye au client.
-            // Un ralentissement (Hamstring des bandits) fait recalculer la vitesse du gabarit (Unit::UpdateSpeed) :
-            // chaque `escorter` suivant la repose.
+            // La vitesse « normale » du moment d'abord (Unit::UpdateSpeed : gabarit, ralentissements comme le Hamstring
+            // des bandits, PV sous 30 %), rapportee au gabarit : sans aure ni blessure, le taux vaut lu.vitesse / 100 ;
+            // ralenti ou blesse, il court d'autant moins. Un UpdateSpeed ulterieur (aure posee ou retiree) revient a la
+            // vitesse du gabarit jusqu'au `escorter` suivant (un point toutes les 4 s environ).
             cr->SetWalk(false);
-            cr->SetSpeed(MOVE_RUN, float(lu.vitesse) / 100.0f, true);
+            cr->UpdateSpeed(MOVE_RUN, false);
+            CreatureTemplate const* gabaritP = cr->GetCreatureTemplate();
+            float const base = gabaritP && gabaritP->speed_run > 0.0f ? gabaritP->speed_run : 1.0f;
+            cr->SetSpeed(MOVE_RUN, cr->GetSpeedRate(MOVE_RUN) / base * float(lu.vitesse) / 100.0f, true);
         }
         else
             cr->SetWalk(true);
@@ -379,7 +384,7 @@ void ExecuterBarricade(CoaDirCommande const& c)
         RefuserBarricade(c, "hors_ligne");
         return;
     }
-    if (!AncreDEvenement(p))
+    if (!Humain(p))                      // le convoi n'a qu'une ancre humaine (le service refuse --ancre-bot)
     {
         RefuserBarricade(c, "pas_humain");
         return;
@@ -530,7 +535,13 @@ void SuivreBarricades()
                  " motif=demolition par={} humain=1", it->id, it->joueur, it->protege, k.joueur);
     }
     // 2. Chaque barricade.
-    std::vector<std::tuple<EvBarricade, char const*, uint32>> fins;
+    struct Fin
+    {
+        EvBarricade b;
+        char const* motif;
+        uint32 par;
+    };
+    std::vector<Fin> fins;
     for (auto it = evBarricades.begin(); it != evBarricades.end();)
     {
         EvBarricade& b = *it;
@@ -586,14 +597,14 @@ void SuivreBarricades()
         }
         if (motif)
         {
-            fins.emplace_back(b, motif, par);
+            fins.push_back(Fin{b, motif, par});
             it = evBarricades.erase(it);
         }
         else
             ++it;
     }
-    for (auto const& [b, motif, par] : fins)
-        FermerBarricade(b, motif, par);
+    for (Fin const& f : fins)
+        FermerBarricade(f.b, f.motif, f.par);
 }
 
 // Leve (sans destruction) les barricades pour lesquelles `lever(id, joueur)` est vrai : lever, stop, bus eteint.
