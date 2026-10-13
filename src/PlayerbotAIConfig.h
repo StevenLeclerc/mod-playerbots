@@ -521,6 +521,13 @@ public:
     // arrive au lieu (sejour), REJOINT le groupe de ce joueur (cree, joueur chef, s'il n'en a pas ; ajoute s'il en
     // mene un qui a de la place) et le quitte a la fin de l'evenement. Eteint par defaut : rien ne change.
     bool directeurEvenementGroupe;
+    // Fin d'evenement (13/10/2026, remontee R-20261013-1757) : a la fin de l'evenement, les inscrits RESTENT dans
+    // le groupe du joueur au plus ce nombre de secondes, pour qu'il pille les corps tapes par le groupe (le droit
+    // de butin d'un corps tape en groupe est attache au GROUPE : Player::isAllowedToLoot). Ils le quittent avant si
+    // le joueur quitte le groupe (bouton natif), se deconnecte, s'eloigne au-dela de ...AttenteYd, ou si un nouvel
+    // evenement du joueur commence sans eux. 0 : comportement d'avant (sortie a la fin).
+    uint32 directeurEvenementGroupeAttenteS;
+    uint32 directeurEvenementGroupeAttenteYd;
     // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
     // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
     // eteint par defaut (les crochets de mort rendent la main au premier test).

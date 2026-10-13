@@ -844,6 +844,17 @@ bool PlayerbotAIConfig::Initialize()
     directeurEvenementSoins = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementSoins", false);
     // Vrai groupe (09/10/2026) : eteint par defaut.
     directeurEvenementGroupe = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementGroupe", false);
+    // Fin d'evenement (13/10/2026) : 0 par defaut, rien ne change (les inscrits quittent le groupe a la fin).
+    directeurEvenementGroupeAttenteS =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementGroupeAttenteS", 0);
+    directeurEvenementGroupeAttenteYd =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementGroupeAttenteYd", 200);
+    // Plus court que la laisse d'evenement (110 yd), un bot qui suit en retard sortirait du groupe a la fin.
+    if (directeurEvenementGroupeAttenteYd < 120)
+        directeurEvenementGroupeAttenteYd = 120;
+    // Pendant l'attente, le filet `sans_evenement` ne joue pas : borne haute, un bot ne reste pas groupe sans fin.
+    if (directeurEvenementGroupeAttenteS > 1800)
+        directeurEvenementGroupeAttenteS = 1800;
     // Sous 5 s, un joueur recevrait un paquet meteo presque a chaque seconde.
     if (directeurMeteoReaffirmationSecondes < 5)
         directeurMeteoReaffirmationSecondes = 5;

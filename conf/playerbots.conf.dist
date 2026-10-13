@@ -3905,10 +3905,36 @@ AiPlayerbot.Directeur.EvenementSoins = 0
 #        le bot suit le joueur (maitre humain : son IA de playerbots) et garde son inscription.
 #        Il QUITTE le groupe (dissous s'il n'y reste que le joueur) et reprend sa vie quand plus aucun bot n'est
 #        inscrit a l'evenement de ce joueur (fin, `lever`, stop, bus eteint, deconnexion du joueur), ou a sa
-#        propre deconnexion, ou si l'option est eteinte. Exige EvenementBots = 1.
+#        propre deconnexion, ou si l'option est eteinte. Exige EvenementBots = 1. A la FIN d'un evenement :
+#        voir EvenementGroupeAttenteS (ci-dessous), qui garde les inscrits au groupe le temps du pillage.
 #        Lue par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
 #        Default: 0
 AiPlayerbot.Directeur.EvenementGroupe = 0
+
+#    AiPlayerbot.Directeur.EvenementGroupeAttenteS
+#    AiPlayerbot.Directeur.EvenementGroupeAttenteYd
+#        Fin d'evenement (13/10/2026, remontee R-20261013-1757) : « le groupe se defait tout seul [...] il y a marque
+#        You don't have permission to loot that corpse ». Le droit de butin d'un corps tape en groupe est attache au
+#        GROUPE (Creature::SetLootRecipient garde son guid, Player::isAllowedToLoot le compare) : groupe dissous,
+#        seul celui qui a tape le corps peut encore le piller, et un corps tape par un bot devient interdit.
+#        AttenteS > 0 : a la fin de l'evenement, les inscrits RESTENT dans le groupe du joueur (ligne
+#        `motif=attente`), et le quittent (ligne `motif=quitte raison=...`) au premier de :
+#          - le joueur quitte le groupe (bouton natif « Quitter le groupe ») : `joueur_parti` -- vaut aussi PENDANT
+#            l'evenement ; le joueur renvoie un bot : `plus_dans_le_groupe` ;
+#          - le joueur se deconnecte : `joueur_hors_ligne` ;
+#          - le joueur s'eloigne a plus de AttenteYd du bot, ou change de carte : `joueur_eloigne` ;
+#          - AttenteS secondes apres la fin : `attente_echue` ;
+#          - un nouvel evenement du joueur commence : `nouvel_evenement` (le bot en attente a un maitre humain, sa
+#            re-inscription serait refusee `maitre_humain` ; il rend sa place aux nouveaux inscrits).
+#        Joueur en champ de bataille PENDANT l'evenement : pas « parti » (groupe d'origine) ; pendant l'attente,
+#        autre carte : `joueur_eloigne`. Vol en taxi : `joueur_eloigne`.
+#        Sans humain, il n'y a pas de groupe d'evenement : les evenements entre bots ne changent pas.
+#        AttenteS : borne haute 1800. AttenteYd : borne basse 120 (au-dela de la laisse d'evenement, 110 yd).
+#        Valeur proposee en service : AttenteS = 600 (10 min).
+#        Lue par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0 (sortie a la fin, comportement d'avant), 200
+AiPlayerbot.Directeur.EvenementGroupeAttenteS = 0
+AiPlayerbot.Directeur.EvenementGroupeAttenteYd = 200
 
 #
 #    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
