@@ -36,7 +36,8 @@
  *    apres la boucle) : jamais pendant une mise a jour de carte.
  *  - Le REGISTRE (membres, creatures, bornes de la trace d'action, coups critiques) est lu par les crochets des fils
  *    de carte : sous `verrouRegistre`, derriere le compteur atomique `nbInscrits` (zero = aucun essai, sortie
- *    immediate de tout crochet et de toute garde).
+ *    immediate de tout crochet et de toute garde). L'appartenance d'un bot a un essai (MembreEngage, chemin chaud de
+ *    PlayerbotAI::AllowActive) se lit SANS verrou dans `places`, copie atomique ecrite sous le verrou.
  *  - Le soin en attente (ModifyHealReceived -> OnHeal) est `thread_local` : les deux crochets se suivent dans le
  *    meme appel, sur le meme fil.
  *
@@ -80,6 +81,7 @@
 #include "World.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -234,9 +236,52 @@ std::map<std::pair<uint32, uint32>, NoteCrit> notesCrit;   // (guid bas de la ci
 // membresEssai.size() + creaturesBanc.size() : a zero, crochets et gardes sortent sur ce seul chargement.
 std::atomic<uint32> nbInscrits{0};
 
+// Revue du 13/10 : copie SANS VERROU de membresEssai, lue par les gardes des fils de carte. Pendant un essai,
+// MembreEngage est appele par PlayerbotAI::AllowActive pour CHAQUE bot du royaume a chaque mise a jour, depuis les
+// MapUpdate.Threads : sous le verrou unique, ces fils se seraient disputes la meme ligne de cache des centaines de
+// milliers de fois par seconde. Une case = (guid bas << 32) | id d'essai, 0 = libre ; ecrite sous verrouRegistre (fil
+// monde), lue librement. Capacite : MAX_PLAFOND essais de MEMBRES_MAX membres au plus.
+std::array<std::atomic<uint64>, MAX_PLAFOND * MEMBRES_MAX> places{};
+
 void MajCompteur() { nbInscrits.store(uint32(membresEssai.size() + creaturesBanc.size()), std::memory_order_release); }
 
-// Sous verrou. 0 : pas membre.
+// Sous verrou. Une case par membre, jamais deplacee (un lecteur ne voit jamais un membre manquer le temps d'une
+// recopie). Faux si la capacite est depassee (ne doit pas arriver : la commande borne les essais a MAX_PLAFOND et les
+// membres a MEMBRES_MAX).
+bool PlacerVerrouille(uint32 guid, uint32 essai)
+{
+    for (std::atomic<uint64>& place : places)
+        if (!place.load(std::memory_order_relaxed))
+        {
+            place.store((uint64(guid) << 32) | essai, std::memory_order_release);
+            return true;
+        }
+    return false;
+}
+
+void LibererVerrouille(uint32 guid, uint32 essai)
+{
+    uint64 const v = (uint64(guid) << 32) | essai;
+    for (std::atomic<uint64>& place : places)
+        if (place.load(std::memory_order_relaxed) == v)
+            place.store(0, std::memory_order_release);
+}
+
+// TOUT FIL, sans verrou. 0 : pas membre.
+uint32 EssaiDuMembre(uint32 guidLow)
+{
+    if (!guidLow || !nbInscrits.load(std::memory_order_acquire))
+        return 0;
+    for (std::atomic<uint64> const& place : places)
+    {
+        uint64 const v = place.load(std::memory_order_acquire);
+        if (v && uint32(v >> 32) == guidLow)
+            return uint32(v);
+    }
+    return 0;
+}
+
+// Sous verrou (la table qui fait foi). 0 : pas membre.
 uint32 EssaiDuMembreVerrouille(uint32 guidLow)
 {
     auto it = membresEssai.find(guidLow);
@@ -250,8 +295,7 @@ uint32 EssaiDuJoueur(Unit const* u)
     Player const* p = u->IsPlayer() ? u->ToPlayer() : nullptr;
     if (!p)
         return 0;
-    std::lock_guard<std::mutex> garde(verrouRegistre);
-    return EssaiDuMembreVerrouille(p->GetGUID().GetCounter());
+    return EssaiDuMembre(p->GetGUID().GetCounter());
 }
 
 bool EstCreatureDeBanc(Unit const* u)
@@ -497,7 +541,10 @@ void Desinscrire(Essai const& e)
     {
         auto it = membresEssai.find(m.guid);
         if (it != membresEssai.end() && it->second == e.id)
+        {
             membresEssai.erase(it);
+            LibererVerrouille(m.guid, e.id);
+        }
         bornesAction.erase(m.guid);
         for (auto it = notesCrit.begin(); it != notesCrit.end();)
             it = it->first.first == m.guid ? notesCrit.erase(it) : std::next(it);
@@ -846,6 +893,14 @@ void Avancer(Essai& e)
             Terminer(e, "abandon", "membre_deconnecte");
             return;
         }
+        // Un mort est sorti de l'essai : sa releve (fantome envoye au cimetiere, eventuellement par une teleportation)
+        // ne doit pas faire abandonner l'essai des vivants (revue du 13/10). Sa ligne d'etat seulement, s'il est la.
+        if (m.mort)
+        {
+            if (p->IsInWorld() && !p->IsBeingTeleported())
+                joueurs[i] = p;
+            continue;
+        }
         if (!p->IsInWorld() || p->IsBeingTeleported())
         {
             if (++m.horsMondeS > HORS_MONDE_MAX_S)
@@ -856,11 +911,6 @@ void Avancer(Essai& e)
             continue;
         }
         m.horsMondeS = 0;
-        if (m.mort)
-        {
-            joueurs[i] = p;   // pour sa ligne d'etat seulement
-            continue;
-        }
         if (g && p->GetGroup() != g)
         {
             Terminer(e, "abandon", "groupe_perdu");
@@ -1211,8 +1261,24 @@ public:
         // maintenant. RefusMembre a deja ecarte tout membre inscrit ailleurs.
         {
             std::lock_guard<std::mutex> garde(verrouRegistre);
+            size_t posees = 0;
             for (Membre const& m : e->membres)
+            {
+                if (!PlacerVerrouille(m.guid, id))
+                    break;
                 membresEssai[m.guid] = id;
+                ++posees;
+            }
+            if (posees != e->membres.size())
+            {
+                for (size_t i = 0; i < posees; ++i)
+                {
+                    membresEssai.erase(e->membres[i].guid);
+                    LibererVerrouille(e->membres[i].guid, id);
+                }
+                MajCompteur();
+                return Refus("registre_plein");
+            }
             MajCompteur();
         }
 
@@ -1497,9 +1563,9 @@ public:
                        info->HasEffect(SPELL_EFFECT_HEAL_MAX_HEALTH) || info->HasEffect(SPELL_EFFECT_HEAL_MECHANICAL)))
             return;
         uint32 const guid = target->GetGUID().GetCounter();
-        std::lock_guard<std::mutex> garde(verrouRegistre);
-        if (!EssaiDuMembreVerrouille(guid))
+        if (!EssaiDuMembre(guid))   // sans verrou : ce crochet voit TOUS les soins directs du royaume
             return;
+        std::lock_guard<std::mutex> garde(verrouRegistre);
         uint32 const maintenant = getMSTime();
         // Borne : les notes perimees partent (un soin manque, une cible morte avant l'impact).
         if (notesCrit.size() > 256)
@@ -1515,10 +1581,7 @@ public:
 
 bool CoaBancSoin::MembreEngage(uint32 guidLow)
 {
-    if (!nbInscrits.load(std::memory_order_acquire))
-        return false;
-    std::lock_guard<std::mutex> garde(verrouRegistre);
-    return EssaiDuMembreVerrouille(guidLow) != 0;
+    return EssaiDuMembre(guidLow) != 0;   // aucun essai : un chargement atomique ; sinon une lecture sans verrou
 }
 
 void CoaBancSoin::TracerAction(Player* bot, char const* action, char const* resultat, uint32 sort, uint32 code)

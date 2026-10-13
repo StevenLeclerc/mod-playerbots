@@ -1489,6 +1489,13 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
     if (!botAI)
         return false;
 
+    // CoA banc des soins (revue du 13/10/2026) : ce chemin-ci est aussi appele par RandomBotUpdateAction (strategie
+    // « default », fil de carte), que la garde de ProcessBot(uint32) ne couvre pas. Il quitterait le groupe du banc
+    // (« leader is random bot »), reviverait, re-randomiserait ou teleporterait un membre d'essai en cours.
+    // Sans essai : un chargement atomique.
+    if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return false;
+
     if (bot->InBattleground())
         return false;
 
@@ -1632,6 +1639,12 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
 void RandomPlayerbotMgr::Revive(Player* player)
 {
     uint32 bot = player->GetGUID().GetCounter();
+
+    // CoA banc des soins (revue du 13/10/2026) : FindCorpseAction (fil de carte, « death count » >= 5) appelle Revive
+    // directement ; Refresh y quitterait le groupe du banc et la teleportation sortirait le membre de l'enclos. Le
+    // banc le ressuscite lui-meme a la fin de l'essai. Sans essai : un chargement atomique.
+    if (CoaBancSoin::MembreEngage(bot))
+        return;
 
     // LOG_INFO("playerbots", "Bot {} revived", player->GetName().c_str());
     SetEventValue(bot, "dead", 0, 0);
