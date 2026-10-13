@@ -69,6 +69,13 @@ bool EnsureCoaSpecialization(Player* bot);
 // posee, 0 si rien n'a change. EnsureCoaSpecialization ne la defait pas tant que le gladiateur est engage.
 uint32 CoaSpecialiserGladiateur(Player* bot);
 
+// CoA banc des soins (13/10/2026, Ai/Coa/CoaBancSoin.cpp, preparation, FIL MONDE) : la specialisation DECLAREE d'un
+// bot de banc, de TOUT role (soin, tank, degats) -- a l'inverse de CoaSpecialiserGladiateur, qui force les degats.
+// `spe` 0 : la courante. Refuse (code court dans `refus`) une specialisation exclue des bots (101), qui n'est pas de
+// la classe, ou que le module refuse de poser ; sinon la pose si besoin et remet les talents en conformite
+// (ApplyCoaTalents, toujours). Seul un membre d'essai la garde ensuite (garde de EnsureCoaSpecialization).
+bool CoaPoserSpecialisationDeclaree(Player* bot, uint32 spe, std::string& refus);
+
 // Spends a random bot's Character Advancement points the way a player of its specialization
 // would: one ability essence at every even level from 10 (class tree), one talent essence at every
 // odd level from 11 (specialization tree), in the order of the ascensionsidekick.com level build.

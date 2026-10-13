@@ -6,6 +6,7 @@
 
 #include "CoaSpecialization.h"
 #include "CoaArene1v1.h"
+#include "CoaBancSoin.h"
 #include "CoaLevelBuildData.h"
 #include "CoaLevelBuildDataKami.h"
 #include "CoaSpecStrategies.h"
@@ -437,6 +438,13 @@ bool EnsureCoaSpecialization(Player* bot)
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
         return false;
 
+    // CoA banc des soins (13/10/2026, CoaBancSoin.cpp) : un membre d'essai en cours garde la specialisation DECLAREE
+    // que le banc lui a posee (soin, tank ou degats), quel qu'en soit le role ; sans ce garde, la composition
+    // (ResetStrategies -> AiFactory -> ici) la rendrait au role tire par le hachage. Aucun essai : un chargement
+    // atomique.
+    if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return false;
+
     // CoA arene 1v1 (10/10 soir) : un gladiateur ENGAGE (inscrit, en file, en arene, retenu) garde la
     // specialisation de degats que sa preparation lui a posee (CoaSpecialiserGladiateur) ; sans ce garde, la
     // composition a l'entree en arene (Liberer -> ResetStrategies) la rendrait au role tire par le hachage.
@@ -622,6 +630,59 @@ uint32 CoaSpecialiserGladiateur(Player* bot)
              "distance={} melee_sans_approche={}", bot->GetGUID().GetCounter(), bot->getClass(), choisie, avant,
              bot->GetLevel(), distance ? 1 : 0, MeleeSansApproche(bot, choisie) ? 1 : 0);
     return choisie;
+}
+
+bool CoaPoserSpecialisationDeclaree(Player* bot, uint32 spe, std::string& refus)
+{
+    refus.clear();
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()))
+    {
+        refus = "pas_classe_coa";
+        return false;
+    }
+    if (bot->GetLevel() < SpecializationLevel)
+    {
+        refus = "niveau_sans_spe";
+        return false;
+    }
+    uint32 const avant = GetAscensionActiveSpecialization(bot);
+    uint32 const voulue = spe ? spe : avant;
+    if (!voulue)
+    {
+        refus = "sans_spe";
+        return false;
+    }
+    if (IsExcludedSpecialization(voulue))
+    {
+        refus = "spe_exclue";
+        return false;
+    }
+    // Les specialisations que la classe peut apprendre (tout role), sans les exclues : SpecializationsByRole.
+    bool deLaClasse = false;
+    for (std::vector<uint32> const& parRole : SpecializationsByRole(bot->getClass()))
+        deLaClasse = deLaClasse || std::find(parRole.begin(), parRole.end(), voulue) != parRole.end();
+    if (!deLaClasse)
+    {
+        refus = "spe_hors_classe";
+        return false;
+    }
+    if (avant != voulue && !SwitchAscensionSpecialization(bot, voulue))
+    {
+        refus = "spe_refusee";
+        return false;
+    }
+    if (GetAscensionActiveSpecialization(bot) != voulue)
+    {
+        refus = "spe_refusee";
+        return false;
+    }
+    // Toujours, meme sans changement : les points du niveau (le banc a pu monter le bot) et la table de
+    // AiPlayerbot.Coa.BuildSource, comme a chaque composition.
+    uint32 const points = ApplyCoaTalents(bot);
+    LOG_INFO("playerbots.coa", "coa soin preparation: guid={} action=spe classe={} spe={} avant={} niveau={} changee={}"
+             " entrees_talent={} role={}", bot->GetGUID().GetCounter(), uint32(bot->getClass()), voulue, avant,
+             uint32(bot->GetLevel()), avant != voulue ? 1 : 0, points, uint32(RoleOf(bot->getClass(), voulue)));
+    return true;
 }
 
 namespace

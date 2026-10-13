@@ -12,6 +12,7 @@
 #include "CellImpl.h"
 #include "ChannelMgr.h"
 #include "CoaDirecteur.h"
+#include "CoaBancSoin.h"
 #include "CoaHotelDesVentes.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
@@ -1369,6 +1370,12 @@ void RandomPlayerbotMgr::ScheduleChangeStrategy(uint32 bot, uint32 time)
 
 bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
 {
+    // CoA banc des soins (13/10/2026, CoaBancSoin.cpp) : un membre d'essai en cours n'est ni deconnecte (evenement
+    // « add » echu), ni revive, ni re-randomise, ni teleporte par ce gestionnaire ; le banc le rend a sa vie ordinaire
+    // a la fin de l'essai. Sans essai : un chargement atomique.
+    if (CoaBancSoin::MembreEngage(bot))
+        return false;
+
     ObjectGuid botGUID = ObjectGuid::Create<HighGuid::Player>(bot);
     Player* player = GetPlayerBot(botGUID);
     PlayerbotAI* botAI = player ? GET_PLAYERBOT_AI(player) : nullptr;
@@ -1652,6 +1659,9 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_SUSPENDUS);
         return;
     }
+    // CoA banc des soins (13/10/2026) : jamais un membre d'essai en cours (il quitterait l'enclos).
+    if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return;
 
     // ignore when alrdy teleported or not in the world yet.
     if (bot->IsBeingTeleported() || !bot->IsInWorld())

@@ -9,6 +9,7 @@
 #include "CoaAiObjectContext.h"
 #include "CoaChasse.h"
 #include "CoaArene1v1.h"
+#include "CoaBancSoin.h"
 #include "CoaRegistreCombat.h"
 
 #include "Action.h"
@@ -1858,8 +1859,20 @@ std::atomic<time_t> UsageLastReport{ 0 };
 // (spell id, reason) -> failures, for the kinds whose casts are diagnosed
 std::map<std::pair<uint32, uint16>, uint32> UsageFailures[USAGE_MAX];
 
+// Banc des soins (S0, CoaBancSoin.cpp) : le dernier refus consigne par CE fil, relu par la trace `coa soin action:`
+// d'une action de soin (BancSoinTracer). Deux ecritures par refus, sans verrou ; remis a zero au debut de chaque action
+// de soin. Rien d'autre ne le lit.
+struct BancSoinEchec
+{
+    uint32 sort = 0;
+    uint16 code = 0;
+};
+thread_local BancSoinEchec t_bancSoinEchec;
+
 void RecordFailure(uint8 kind, uint32 spellId, uint16 reason)
 {
+    t_bancSoinEchec.sort = spellId;
+    t_bancSoinEchec.code = reason;
     if (kind >= USAGE_MAX)
         return;
 
@@ -1960,6 +1973,24 @@ SpellInfo const* RecordUsage(UsageKind kind, SpellInfo const* spell)
         ReportUsage(now);
 
     return spell;
+}
+
+// Banc des soins (S0) : une ligne `coa soin action:` pour le passage d'une action de soin (heal, hot, group_heal,
+// defensive) d'un membre d'essai en cours -- CoaBancSoin::TracerAction borne le debit et sort sur un chargement
+// atomique hors essai. `cast` : le sort lance (resultat=lance) ; sinon `vide` (aucun sort candidat : rien, code
+// FAILURE_NOTHING) ; sinon le dernier refus consigne par RecordFailure pendant l'action (refus), ou rien.
+void BancSoinTracer(Player* bot, char const* action, SpellInfo const* cast, bool vide)
+{
+    if (!bot || !CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return;
+    if (cast)
+        CoaBancSoin::TracerAction(bot, action, "lance", cast->Id, 0);
+    else if (vide)
+        CoaBancSoin::TracerAction(bot, action, "rien", 0, FAILURE_NOTHING);
+    else if (t_bancSoinEchec.sort || t_bancSoinEchec.code)
+        CoaBancSoin::TracerAction(bot, action, "refus", t_bancSoinEchec.sort, t_bancSoinEchec.code);
+    else
+        CoaBancSoin::TracerAction(bot, action, "rien", 0, 0);
 }
 
 // The bot and the living group members near it, the bot first.
@@ -2441,7 +2472,12 @@ public:
         if (spells.empty())
             RecordFailure(usage, 0, FAILURE_NOTHING);
 
-        return RecordUsage(usage, CastFirst(botAI, bot, spells, target, usage));
+        // Banc des soins (S0) : remis a zero ICI, apres le FAILURE_NOTHING ci-dessus (le cas `vide` le dit deja).
+        t_bancSoinEchec = BancSoinEchec();
+        SpellInfo const* cast = RecordUsage(usage, CastFirst(botAI, bot, spells, target, usage));
+        BancSoinTracer(bot, mode == Mode::Group ? "group_heal" : mode == Mode::OverTime ? "hot" : "heal", cast,
+                       spells.empty());
+        return cast;
     }
 
     bool isUseful() override
@@ -2500,9 +2536,12 @@ public:
 
     bool Execute(Event /*event*/) override
     {
-        SpellInfo const* cast =
-            CastFirst(botAI, bot, KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }), bot,
-                      USAGE_DEFENSIVE);
+        t_bancSoinEchec = BancSoinEchec();   // banc des soins (S0) : refus de CETTE action seulement
+        bool vide = true;                    // aucun sort candidat, ni defensif ni soin sur soi
+        std::vector<Usable> const defensifs =
+            KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; });
+        vide = defensifs.empty();
+        SpellInfo const* cast = CastFirst(botAI, bot, defensifs, bot, USAGE_DEFENSIVE);
         if (!cast)
         {
             std::vector<Usable> heals = KnownAbilities(botAI, bot, [](uint16 kind)
@@ -2510,10 +2549,13 @@ public:
             if (SavingManaForHeals(botAI, bot))
                 CheapestFirst(bot, heals);
 
+            vide = vide && heals.empty();
             cast = CastFirst(botAI, bot, heals, bot, USAGE_DEFENSIVE);
         }
 
-        return RecordUsage(USAGE_DEFENSIVE, cast);
+        RecordUsage(USAGE_DEFENSIVE, cast);
+        BancSoinTracer(bot, "defensive", cast, vide);
+        return cast;
     }
 
     bool isUseful() override

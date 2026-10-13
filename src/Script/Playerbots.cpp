@@ -594,6 +594,7 @@ void AddSC_coa_directeur();
 // Ai/Coa/CoaArene1v1.cpp : arene 1 contre 1 contre un gladiateur (Arene1v1, 10/10/2026).
 void AddSC_coa_arene1v1();
 void AddSC_coa_score();
+void AddSC_coa_banc_soin();
 
 void AddPlayerbotsScripts()
 {
@@ -620,4 +621,5 @@ void AddPlayerbotsScripts()
     AddSC_coa_directeur();
     AddSC_coa_arene1v1();
     AddSC_coa_score();
+    AddSC_coa_banc_soin();
 }
