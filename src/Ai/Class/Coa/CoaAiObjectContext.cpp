@@ -820,7 +820,17 @@ bool CoaAuraPoseePar(Unit* cible, ObjectGuid lanceur, SpellInfo const* info)
     auto posee = [cible, lanceur](uint32 id)
     {
         Aura const* aura = cible->GetAura(id, lanceur);
-        return aura && (aura->GetDuration() < 0 || aura->GetDuration() > CoaAuraRenouvelerMs);
+        if (!aura)
+            return false;
+        // Revue du lot 20 (13/10) : une aura qui s'EMPILE par relance (StackAmount > 1) et n'est pas au maximum reste a
+        // poser -- Carapace Regeneration 805931 (« stacking 3 times », aura permanente, 3 charges) restait sinon a une
+        // pile pour toujours. Sauf si ses piles fondent aux coups (ProcFlags : Abyssal Ward 804670, 5 piles qui baissent
+        // a chaque attaque recue) : la relancer ne ferait que racheter ce que les coups ont pris. Meme lecture que la
+        // regle 3 de CoaAreneRefusTactique (aEmpiler).
+        uint32 const pileMax = aura->GetSpellInfo()->StackAmount;
+        if (pileMax > 1 && aura->GetStackAmount() < pileMax && !aura->GetSpellInfo()->ProcFlags)
+            return false;
+        return aura->GetDuration() < 0 || aura->GetDuration() > CoaAuraRenouvelerMs;
     };
     if (posee(info->Id))
         return true;

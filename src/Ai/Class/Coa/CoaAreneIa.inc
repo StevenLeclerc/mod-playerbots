@@ -5315,6 +5315,10 @@ private:
         examiner(liste);
         examiner(l.incantes);
         examiner(l.defensifs);
+        // Revue du lot 20 : rien n'attend sa ressource -> ni recherche de generateur ni « coa attack » compte comme tente
+        // (RecordUsage) a chaque tour de survie sans soin.
+        if (manques.empty())
+            return false;
         SpellInfo const* cast = nullptr;
         Manque const* retenu = nullptr;
         for (Manque const& m : manques)
