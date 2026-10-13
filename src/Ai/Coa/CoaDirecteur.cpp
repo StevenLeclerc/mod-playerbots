@@ -4078,6 +4078,11 @@ bool EstObjectif(std::string const& t);
 void ExecuterObjectif(CoaDirCommande const& c);
 template <typename Predicat>
 size_t LeverObjectifsSi(Predicat lever, char const* raison);
+// Convoi v2 (13/10/2026) : la barricade, definie dans CoaDirecteurConvoi.inc.
+bool EstBarricade(std::string const& t);
+void ExecuterBarricade(CoaDirCommande const& c);
+template <typename Predicat>
+size_t LeverBarricadesSi(Predicat lever, char const* raison);
 
 void ExecuterEvenement(CoaDirCommande const& c)
 {
@@ -4100,6 +4105,11 @@ void ExecuterEvenement(CoaDirCommande const& c)
     if (EstObjectif(c.texte))  // 10/10/2026 : objectifs d'evenement (etats du monde)
     {
         ExecuterObjectif(c);
+        return;
+    }
+    if (EstBarricade(c.texte))  // 13/10/2026 : convoi v2, la barricade (CoaDirecteurConvoi.inc)
+    {
+        ExecuterBarricade(c);
         return;
     }
     EvLu lu;
@@ -4352,7 +4362,8 @@ size_t LeverEvenementsSi(Predicat lever, char const* raison)
     // Lot D : les invoques d'abord (retrait immediat, ligne `tues=` par lot).
     size_t const invoques = LeverInvoquesSi(lever, raison) + LeverPortailsSi(lever, raison) +   // + lot P
                             LeverCoffresSi(lever, raison) +                                      // + lot G
-                            LeverObjectifsSi(lever, raison);                                     // + objectifs
+                            LeverObjectifsSi(lever, raison) +                                    // + objectifs
+                            LeverBarricadesSi(lever, raison);                                    // + convoi v2
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
         return invoques;
     std::vector<EvAmbiance> ambiances;
@@ -4645,6 +4656,8 @@ struct EvAppLu
     uint8 meca = 0;
     // Lot V (13/10/2026, CoaDirecteurConvoi.inc) : `ordre:assaillir:<protege>` -- la commande `invoquer` du protege.
     uint32 protege = 0;
+    // Convoi v2 (13/10/2026) : `ordre:escorter:<vitesse>` -- % de la course de base ; 0 : la marche du lot V.
+    uint16 vitesse = 0;
 };
 
 // Lot G des evenements (08/10/2026) : definis dans CoaDirecteurGardien.inc, inclus apres le lot P.
@@ -4766,6 +4779,7 @@ struct EvInvoque
     // Convoi de bandits (13/10/2026, CoaDirecteurConvoi.inc).
     bool protege = false;        // gabarit de EV_CONVOI_PROTEGES : passif, jamais cible publiee, jamais egare
     uint32 etatConvoiS = 0;      // protege : Maintenant() de la derniere ligne `sous_action=convoi motif=etat`
+    bool rapide = false;         // convoi v2 : protege lance au trot (`escorter:<vitesse>`) : etat toutes les 2 s
     uint8 palier = 0;            // renfort de palier : 75, 50 ou 25 ; 0 : autre
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
@@ -6936,6 +6950,8 @@ void Entretien(uint32 diff)
     SuivreInvoques();
     // Lot P des evenements : portails a refermer (clics, echeances).
     SuivrePortails();
+    // Convoi v2 (13/10) : barricades (clics, demolitions humaines ou par un bot, echeances). APRES les invoques (la garde).
+    SuivreBarricades();
     // Lot G des evenements : coffres de la faille (pilles, echeances).
     SuivreCoffres();
     // Objectifs d'evenement (10/10) : APRES les invoques (ennemis restants de cette seconde).
@@ -11199,6 +11215,7 @@ void AddSC_coa_directeur()
     new coa_directeur_niveau_creaturescript();
     new coa_directeur_soin_unitscript();    // lot S des evenements (crochet OnHeal : compteur `soins`)
     new coa_directeur_portail_goscript();   // lot P des evenements
+    new coa_directeur_barricade_goscript(); // convoi v2 : la barricade a demolir
     new coa_directeur_dose_unitscript();       // lot G : degats doses
     new coa_directeur_coffre_globalscript();   // lot G : qui ouvre le coffre
     new coa_directeur_coffre_playerscript();   // lot G : chacun sa tranche au coffre
