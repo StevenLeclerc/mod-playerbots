@@ -615,6 +615,12 @@ void SuivreReactions();   // 12/10 (lots T4-T5) : reactions des cibles de contra
 std::unordered_set<uint32> aurasDefiBloquant;
 bool defisLus = false;
 
+// Lot D5 (15/10/2026) : onglet CoABounty, ligne `^A|audace|optin`. GARDE DE PRESENCE des deux tables, lue UNE fois
+// au demarrage (DemarrerBus, requete synchrone sur information_schema, comme la garde de colonnes) : aucune requete
+// n'est jamais envoyee vers une table absente. Fil monde seul a l'ecriture ; relue au prochain demarrage.
+bool tableAudaceLue = false;   // acore_characters.coa_dir_audace (migration D4a, 2026_09_27_01_coa_dir_memoire.sql)
+bool tableOptinLue = false;    // acore_characters.coa_dir_imprevu_optin (2026_10_15_01_coa_dir_imprevu_optin.sql)
+
 // Lot D4c (SPEC-directeur-D4.md § 3.3) : MORTS D'HUMAINS. Les crochets de mort
 // tournent sur un FIL DE CARTE (Unit::Kill) : ils n'ecrivent que cette file, par
 // valeur, sous un verrou court (P-137 : jamais le magasin des consignes). Le fil
@@ -10631,6 +10637,24 @@ bool CoaDirecteur::EstArrete(uint32 guidLow)
 
 void CoaDirecteur::DemarrerBus()
 {
+    // Lot D5 : presence des tables de l'onglet (audace, opt-in), independamment du bus.
+    {
+        tableAudaceLue = false;
+        tableOptinLue = false;
+        QueryResult t = CharacterDatabase.Query(
+            "SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+            " AND TABLE_NAME = 'coa_dir_audace'),"
+            " (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+            " AND TABLE_NAME = 'coa_dir_imprevu_optin')");
+        if (t)
+        {
+            Field* f = t->Fetch();
+            tableAudaceLue = f[0].Get<uint64>() != 0;
+            tableOptinLue = f[1].Get<uint64>() != 0;
+        }
+        LOG_INFO("playerbots", "coa directeur : onglet, table audace {}, table opt-in {}",
+                 tableAudaceLue ? "presente" : "absente", tableOptinLue ? "presente" : "absente");
+    }
     bool const bus = sPlayerbotAIConfig.directeurBus;
     dernierEtatBus = bus;
     source = sourceMysql.Demarrer(EpoqueMonde(), bus) ? &sourceMysql : nullptr;
@@ -11416,7 +11440,50 @@ std::string ChampOnglet(Field const& f)
     return f.IsNull() ? std::string() : ChampOnglet(f.Get<std::string>());
 }
 
-std::string CorpsOnglet(uint32 guid)
+// Lot D5 (15/10/2026) : derniere audace / opt-in lus pour l'onglet, par guid, SOUS verrouOnglet. Remplis par une
+// requete ASYNCHRONE (processeur de la session du joueur) posee a chaque demande `TOUT` : le fil monde n'attend
+// jamais MySQL pour cette ligne. La valeur montree est donc celle de la demande precedente (2 s au plus en regime ;
+// vide -- « inconnue » pour l'addon -- a la toute premiere demande, l'addon retombe alors sur son dernier envoi).
+struct ImprevuOnglet
+{
+    std::string audace;   // coa_dir_audace.niveau du COMPTE, vide sans ligne
+    std::string optin;    // coa_dir_imprevu_optin.optin du personnage, "1"/"0", vide sans ligne
+};
+std::unordered_map<uint32, ImprevuOnglet> imprevuOnglet;
+
+void RelireImprevuOnglet(uint32 guid, WorldSession* session)
+{
+    if (!session || (!tableAudaceLue && !tableOptinLue))
+        return;
+    std::string const sql = Acore::StringFormat(
+        "SELECT {}, {}",
+        tableAudaceLue ? Acore::StringFormat("(SELECT CAST(a.niveau AS CHAR) FROM coa_dir_audace a JOIN characters c"
+                                             " ON c.account = a.compte WHERE c.guid = {})", guid)
+                       : std::string("NULL"),
+        tableOptinLue ? Acore::StringFormat("(SELECT CAST(o.optin AS CHAR) FROM coa_dir_imprevu_optin o WHERE o.guid = {})",
+                                            guid)
+                      : std::string("NULL"));
+    // Rappel : traite par le processeur de la session (WorldSession::Update), qui meurt avec elle -- une session
+    // fermee entre-temps ne rappelle jamais. Ne capture que le guid ; n'ecrit que le cache, sous son verrou.
+    session->GetQueryProcessor().AddCallback(CharacterDatabase.AsyncQuery(sql).WithCallback(
+        [guid](QueryResult r)
+        {
+            ImprevuOnglet e;
+            if (r)
+            {
+                Field* f = r->Fetch();
+                e.audace = ChampOnglet(f[0]);
+                std::string const o = ChampOnglet(f[1]);
+                e.optin = o.empty() ? std::string() : (o == "0" ? "0" : "1");
+            }
+            std::lock_guard<std::mutex> garde(verrouOnglet);
+            if (imprevuOnglet.size() > 512)
+                imprevuOnglet.clear();
+            imprevuOnglet[guid] = e;
+        }));
+}
+
+std::string CorpsOnglet(uint32 guid, WorldSession* session)
 {
     std::string corps = "V|1";
     // Prime en cours (demande ou active).
@@ -11509,6 +11576,19 @@ std::string CorpsOnglet(uint32 guid)
                                              ChampOnglet(f[5]), uint32(f[6].Get<uint8>()));
             } while (w->NextRow());
         }
+    }
+    // Lot D5 (15/10/2026) : `^A|audace|optin` (CoABounty 1.7, Lire : c[1] == "A"), EN FIN avant `F` : un addon
+    // d'avant ignore la ligne. Valeurs du cache (requete asynchrone de la demande precedente), vides si inconnues.
+    {
+        ImprevuOnglet e;
+        {
+            std::lock_guard<std::mutex> garde(verrouOnglet);
+            auto it = imprevuOnglet.find(guid);
+            if (it != imprevuOnglet.end())
+                e = it->second;
+        }
+        corps += Acore::StringFormat("^A|{}|{}", e.audace, e.optin);
+        RelireImprevuOnglet(guid, session);
     }
     corps += "^F";
     return corps;
@@ -11717,7 +11797,7 @@ public:
                 derniereDemandeOnglet.clear();
             derniereDemandeOnglet[guid] = maintenantMs;
         }
-        std::string const corps = CorpsOnglet(guid);
+        std::string const corps = CorpsOnglet(guid, player->GetSession());
         // Morceaux de ONGLET_MORCEAU octets au plus, jamais au milieu d'un caractere
         // UTF-8 (revue m3) : la coupe recule sur un octet de continuation 10xxxxxx.
         std::vector<std::string> morceaux;
