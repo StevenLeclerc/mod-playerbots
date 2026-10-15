@@ -47,7 +47,8 @@
 // Refus propres : soigner_eteint, bornes, hors_ligne, pas_un_bot, maitre_humain, pas_humain, pas_soigneur
 // (PlayerbotAI::IsHeal(bot) : une strategie de soin dans un de ses moteurs), sans_presence (le bot porte une presence
 // ARRIVEE -- finale en sejour, non etape -- du meme proprietaire pour ce joueur : la regle des approches C-), ffa
-// (High Risk ou drapeau FFA), pvp (drapeau JcJ), defi, mort, carte, plein. Un `soigner` sur un bot deja soigneur
+// (High Risk ou drapeau FFA), pvp (drapeau JcJ), defi, mort, bot_mort, carte, faction (!IsValidAssistTarget), plein.
+// Le patient n'est rendu qu'a un bot SANS groupe (etude § 4). Un `soigner` sur un bot deja soigneur
 // REMPLACE le precedent (clos `remplace`).
 // Effet : le registre est publie (copie atomique, SOIGNEURS_MAX places) ; JoueurASoigner (CoaDirecteurSoin.inc) rend
 // le patient au bot vise -- c'est le crochet du lot S dans PartyMemberToHeal::Calculate et NearbyGroup -- s'il est
@@ -85,6 +86,7 @@ constexpr float ATTIRER_CHASSEUR_YD = 60.0f;
 constexpr float ATTIRER_CHEMIN_FACTEUR = 1.5f;
 constexpr uint32 ATTIRER_CHEMINS_MAX = 8;
 constexpr uint32 ATTIRER_RETOUR_MAX_S = 60;
+constexpr float ATTIRER_CAMP_YD = 10.0f;             // « au camp » : a 10 yd de sa garde (GetHomePosition)
 constexpr size_t ATTIRES_MAX = 9;                    // trois commandes de trois
 
 enum class PhaseAttire : uint8
@@ -254,7 +256,9 @@ bool CheminAttire(Creature* cr, Player* j)
 
 void CourirVers(Creature* cr, Player* j)
 {
-    cr->GetMotionMaster()->MovePoint(0, j->GetPositionX(), j->GetPositionY(), j->GetPositionZ(), FORCED_MOVEMENT_RUN);
+    // forceDestination = false (revue de 873cb21) : le point est celui du joueur, pas un point a atteindre a tout prix.
+    cr->GetMotionMaster()->MovePoint(0, j->GetPositionX(), j->GetPositionY(), j->GetPositionZ(), FORCED_MOVEMENT_RUN,
+                                     0.0f, 0.0f, true, false);
 }
 
 void RefuserAttirer(CoaDirCommande const& c, char const* raison, int32 niveau = -1)
@@ -321,9 +325,9 @@ void ExecuterAttirer(CoaDirCommande const& c)
     {
         if (retenues.size() >= uint32(c.valeur) || chemins >= ATTIRER_CHEMINS_MAX)
             break;
+        ++chemins;   // revue de 873cb21 : le controle des chasseurs compte aussi dans le budget de la pose
         if (ChasseurPres(cr, ATTIRER_CHASSEUR_YD))
             continue;
-        ++chemins;
         if (CheminAttire(cr, j))
             retenues.push_back(cr);
     }
@@ -361,6 +365,30 @@ void ExecuterAttirer(CoaDirCommande const& c)
                        Acore::StringFormat(" candidates={} chemins={} duree_s={} rayon={:.0f} origine={}",
                                            candidates.size(), chemins, c.dureeS, c.rayon, c.origine));
     Accuser(c, "execute", nullptr);
+}
+
+// Revue de 873cb21 (MAJEUR 2) : Creature::CallAssistance (Creature.cpp:869, periodique) donne a ses aides LE MEME
+// pointeur de laisse que l'appelante (Creature.cpp:229). Prolonger la laisse de l'attiree prolongerait celle des
+// aides, hors registre : train, plafond de 3 depasse. Chaque seconde, avant la prolongation : toute creature qui
+// frappe le joueur, hors registre, et partage ce pointeur, recoit le sien (ClearLastLeashExtensionTimePtr : un
+// neuf sera cree a sa prochaine lecture). SetNoCallAssistance seul ne suffirait pas (remis a faux toutes les 3 s).
+void DelierLaisses(Creature* cr, Player* j)
+{
+    std::shared_ptr<time_t> const& sienne = cr->GetLastLeashExtensionTimePtr();
+    auto delier = [&](Unit* victime)
+    {
+        for (Unit* u : victime->getAttackers())
+        {
+            Creature* autre = u ? u->ToCreature() : nullptr;
+            if (!autre || autre == cr || DejaAttiree(autre->GetGUID()))
+                continue;
+            if (autre->GetLastLeashExtensionTimePtr() == sienne)
+                autre->ClearLastLeashExtensionTimePtr();
+        }
+    };
+    delier(j);
+    if (Pet* familier = j->GetPet())   // une aide peut frapper le familier du joueur
+        delier(familier);
 }
 
 // Passe en Retour : evasion si `evader` (creature vivante), journal. Elle reste active jusqu'a son camp.
@@ -422,8 +450,20 @@ void SuivreAttires()
                 ++i;
                 continue;
             }
-            bool const auCamp = !cr->IsInEvadeMode() &&
-                                cr->GetMotionMaster()->GetCurrentMovementGeneratorType() != HOME_MOTION_TYPE;
+            bool const versCamp = cr->IsInEvadeMode() ||
+                                  cr->GetMotionMaster()->GetCurrentMovementGeneratorType() == HOME_MOTION_TYPE;
+            bool const pres = cr->GetExactDist2d(cr->GetHomePosition().GetPositionX(),
+                                                 cr->GetHomePosition().GetPositionY()) <= ATTIRER_CAMP_YD;
+            // Revue de 873cb21 (mineur 1) : une IA dont l'evasion est neutralisee (SmartAI mEvadeDisabled /
+            // mSuppressEvade, illisibles d'ici) ne rentre pas : on la renvoie a sa garde nous-memes, sans toucher
+            // a la garde, tant qu'elle en est loin.
+            if (cr->IsAlive() && !versCamp && !pres && maintenant - a.retourS < ATTIRER_RETOUR_MAX_S)
+            {
+                cr->GetMotionMaster()->MoveTargetedHome();
+                ++i;
+                continue;
+            }
+            bool const auCamp = !versCamp && pres;
             if (!cr->IsAlive() || auCamp || maintenant - a.retourS >= ATTIRER_RETOUR_MAX_S)
             {
                 RetirerAttire(i, cr, !cr->IsAlive() ? "mort" : auCamp ? "au_camp" : "retour_long");
@@ -490,6 +530,13 @@ void SuivreAttires()
                 ++i;
                 continue;
             }
+            // Revue de 873cb21 (mineur 2) : deja en evasion (laisse, script) : ne pas la relancer vers le joueur.
+            if (cr->IsInEvadeMode())
+            {
+                SortirAttire(a, cr, "fin", "detourne", false, cr->GetExactDist2d(j));
+                ++i;
+                continue;
+            }
             if (maintenant >= a.limiteS)
             {
                 SortirAttire(a, cr, "rentre", "delai", true, cr->GetExactDist2d(j));
@@ -543,6 +590,7 @@ void SuivreAttires()
             ++i;
             continue;
         }
+        DelierLaisses(cr, j);
         cr->UpdateLeashExtensionTime();
         ++i;
     }
@@ -621,7 +669,8 @@ Player* PatientImpose(Player* bot)
             seuil = soigneursPublies[i].seuil.load(std::memory_order_relaxed);
             break;
         }
-    if (!patient || !bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive())
+    // Etude § 4 (revue de 873cb21, mineur 3) : patient impose seulement a un bot SANS groupe.
+    if (!patient || !bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive() || bot->GetGroup())
         return nullptr;
     // Carte du bot seulement (GetPlayer(WorldObject, guid) -> GetPlayer(u.GetMap(), guid)) : P-137.
     Player* p = ObjectAccessor::GetPlayer(*bot, ObjectGuid::Create<HighGuid::Player>(patient));
@@ -743,6 +792,11 @@ void ExecuterSoigner(CoaDirCommande const& c)
         RefuserSoigner(c, "pas_soigneur");
         return;
     }
+    if (!bot->IsAlive())
+    {
+        RefuserSoigner(c, "bot_mort");
+        return;
+    }
     if (!PresenceArrivee(c.cible, c.joueur, &c, nullptr, true))
     {
         RefuserSoigner(c, "sans_presence");
@@ -771,6 +825,12 @@ void ExecuterSoigner(CoaDirCommande const& c)
     if (p->GetMapId() != bot->GetMapId())
     {
         RefuserSoigner(c, "carte");
+        return;
+    }
+    // Revue de 873cb21 (mineur 3) : faction opposee, duel, MJ, sanctuaire... : le soin serait refuse.
+    if (!bot->IsValidAssistTarget(p))
+    {
+        RefuserSoigner(c, "faction");
         return;
     }
     auto it = std::find_if(soigneurs.begin(), soigneurs.end(), [&c](Soigneur const& s) { return s.bot == c.cible; });
@@ -812,7 +872,8 @@ bool Assister(Soigneur& s, Player* bot, Player* p, uint32 maintenant)
     PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
     if (!ia || ia->HasGameClientMaster() || !bot->IsAlive() || bot->IsInCombat() || bot->IsBeingTeleported() ||
         ia->GetState() != BOT_STATE_NON_COMBAT || !p->IsInCombat() || p->GetHealthPct() >= float(s.seuil) ||
-        !bot->IsWithinDistInMap(p, SOIGNER_ASSISTANCE_YD) || maintenant - s.assistanceS < SOIGNER_ASSISTANCE_S)
+        !bot->IsWithinDistInMap(p, SOIGNER_ASSISTANCE_YD) || maintenant - s.assistanceS < SOIGNER_ASSISTANCE_S ||
+        !bot->IsValidAssistTarget(p) || bot->GetGroup())   // en groupe, PatientImpose ne rend rien : pas d'assistance
         return false;
     Creature* choisie = nullptr;
     float meilleure = 0.0f;
@@ -968,7 +1029,7 @@ size_t LeverImprevuSi(Predicat lever, char const* raison)
 std::string BilanImprevu()
 {
     return Acore::StringFormat(
-        " attires={} engages={} rentres={} actifs={} soigneurs={} soigneurs_actifs={} assistances={}"
+        " attires={} engages={} rentres={} attires_actifs={} soigneurs={} soigneurs_actifs={} assistances={}"
         " soins_soigneurs={} soins_soigneurs_pv={} soin_choix_soigneurs={}",
         nbAttiresPoses, nbAttiresEngages, nbAttiresRentres, attires.size(), sdPoses, soigneurs.size(), sdAssistances,
         sdSoins.load(std::memory_order_relaxed), sdSoinsPv.load(std::memory_order_relaxed),

@@ -4417,7 +4417,7 @@ AiPlayerbot.Directeur.ReactionsT6 = 0
 AiPlayerbot.Directeur.Attirer = 0
 
 #    AiPlayerbot.Directeur.Soigneurs
-#        Verbe `soigner` : le bot `cible`, soigneur (strategie de soin), deja ARRIVE a sa presence pres du joueur
+#        Verbe `soigner` : le bot `cible`, soigneur (strategie de soin), SANS groupe, deja ARRIVE a sa presence pres du joueur
 #        (meme proprietaire, comme une approche C-), compte ce joueur parmi ses cibles de soin (meme crochet que
 #        Directeur.EvenementSoins) jusqu'a `duree_s` (420 s au plus), quand ses PV sont sous `valeur` (40-70 %) ou
 #        que tous deux sont en combat. Hors combat, quand le patient est en combat et sous le seuil, le bot entre en

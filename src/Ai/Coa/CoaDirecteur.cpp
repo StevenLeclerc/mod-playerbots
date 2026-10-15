@@ -10296,7 +10296,7 @@ void Bilan()
              Lire(COA_DIR_PAROLES_HORS_VUE), Lire(COA_DIR_MISSIONS), Lire(COA_DIR_MISSIONS_IGNOREES),
              Lire(COA_DIR_MISSIONS_DEGRADEES), Lire(COA_DIR_PATROUILLES), Lire(COA_DIR_BANDES_RECALEES),
              Lire(COA_DIR_BANDES_REJOINTES), Lire(COA_DIR_ECARTE_PACTE_BOTS), Lire(COA_DIR_MORTS_ENTRE_PACTES),
-             BilanImprevu());   // lot D5 : ` attires= engages= rentres= actifs= ...`, EN FIN de ligne
+             BilanImprevu());   // lot D5 : ` attires= engages= rentres= attires_actifs= ...`, EN FIN de ligne
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
