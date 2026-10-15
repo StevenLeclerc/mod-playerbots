@@ -596,6 +596,9 @@ public:
     // `attirer_eteint` / `soigner_eteint` (meme listes dans Directeur.Verbes), le registre se vide a la seconde.
     bool directeurAttirer;
     bool directeurSoigneurs;
+    // Banc D5 avec les bots (15/10/2026) : `attirer` admet un bot aleatoire comme `joueur`, `soigner` comme patient
+    // (lignes marquees `banc=1`). Faux (defaut) : un humain est exige, a l'identique.
+    bool directeurImprevuBanc;
     // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3) :
     // inertes tant que `evenement` n'est pas dans directeurVerbes. LISTES BLANCHES FERMEES des ids
     // qu'une commande `evenement` peut jouer (« id,id », lecture stricte : un morceau mal forme et

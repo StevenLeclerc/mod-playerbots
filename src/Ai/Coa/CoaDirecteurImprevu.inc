@@ -109,6 +109,7 @@ struct Attire
     uint32 retourS = 0;      // Maintenant() de l'entree en Retour
     float engX = 0.0f, engY = 0.0f;   // point d'engagement (position du joueur)
     uint8 niveauPose = 0;
+    bool banc = false;       // `joueur` est un bot (option Directeur.ImprevuBanc a la pose)
 };
 
 std::vector<Attire> attires;   // fil monde seul
@@ -127,14 +128,36 @@ bool CarteDeContinent(uint32 carte)
     return carte == 0 || carte == 1 || carte == 530 || carte == 571;
 }
 
+// Banc (option Directeur.ImprevuBanc, 15/10/2026) : `banc=1` EN FIN de ligne pour toute ligne qui vise un BOT.
 void JournaliserAttirer(uint32 id, uint32 joueur, uint32 n, std::string const& creatures, char const* statut,
-                        char const* raison, float dist, int32 niveau, std::string const& suite = std::string())
+                        char const* raison, float dist, int32 niveau, std::string const& suite = std::string(),
+                        bool banc = false)
 {
     LOG_INFO("playerbots",
-             "coa directeur attirer: id={} joueur={} mode=patrouille n={} creatures={} statut={} raison={} dist={} niveau={}{}",
+             "coa directeur attirer: id={} joueur={} mode=patrouille n={} creatures={} statut={} raison={} dist={} niveau={}{}{}",
              id, joueur, n, creatures.empty() ? std::string("-") : creatures, statut, raison ? raison : "-",
              dist < 0.0f ? std::string("-") : Acore::StringFormat("{:.0f}", dist),
-             niveau < 0 ? std::string("-") : std::to_string(niveau), suite);
+             niveau < 0 ? std::string("-") : std::to_string(niveau), suite, banc ? " banc=1" : "");
+}
+
+// ---- banc avec les bots (15/10/2026, option AiPlayerbot.Directeur.ImprevuBanc, demande du commanditaire)
+// Option allumee : un BOT ALEATOIRE en jeu (jamais l'altbot d'un compte humain : pas de maitre humain) est admis comme
+// `joueur` d'`attirer` et comme patient de `soigner`, la ou un humain etait exige (`pas_humain`). Rien d'autre ne
+// change : les autres refus restent, et `humain_proche` / `humain` ne comptent que les VRAIS humains
+// (HumainProcheSauf parcourt RandomPlayerbotMgr::GetPlayers). Le bot vise n'est ni groupe, ni deplace, ni recompose :
+// seules les creatures (attirer) et le bot soigneur (soigner) agissent. Fil monde seul (IsRandomBot, maitre).
+// Option eteinte : Humain(p), a l'identique.
+bool BotDeBanc(Player* p)
+{
+    if (!sPlayerbotAIConfig.directeurImprevuBanc || !p || !p->IsInWorld())
+        return false;
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(p);
+    return ia && !ia->HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(p);
+}
+
+bool CibleImprevu(Player* p)
+{
+    return Humain(p) || BotDeBanc(p);
 }
 
 std::string NomAttire(Attire const& a)
@@ -177,7 +200,7 @@ char const* RefusJoueurAttirer(Player* j, uint32 guid)
 {
     if (!j || !j->IsInWorld() || j->IsBeingTeleported())
         return "hors_ligne";
-    if (!Humain(j))
+    if (!CibleImprevu(j))
         return "pas_humain";
     if (j->IsGameMaster())
         return "mj";
@@ -263,7 +286,8 @@ void CourirVers(Creature* cr, Player* j)
 
 void RefuserAttirer(CoaDirCommande const& c, char const* raison, int32 niveau = -1)
 {
-    JournaliserAttirer(c.id, c.joueur, 0, std::string(), "refuse", raison, -1.0f, niveau);
+    JournaliserAttirer(c.id, c.joueur, 0, std::string(), "refuse", raison, -1.0f, niveau, std::string(),
+                       c.joueur && BotDeBanc(JoueurConnecte(c.joueur)));
     Refuser(c, raison);
 }
 
@@ -350,6 +374,7 @@ void ExecuterAttirer(CoaDirCommande const& c)
         a.entree = cr->GetEntry();
         a.limiteS = maintenant + c.dureeS;
         a.niveauPose = cr->GetLevel();
+        a.banc = !Humain(j);
         cr->setActive(true);
         CourirVers(cr, j);
         float const d = cr->GetExactDist2d(j);
@@ -363,7 +388,8 @@ void ExecuterAttirer(CoaDirCommande const& c)
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     JournaliserAttirer(c.id, c.joueur, uint32(retenues.size()), noms, "execute", nullptr, distMin, niveauJ,
                        Acore::StringFormat(" candidates={} chemins={} duree_s={} rayon={:.0f} origine={}",
-                                           candidates.size(), chemins, c.dureeS, c.rayon, c.origine));
+                                           candidates.size(), chemins, c.dureeS, c.rayon, c.origine),
+                       !Humain(j));
     Accuser(c, "execute", nullptr);
 }
 
@@ -399,7 +425,8 @@ void SortirAttire(Attire& a, Creature* cr, char const* statut, char const* raiso
         cr->AI()->EnterEvadeMode();
         ++nbAttiresRentres;
     }
-    JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), statut, raison, dist, cr ? int32(cr->GetLevel()) : -1);
+    JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), statut, raison, dist, cr ? int32(cr->GetLevel()) : -1,
+                       std::string(), a.banc);
     a.phase = PhaseAttire::Retour;
     a.retourS = Maintenant();
 }
@@ -410,8 +437,8 @@ void RetirerAttire(size_t i, Creature* cr, char const* raison)
     Attire const a = attires[i];
     if (cr)
         cr->setActive(false);
-    LOG_INFO("playerbots", "coa directeur attirer: id={} joueur={} mode=patrouille n=1 creatures={} statut=inactive raison={}",
-             a.id, a.joueur, NomAttire(a), raison);
+    LOG_INFO("playerbots", "coa directeur attirer: id={} joueur={} mode=patrouille n=1 creatures={} statut=inactive raison={}{}",
+             a.id, a.joueur, NomAttire(a), raison, a.banc ? " banc=1" : "");
     attires[i] = attires.back();
     attires.pop_back();
 }
@@ -434,7 +461,7 @@ void SuivreAttires()
             if (cr)
                 cr->setActive(false);
             if (a.phase != PhaseAttire::Retour)
-                JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), "fin", "disparu", -1.0f, -1);
+                JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), "fin", "disparu", -1.0f, -1, std::string(), a.banc);
             attires[i] = attires.back();
             attires.pop_back();
             continue;
@@ -474,7 +501,8 @@ void SuivreAttires()
         }
         if (!cr->IsAlive())
         {
-            JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), "fin", "mort", -1.0f, int32(cr->GetLevel()));
+            JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), "fin", "mort", -1.0f, int32(cr->GetLevel()), std::string(),
+                               a.banc);
             RetirerAttire(i, cr, "mort");
             continue;
         }
@@ -485,6 +513,8 @@ void SuivreAttires()
             raison = "option";
         else if (!j || !j->IsInWorld())
             raison = "hors_ligne";
+        else if (a.banc && !BotDeBanc(j))   // option remise a 0, ou bot passe sous un maitre humain
+            raison = "banc";
         else if (j->GetMapId() != a.carte || j->GetMapId() != cr->GetMapId())
             raison = "carte";
         else if (!j->IsAlive())
@@ -523,7 +553,8 @@ void SuivreAttires()
                     cr->UpdateLeashExtensionTime();
                     ++nbAttiresEngages;
                     JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), "engage", "aggro", cr->GetExactDist2d(j),
-                                       int32(cr->GetLevel()), Acore::StringFormat(" attente_s={}", a.aPorteeS ? maintenant - a.aPorteeS : 0));
+                                       int32(cr->GetLevel()), Acore::StringFormat(" attente_s={}", a.aPorteeS ? maintenant - a.aPorteeS : 0),
+                                       a.banc);
                 }
                 else
                     SortirAttire(a, cr, "fin", "detourne", false, cr->GetExactDist2d(j));
@@ -565,7 +596,7 @@ void SuivreAttires()
                     a.engY = j->GetPositionY();
                     ++nbAttiresEngages;
                     JournaliserAttirer(a.id, a.joueur, 1, NomAttire(a), "engage", hisse ? "hisse" : "attente_max", d,
-                                       int32(cr->GetLevel()), Acore::StringFormat(" attente_s={}", maintenant - a.aPorteeS));
+                                       int32(cr->GetLevel()), Acore::StringFormat(" attente_s={}", maintenant - a.aPorteeS), a.banc);
                     ++i;
                     continue;
                 }
@@ -616,6 +647,7 @@ struct Soigneur
     uint32 seuil = 0;
     uint32 finS = 0;
     std::string origine;
+    bool banc = false;         // patient bot (option Directeur.ImprevuBanc a la pose)
     uint32 assistanceS = 0;    // Maintenant() de la derniere assistance
     uint32 autreCarteS = 0;    // Maintenant() depuis lequel ils sont sur deux cartes, 0 : non
     uint32 assistances = 0;
@@ -674,7 +706,10 @@ Player* PatientImpose(Player* bot)
         return nullptr;
     // Carte du bot seulement (GetPlayer(WorldObject, guid) -> GetPlayer(u.GetMap(), guid)) : P-137.
     Player* p = ObjectAccessor::GetPlayer(*bot, ObjectGuid::Create<HighGuid::Player>(patient));
-    if (!p || p == bot || !p->IsInWorld() || !p->IsAlive() || p->GetMapId() != bot->GetMapId() || !Humain(p))
+    // Banc (option ImprevuBanc) : un bot patient aussi ; son statut de bot aleatoire a ete verifie a la pose et chaque
+    // seconde (fil monde, SuivreSoigneurs : `banc`). Ici, fil de carte : seulement le moteur et l'option.
+    if (!p || p == bot || !p->IsInWorld() || !p->IsAlive() || p->GetMapId() != bot->GetMapId() ||
+        !(Humain(p) || (sPlayerbotAIConfig.directeurImprevuBanc && GET_PLAYERBOT_AI(p))))
         return nullptr;
     // Soigner un porteur du drapeau JcJ le pose au soigneur (Spell.cpp:3005-3008) : jamais (n° 15). FFA : le soin
     // serait refuse hors groupe (P-168) et mettrait le sort au banc.
@@ -714,15 +749,16 @@ void NoterSoinPatient(Unit* soigneur, Unit* receveur, uint32 gain)
 }
 
 void JournaliserSoigner(uint32 id, uint32 bot, uint32 patient, char const* statut, char const* raison,
-                        std::string const& suite = std::string())
+                        std::string const& suite = std::string(), bool banc = false)
 {
-    LOG_INFO("playerbots", "coa directeur soigner: id={} bot={} patient={} statut={} raison={}{}", id, bot, patient,
-             statut, raison ? raison : "-", suite);
+    LOG_INFO("playerbots", "coa directeur soigner: id={} bot={} patient={} statut={} raison={}{}{}", id, bot, patient,
+             statut, raison ? raison : "-", suite, banc ? " banc=1" : "");
 }
 
 void RefuserSoigner(CoaDirCommande const& c, char const* raison)
 {
-    JournaliserSoigner(c.id, c.cible, c.joueur, "refuse", raison);
+    JournaliserSoigner(c.id, c.cible, c.joueur, "refuse", raison, std::string(),
+                       c.joueur && BotDeBanc(JoueurConnecte(c.joueur)));
     Refuser(c, raison);
 }
 
@@ -782,11 +818,12 @@ void ExecuterSoigner(CoaDirCommande const& c)
         RefuserSoigner(c, "hors_ligne");
         return;
     }
-    if (!Humain(p))
+    if (!CibleImprevu(p))
     {
         RefuserSoigner(c, "pas_humain");
         return;
     }
+    bool const banc = !Humain(p);   // patient bot : option ImprevuBanc (seul cas admis ci-dessus)
     if (!PlayerbotAI::IsHeal(bot))
     {
         RefuserSoigner(c, "pas_soigneur");
@@ -797,7 +834,9 @@ void ExecuterSoigner(CoaDirCommande const& c)
         RefuserSoigner(c, "bot_mort");
         return;
     }
-    if (!PresenceArrivee(c.cible, c.joueur, &c, nullptr, true))
+    // Banc : un bot patient n'a pas de presence autour de lui (peupler exige un humain, sauf ancre d'evenement) ; le
+    // soigneur doit seulement etre a SOIGNER_PORTEE_YD de lui pour soigner (PatientImpose) : au service de le choisir.
+    if (!banc && !PresenceArrivee(c.cible, c.joueur, &c, nullptr, true))
     {
         RefuserSoigner(c, "sans_presence");
         return;
@@ -846,12 +885,13 @@ void ExecuterSoigner(CoaDirCommande const& c)
     s.seuil = uint32(c.valeur);
     s.finS = Maintenant() + c.dureeS;
     s.origine = c.origine;
+    s.banc = banc;
     if (it != soigneurs.end())
     {
         Soigneur const ancien = *it;
         *it = s;
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
-        JournaliserSoigner(ancien.id, ancien.bot, ancien.patient, "remplace", "remplace");
+        JournaliserSoigner(ancien.id, ancien.bot, ancien.patient, "remplace", "remplace", std::string(), ancien.banc);
         if (source)
             source->Clore(ancien.id, "remplace", "remplace");
     }
@@ -861,7 +901,7 @@ void ExecuterSoigner(CoaDirCommande const& c)
     PublierSoigneurs();
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     JournaliserSoigner(c.id, c.cible, c.joueur, "execute", nullptr,
-                       Acore::StringFormat(" seuil={} duree_s={} origine={}", c.valeur, c.dureeS, c.origine));
+                       Acore::StringFormat(" seuil={} duree_s={} origine={}", c.valeur, c.dureeS, c.origine), banc);
     Accuser(c, "execute", nullptr);
 }
 
@@ -904,7 +944,7 @@ bool Assister(Soigneur& s, Player* bot, Player* p, uint32 maintenant)
     ++sdAssistances;
     JournaliserSoigner(s.id, s.bot, s.patient, "assistance", nullptr,
                        Acore::StringFormat(" creature={}:{} pv={:.0f}", choisie->GetEntry(), choisie->GetGUID().GetCounter(),
-                                           p->GetHealthPct()));
+                                           p->GetHealthPct()), s.banc);
     return true;
 }
 
@@ -935,9 +975,11 @@ void SuivreSoigneurs()
         }
         else if (!bot || !GET_PLAYERBOT_AI(bot) || !p)
             raison = "hors_ligne";
+        else if (s.banc && p->IsInWorld() && !BotDeBanc(p))   // option remise a 0, ou patient sous un maitre humain
+            raison = "banc";
         else if (CoaDirecteur::EstArrete(s.patient))
             raison = "arret";
-        else if (!PresenceArrivee(s.bot, s.patient, nullptr, &s.origine, false))
+        else if (!s.banc && !PresenceArrivee(s.bot, s.patient, nullptr, &s.origine, false))
             raison = "presence";
         else if (HighRisk(p) || p->IsFFAPvP())
             raison = "ffa";
@@ -957,7 +999,7 @@ void SuivreSoigneurs()
         if (raison)
         {
             JournaliserSoigner(s.id, s.bot, s.patient, naturelle ? "fin" : "leve", raison,
-                               Acore::StringFormat(" assistances={}", s.assistances));
+                               Acore::StringFormat(" assistances={}", s.assistances), s.banc);
             if (!naturelle)
             {
                 CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
@@ -1006,7 +1048,8 @@ size_t LeverImprevuSi(Predicat lever, char const* raison)
             ++i;
             continue;
         }
-        JournaliserSoigner(s.id, s.bot, s.patient, "leve", raison, Acore::StringFormat(" assistances={}", s.assistances));
+        JournaliserSoigner(s.id, s.bot, s.patient, "leve", raison, Acore::StringFormat(" assistances={}", s.assistances),
+                           s.banc);
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
         if (source)
             source->Clore(s.id, "leve", raison);

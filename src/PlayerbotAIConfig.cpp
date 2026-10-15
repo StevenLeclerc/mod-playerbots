@@ -899,6 +899,7 @@ bool PlayerbotAIConfig::Initialize()
     // impose a un bot soigneur deja present). Eteints par defaut.
     directeurAttirer = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Attirer", false);
     directeurSoigneurs = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Soigneurs", false);
+    directeurImprevuBanc = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ImprevuBanc", false);
     // Lot C des evenements (04/10/2026) : defauts = ids notes ✔ au banc du 04/10 (verdicts :
     // coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md), sauf 10008 (« rien » au banc, volume
     // 0,12 au DBC). 45213 (nuage d'orage, ✘ au banc pose sur le joueur) n'est dans AUCUN defaut :
