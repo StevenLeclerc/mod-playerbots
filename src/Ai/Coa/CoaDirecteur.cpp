@@ -10544,10 +10544,11 @@ std::string Joueur(std::string const& texte)
     // Reserve de chasseurs (02/10) : 15e champ, EN FIN de ligne (un lecteur qui
     // s'arrete au 14e ne voit rien changer) : 1 si le joueur est AFK.
     out << ',' << (p->isAFK() ? 1 : 0);
-    // Lot D5 (15/10/2026, etude § 3.2) : 16e champ `soin`, EN FIN de ligne : 1 si le personnage est un soigneur par
-    // sa SPECIALISATION (PlayerbotAI::IsHeal(p, true) : role CoA Heal, ou arbre de soin des classes de base), humain
-    // comme bot. Les 15 premiers champs sont inchanges.
-    out << ',' << (PlayerbotAI::IsHeal(p, true) ? 1 : 0);
+    // Lot D5 (15/10/2026, etude § 3.2) : 16e champ `soin`, EN FIN de ligne. PlayerbotAI::IsHeal(p) (bySpec faux),
+    // EXACTEMENT le test du refus `pas_soigneur` de `soigner` : pour un BOT, une strategie de type soin dans un de ses
+    // moteurs (« coa heal », « heal » : ce sont elles qui lisent « party member to heal », donc JoueurASoigner) ; pour
+    // un humain (sans moteur), sa specialisation. Les 15 premiers champs sont inchanges.
+    out << ',' << (PlayerbotAI::IsHeal(p) ? 1 : 0);
     return out.str();
 }
 }  // namespace

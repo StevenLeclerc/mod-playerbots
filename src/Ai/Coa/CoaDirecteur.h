@@ -571,8 +571,8 @@ void Compter(CoaDirCompteur c);
 // Requete neuve du 8888 (lecture seule, fil monde) :
 //   joueur,<guid> -> guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo,afk
 // (`afk`, 15e champ, 02/10 : 1 si PLAYER_FLAGS_AFK, EN FIN de ligne)
-// (`soin`, 16e champ, lot D5 du 15/10 : 1 si PlayerbotAI::IsHeal(p, true) -- soigneur par sa specialisation --,
-//  EN FIN de ligne ; les 15 premiers champs inchanges)
+// (`soin`, 16e champ, lot D5 du 15/10 : 1 si PlayerbotAI::IsHeal(p) -- bot : strategie de soin, le test du refus
+//  `pas_soigneur` ; humain : specialisation --, EN FIN de ligne ; les 15 premiers champs inchanges)
 // `absent` si le personnage n'est pas en jeu, `invalid` si mal formee OU bus eteint.
 
 // ------------------------------------------------------------------ lot F des evenements (06/10/2026)
