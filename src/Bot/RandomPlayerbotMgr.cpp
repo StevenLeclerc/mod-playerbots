@@ -5,6 +5,7 @@
  */
 
 #include "RandomPlayerbotMgr.h"
+#include "CoaGelBanc.h"
 #include "AiFactory.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
@@ -1373,6 +1374,11 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
     Player* player = GetPlayerBot(botGUID);
     PlayerbotAI* botAI = player ? GET_PLAYERBOT_AI(player) : nullptr;
 
+    // CoA -- banc de garde G1 : bot gele (CoaGelBanc.h), ni mise a jour, ni refonte, ni teleportation, ni
+    // deconnexion de rotation tant que la cle est posee. Sans la cle : aucun effet.
+    if (player && CoaGelBanc(player))
+        return false;
+
     uint32 isValid = GetEventValue(bot, "add");
     if (!isValid)
     {
@@ -1480,6 +1486,10 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
 
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (!botAI)
+        return false;
+
+    // CoA -- banc de garde G1 : aussi par RandomBotUpdateAction, qui passe en combat (CoaGelBanc.h).
+    if (CoaGelBanc(bot))
         return false;
 
     if (bot->InBattleground())
@@ -1645,7 +1655,7 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
     // Banc d'essai de prime (03/10/2026) : ni la cible d'un banc (Directeur.PrimeBanc).
     if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), nullptr) ||
         CoaDirecteur::PrepareRecemment(bot->GetGUID().GetCounter()) ||
-        CoaDirecteur::CibleDeBanc(bot->GetGUID().GetCounter()))
+        CoaDirecteur::CibleDeBanc(bot->GetGUID().GetCounter()) || CoaGelBanc(bot))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_SUSPENDUS);
         return;
