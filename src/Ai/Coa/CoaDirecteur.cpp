@@ -9,6 +9,7 @@
 
 #include "Channel.h"
 #include "ChannelMgr.h"
+#include "CellImpl.h"   // lot D5 : creatures autour du joueur (attirer)
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "Corpse.h"
@@ -17,6 +18,8 @@
 #include "DBCStores.h"
 #include "GameTime.h"
 #include "GridDefines.h"
+#include "GridNotifiers.h"       // lot D5
+#include "GridNotifiersImpl.h"   // lot D5
 #include "GridTerrainData.h"
 #include "Group.h"
 #include "GroupMgr.h"
@@ -34,6 +37,7 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Opcodes.h"
+#include "PathGenerator.h"   // lot D5 : chemin de la creature attiree
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
@@ -700,6 +704,8 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Chasser:             return "chasser";
         case CoaDirVerbe::Recompenser:         return "recompenser";
         case CoaDirVerbe::Evenement:           return "evenement";
+        case CoaDirVerbe::Attirer:             return "attirer";
+        case CoaDirVerbe::Soigner:             return "soigner";
         default:                               return "inconnu";
     }
 }
@@ -720,6 +726,8 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "chasser")              return CoaDirVerbe::Chasser;
     if (nom == "recompenser")          return CoaDirVerbe::Recompenser;
     if (nom == "evenement")            return CoaDirVerbe::Evenement;
+    if (nom == "attirer")              return CoaDirVerbe::Attirer;
+    if (nom == "soigner")              return CoaDirVerbe::Soigner;
     return CoaDirVerbe::Inconnu;
 }
 
@@ -753,6 +761,13 @@ bool VerbeEv(CoaDirVerbe v)
     return v == CoaDirVerbe::Evenement;
 }
 
+// Lot D5 « l'imprevu » (15/10/2026) : `attirer` et `soigner` exigent l'ENUM R3 en tete ET les valeurs
+// 'attirer' et 'soigner' (controle « contient », ColonnesImprevu) ; ils lisent `texte` et `valeur` (colonnes D3).
+bool VerbeImprevu(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Attirer || v == CoaDirVerbe::Soigner;
+}
+
 CoaDirCanal CanalDe(std::string const& nom)
 {
     if (nom.empty())       return CoaDirCanal::Aucun;
@@ -784,7 +799,7 @@ char const* NomCanal(CoaDirCanal c)
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v);
+           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v) || VerbeImprevu(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -866,6 +881,7 @@ public:
         _colonnesD4 = false;
         _colonnesR = false;
         _colonnesEv = false;
+        _colonnesImprevu = false;
         QueryResult colonnes = CharacterDatabase.Query(
             "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
@@ -899,6 +915,10 @@ public:
         // soigner, evenement : un chantier livre dans le desordre n'eteint pas les autres).
         // Entre apostrophes : 'evenement_x' ne la contient pas.
         _colonnesEv = _colonnesR && typeVerbe.find(",'evenement'") != std::string::npos;
+        // Lot D5 (15/10/2026) : meme regle « contient », les deux valeurs (lues en base le 15/10 :
+        // ...,'recompenser','pister','attirer','soigner','evenement').
+        _colonnesImprevu = _colonnesR && typeVerbe.find(",'attirer'") != std::string::npos &&
+                           typeVerbe.find(",'soigner'") != std::string::npos;
         if (_colonnesD3)
             LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
         else
@@ -917,6 +937,10 @@ public:
             LOG_INFO("playerbots", "coa directeur : colonnes evenement presentes, verbe evenement lisible");
         else
             LOG_INFO("playerbots", "coa directeur : colonnes evenement absentes, verbe evenement inerte");
+        if (_colonnesImprevu)
+            LOG_INFO("playerbots", "coa directeur : colonnes imprevu presentes, verbes attirer et soigner lisibles");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes imprevu absentes, verbes attirer et soigner inertes");
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -1037,6 +1061,7 @@ public:
     bool ColonnesD4() const override { return _colonnesD4; }
     bool ColonnesRecompense() const override { return _colonnesR; }
     bool ColonnesEvenement() const override { return _colonnesEv; }
+    bool ColonnesImprevu() const override { return _colonnesImprevu; }
 
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
@@ -1086,6 +1111,7 @@ private:
     bool _colonnesD4 = false;
     bool _colonnesR = false;
     bool _colonnesEv = false;
+    bool _colonnesImprevu = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -4094,6 +4120,10 @@ bool EstBarricade(std::string const& t);
 void ExecuterBarricade(CoaDirCommande const& c);
 template <typename Predicat>
 size_t LeverBarricadesSi(Predicat lever, char const* raison);
+// Lot D5 (15/10/2026) : creatures attirees et soigneurs, definis dans CoaDirecteurImprevu.inc. Leves avec les
+// evenements (memes trois appelants : `lever`, `.directeur stop`, bus eteint), predicat (id, joueur).
+template <typename Predicat>
+size_t LeverImprevuSi(Predicat lever, char const* raison);
 
 void ExecuterEvenement(CoaDirCommande const& c)
 {
@@ -4374,7 +4404,8 @@ size_t LeverEvenementsSi(Predicat lever, char const* raison)
     size_t const invoques = LeverInvoquesSi(lever, raison) + LeverPortailsSi(lever, raison) +   // + lot P
                             LeverCoffresSi(lever, raison) +                                      // + lot G
                             LeverObjectifsSi(lever, raison) +                                    // + objectifs
-                            LeverBarricadesSi(lever, raison);                                    // + convoi v2
+                            LeverBarricadesSi(lever, raison) +                                   // + convoi v2
+                            LeverImprevuSi(lever, raison);                                       // + lot D5
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
         return invoques;
     std::vector<EvAmbiance> ambiances;
@@ -6532,6 +6563,9 @@ void TracerMortEntrePactes(Player* victime, Player* tueur, Creature* familier)
 }
 
 // Lot S des evenements (08/10/2026) : le soin des bots envers le joueur (fragment a part, meme espace de noms).
+// Lot D5 « l'imprevu » (15/10/2026) : verbes `attirer` et `soigner` (fragment a part, meme espace ; AVANT le lot S,
+// dont JoueurASoigner consulte le patient impose).
+#include "CoaDirecteurImprevu.inc"
 #include "CoaDirecteurSoin.inc"
 // Vrai groupe (09/10/2026) : les inscrits rejoignent le groupe du joueur servi (fragment a part, meme espace de noms).
 #include "CoaDirecteurGroupe.inc"
@@ -6957,6 +6991,10 @@ void Entretien(uint32 diff)
     // Lot S des evenements : inscrits, lieux (gardes des soins), reliquat. AVANT PublierCiblesEvenement, qui lit et
     // remet a zero ses compteurs ; place loin de l'appel du lot P pour ne pas heurter le lot G a la fusion.
     SuivreSoinsEvenement();
+    // Lot D5 (15/10/2026) : creatures attirees (course, engagement, laisse, borne anti-traine, retour), puis soigneurs
+    // (echeances, assistance, publication pour les fils de carte). Sans registre : un test chacun.
+    SuivreAttires();
+    SuivreSoigneurs();
     // Lot D des evenements : invoques (morts, retraits hors de vue, joueur parti, fins de lot).
     SuivreInvoques();
     // Lot P des evenements : portails a refermer (clics, echeances).
@@ -10103,6 +10141,12 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "colonnes_evenement");
         return;
     }
+    // 3 sexies (lot D5, 15/10/2026). `attirer` / `soigner` sans les valeurs d'ENUM au demarrage.
+    if (VerbeImprevu(c.verbe) && (!source || !source->ColonnesImprevu() || !source->ColonnesD3()))
+    {
+        Refuser(c, "colonnes_imprevu");
+        return;
+    }
     // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
     // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
     // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
@@ -10178,6 +10222,12 @@ void Recevoir(CoaDirCommande const& c)
         case CoaDirVerbe::Evenement:
             ExecuterEvenement(c);
             break;
+        case CoaDirVerbe::Attirer:
+            ExecuterAttirer(c);
+            break;
+        case CoaDirVerbe::Soigner:
+            ExecuterSoigner(c);
+            break;
         default:
             Refuser(c, "verbe_eteint");   // inatteignable : VerbeImplemente l'a filtre
             break;
@@ -10216,7 +10266,7 @@ void Bilan()
              " primes_echues={} primes_levees={} proies_imposees={} traques_prime={} meute_permise={}"
              " morts_tracees={} morts_perdues={} primes_actives={} chasseurs_actifs={} teleports_lointains={}"
              " paroles_hors_vue={} missions={} missions_ignorees={} missions_degradees={} patrouilles={}"
-             " bandes_recalees={} bandes_rejointes={} ecartes_pacte_bots={} morts_entre_pactes={}",
+             " bandes_recalees={} bandes_rejointes={} ecartes_pacte_bots={} morts_entre_pactes={}{}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -10245,7 +10295,8 @@ void Bilan()
              nbChasseurs.load(std::memory_order_relaxed), Lire(COA_DIR_TELEPORTS_LOINTAINS),
              Lire(COA_DIR_PAROLES_HORS_VUE), Lire(COA_DIR_MISSIONS), Lire(COA_DIR_MISSIONS_IGNOREES),
              Lire(COA_DIR_MISSIONS_DEGRADEES), Lire(COA_DIR_PATROUILLES), Lire(COA_DIR_BANDES_RECALEES),
-             Lire(COA_DIR_BANDES_REJOINTES), Lire(COA_DIR_ECARTE_PACTE_BOTS), Lire(COA_DIR_MORTS_ENTRE_PACTES));
+             Lire(COA_DIR_BANDES_REJOINTES), Lire(COA_DIR_ECARTE_PACTE_BOTS), Lire(COA_DIR_MORTS_ENTRE_PACTES),
+             BilanImprevu());   // lot D5 : ` attires= engages= rentres= actifs= ...`, EN FIN de ligne
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -10487,6 +10538,10 @@ std::string Joueur(std::string const& texte)
     // Reserve de chasseurs (02/10) : 15e champ, EN FIN de ligne (un lecteur qui
     // s'arrete au 14e ne voit rien changer) : 1 si le joueur est AFK.
     out << ',' << (p->isAFK() ? 1 : 0);
+    // Lot D5 (15/10/2026, etude § 3.2) : 16e champ `soin`, EN FIN de ligne : 1 si le personnage est un soigneur par
+    // sa SPECIALISATION (PlayerbotAI::IsHeal(p, true) : role CoA Heal, ou arbre de soin des classes de base), humain
+    // comme bot. Les 15 premiers champs sont inchanges.
+    out << ',' << (PlayerbotAI::IsHeal(p, true) ? 1 : 0);
     return out.str();
 }
 }  // namespace

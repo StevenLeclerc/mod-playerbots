@@ -4397,3 +4397,32 @@ AiPlayerbot.Directeur.Reactions = 0
 #        0 : `fuite_monture` et `soudoiement` sont inconnus (cible passive) et `fuite_gardes` fuit une fois.
 #        Default: 0
 AiPlayerbot.Directeur.ReactionsT6 = 0
+
+###################################################################################################
+# DIRECTEUR, LOT D5 « L'IMPREVU », PARTIE JEU (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md)
+#
+#    Deux verbes du bus, inertes tant qu'ils ne sont pas dans AiPlayerbot.Directeur.Verbes ET que l'ENUM
+#    `verbe` de coa_dir_commande ne contient pas ,'attirer' et ,'soigner' (lu au demarrage : sinon
+#    `colonnes imprevu absentes` au journal et refus `colonnes_imprevu`).
+#    Lues par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
+#
+#    AiPlayerbot.Directeur.Attirer
+#        Verbe `attirer` (mode `patrouille` seul) : 1 a 3 creatures EXISTANTES (jamais invoquees), prises a
+#        120 yd au moins du joueur et a `rayon` (120-180) au plus, courent vers lui hors combat (tenues actives,
+#        setActive) et l'engagent a 25 yd. Laisse prolongee chaque seconde ; renvoyees (evasion) a 60 yd du point
+#        d'engagement, pres d'un autre humain (150 yd), en lieu sans JcJ, d'un chasseur ou d'un inscrit (60 yd),
+#        a l'echeance `duree_s` sans engagement, au stop, a la levee. Lignes `coa directeur attirer:`.
+#        0 : refus `attirer_eteint`, et les creatures en cours rentrent (raison `option`).
+#        Default: 0
+AiPlayerbot.Directeur.Attirer = 0
+
+#    AiPlayerbot.Directeur.Soigneurs
+#        Verbe `soigner` : le bot `cible`, soigneur (strategie de soin), deja ARRIVE a sa presence pres du joueur
+#        (meme proprietaire, comme une approche C-), compte ce joueur parmi ses cibles de soin (meme crochet que
+#        Directeur.EvenementSoins) jusqu'a `duree_s` (420 s au plus), quand ses PV sont sous `valeur` (40-70 %) ou
+#        que tous deux sont en combat. Hors combat, quand le patient est en combat et sous le seuil, le bot entre en
+#        combat contre une creature qui le frappe (assistance). Jamais pour un joueur High Risk/FFA (refus `ffa`) ni
+#        porteur du drapeau JcJ (refus `pvp`). Lignes `coa directeur soigner:`.
+#        0 : refus `soigner_eteint`, et les soigneurs en cours sont leves (raison `option`).
+#        Default: 0
+AiPlayerbot.Directeur.Soigneurs = 0

@@ -571,6 +571,8 @@ void Compter(CoaDirCompteur c);
 // Requete neuve du 8888 (lecture seule, fil monde) :
 //   joueur,<guid> -> guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo,afk
 // (`afk`, 15e champ, 02/10 : 1 si PLAYER_FLAGS_AFK, EN FIN de ligne)
+// (`soin`, 16e champ, lot D5 du 15/10 : 1 si PlayerbotAI::IsHeal(p, true) -- soigneur par sa specialisation --,
+//  EN FIN de ligne ; les 15 premiers champs inchanges)
 // `absent` si le personnage n'est pas en jeu, `invalid` si mal formee OU bus eteint.
 
 // ------------------------------------------------------------------ lot F des evenements (06/10/2026)
@@ -650,6 +652,9 @@ void NoterAssaillantsRetenus(size_t ajoutes, size_t retenus);
 // par le bot (Unit::IsValidAssistTarget : pas MJ, pas hostile, pas FFA si le bot ne l'est pas...) ; nul sinon.
 // Option AiPlayerbot.Directeur.EvenementSoins ETEINTE (defaut) : nul au premier chargement atomique, toujours.
 // Fil de carte du bot.
+// Lot D5 (15/10/2026, verbe `soigner`, CoaDirecteurImprevu.inc) : rend D'ABORD le patient IMPOSE a ce bot par le bus
+// (option AiPlayerbot.Directeur.Soigneurs), s'il est valide (humain, vivant, sans drapeau JcJ ni FFA, a 60 yd,
+// assistable, sous le seuil ou tous deux en combat). Sans soigneur publie : un chargement atomique de plus.
 Player* JoueurASoigner(Player* bot);
 // PartyMemberToHeal::Calculate a retenu le joueur servi comme cible de soin (bilan `soin_choix=`). Fil de carte.
 void NoterSoinChoisi();

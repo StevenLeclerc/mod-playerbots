@@ -591,6 +591,11 @@ public:
     // un pot-de-vin au chasseur), et la seconde fuite de `fuite_gardes`. Faux (defaut) : ces deux noms sont inconnus
     // (cible passive, journalise une fois) et `fuite_gardes` fuit une seule fois, comme T5.
     bool directeurReactionsT6;
+    // Lot D5 « l'imprevu », partie jeu (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md § 3.1, § 3.2 ;
+    // code dans Ai/Coa/CoaDirecteurImprevu.inc). Faux (defaut) : les verbes `attirer` et `soigner` sont refuses
+    // `attirer_eteint` / `soigner_eteint` (meme listes dans Directeur.Verbes), le registre se vide a la seconde.
+    bool directeurAttirer;
+    bool directeurSoigneurs;
     // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3) :
     // inertes tant que `evenement` n'est pas dans directeurVerbes. LISTES BLANCHES FERMEES des ids
     // qu'une commande `evenement` peut jouer (« id,id », lecture stricte : un morceau mal forme et

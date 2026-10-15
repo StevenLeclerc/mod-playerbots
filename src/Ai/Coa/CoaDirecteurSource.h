@@ -51,6 +51,9 @@ enum class CoaDirVerbe : uint8
     // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 5.1),
     // AVANT Inconnu : `texte` = sous-action (ambiance, son, musique, effet, annoncer), `valeur` = id.
     Evenement,
+    // Lot D5 « l'imprevu » (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md § 3.1-3.2), AVANT Inconnu :
+    Attirer,        // 1 a 3 creatures existantes courent vers le joueur `joueur` (cible 0, texte `patrouille`)
+    Soigner,        // le bot `cible` soigne le joueur `joueur` (valeur = seuil de PV, duree_s <= 420)
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
 };
 
@@ -146,6 +149,12 @@ public:
     // evenement) ? Faux : `evenement` est refuse `colonnes_evenement`, tous les autres verbes
     // passent. Vrai implique ColonnesRecompense().
     virtual bool ColonnesEvenement() const { return false; }
+
+    // Lot D5 (15/10/2026). L'ENUM de `verbe` porte-t-il les treize valeurs R3 en tete ET contient-il
+    // 'attirer' et 'soigner' (ordre commun : recompenser, pister, attirer, soigner, evenement ; controle
+    // « contient ») ? Faux : `attirer` et `soigner` sont refuses `colonnes_imprevu`, les autres verbes passent.
+    // Vrai implique ColonnesRecompense().
+    virtual bool ColonnesImprevu() const { return false; }
 };
 
 #endif
