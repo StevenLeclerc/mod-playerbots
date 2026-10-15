@@ -152,7 +152,9 @@ bool BotDeBanc(Player* p)
     if (!sPlayerbotAIConfig.directeurImprevuBanc || !p || !p->IsInWorld())
         return false;
     PlayerbotAI* ia = GET_PLAYERBOT_AI(p);
-    return ia && !ia->HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(p);
+    // Revue de 662e243 (m3) : jamais un mercenaire (meme regle que AncreDEvenement ; FFA, il serait refuse `ffa`
+    // de toute facon pour `soigner`, et sa chasse fausserait un banc `attirer`).
+    return ia && !ia->HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(p) && !MercenaryRewards::EstMercenaire(p);
 }
 
 bool CibleImprevu(Player* p)
@@ -708,9 +710,15 @@ Player* PatientImpose(Player* bot)
     Player* p = ObjectAccessor::GetPlayer(*bot, ObjectGuid::Create<HighGuid::Player>(patient));
     // Banc (option ImprevuBanc) : un bot patient aussi ; son statut de bot aleatoire a ete verifie a la pose et chaque
     // seconde (fil monde, SuivreSoigneurs : `banc`). Ici, fil de carte : seulement le moteur et l'option.
-    if (!p || p == bot || !p->IsInWorld() || !p->IsAlive() || p->GetMapId() != bot->GetMapId() ||
-        !(Humain(p) || (sPlayerbotAIConfig.directeurImprevuBanc && GET_PLAYERBOT_AI(p))))
+    if (!p || p == bot || !p->IsInWorld() || !p->IsAlive() || p->GetMapId() != bot->GetMapId())
         return nullptr;
+    if (!Humain(p))
+    {
+        // Revue de 662e243 (m1) : bot patient sans maitre humain (lu sur le fil de carte, meme carte que le bot).
+        PlayerbotAI* iaPatient = sPlayerbotAIConfig.directeurImprevuBanc ? GET_PLAYERBOT_AI(p) : nullptr;
+        if (!iaPatient || iaPatient->HasGameClientMaster())
+            return nullptr;
+    }
     // Soigner un porteur du drapeau JcJ le pose au soigneur (Spell.cpp:3005-3008) : jamais (n° 15). FFA : le soin
     // serait refuse hors groupe (P-168) et mettrait le sort au banc.
     if (p->IsPvP() || p->IsFFAPvP())
@@ -864,6 +872,12 @@ void ExecuterSoigner(CoaDirCommande const& c)
     if (p->GetMapId() != bot->GetMapId())
     {
         RefuserSoigner(c, "carte");
+        return;
+    }
+    // Revue de 662e243 (m2) : en banc, aucune presence n'amene le soigneur ; il doit deja etre a portee.
+    if (banc && !bot->IsWithinDistInMap(p, SOIGNER_PORTEE_YD))
+    {
+        RefuserSoigner(c, "loin");
         return;
     }
     // Revue de 873cb21 (mineur 3) : faction opposee, duel, MJ, sanctuaire... : le soin serait refuse.

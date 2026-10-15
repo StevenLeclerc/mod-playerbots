@@ -4428,8 +4428,9 @@ AiPlayerbot.Directeur.Attirer = 0
 AiPlayerbot.Directeur.Soigneurs = 0
 
 #    AiPlayerbot.Directeur.ImprevuBanc
-#        Banc avec les bots en jeu (15/10/2026) : `attirer` admet un BOT ALEATOIRE (sans maitre humain) comme `joueur`,
-#        `soigner` un bot comme patient (sans presence exigee : le soigneur doit etre a 60 yd de lui). Tous les autres
+#        Banc avec les bots en jeu (15/10/2026) : `attirer` admet un BOT ALEATOIRE (sans maitre humain, non
+#        mercenaire) comme `joueur`, `soigner` un bot comme patient (sans presence exigee : le soigneur doit deja etre
+#        a 60 yd de lui, sinon refus `loin`). Tous les autres
 #        refus restent ; `humain_proche` ne compte que les vrais humains. Le bot vise n'est ni groupe ni deplace.
 #        Lignes `coa directeur attirer:` / `soigner:` d'un bot : `banc=1` en fin de ligne. Remise a 0 : les entrees
 #        de banc en cours sortent (raison `banc`).

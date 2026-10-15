@@ -11443,12 +11443,15 @@ std::string ChampOnglet(Field const& f)
 
 // Lot D5 (15/10/2026) : derniere audace / opt-in lus pour l'onglet, par guid, SOUS verrouOnglet. Remplis par une
 // requete ASYNCHRONE (processeur de la session du joueur) posee a chaque demande `TOUT` : le fil monde n'attend
-// jamais MySQL pour cette ligne. La valeur montree est donc celle de la demande precedente (2 s au plus en regime ;
-// vide -- « inconnue » pour l'addon -- a la toute premiere demande, l'addon retombe alors sur son dernier envoi).
+// jamais MySQL pour cette ligne. La valeur disponible est celle lue pour la demande precedente ; elle n'est servie
+// que si elle a moins de IMPREVU_ONGLET_AGE_MS. Sinon (premiere demande, onglet rouvert apres une pause) la ligne `^A`
+// est OMISE : l'addon retombe sur son dernier envoi au lieu de montrer un etat perime comme celui du serveur.
+constexpr uint32 IMPREVU_ONGLET_AGE_MS = 3000;
 struct ImprevuOnglet
 {
     std::string audace;   // coa_dir_audace.niveau du COMPTE, vide sans ligne
     std::string optin;    // coa_dir_imprevu_optin.optin du personnage, "1"/"0", vide sans ligne
+    uint32 luMs = 0;      // getMSTime() a la reception du resultat
 };
 std::unordered_map<uint32, ImprevuOnglet> imprevuOnglet;
 
@@ -11470,6 +11473,7 @@ void RelireImprevuOnglet(uint32 guid, WorldSession* session)
         [guid](QueryResult r)
         {
             ImprevuOnglet e;
+            e.luMs = getMSTime();
             if (r)
             {
                 Field* f = r->Fetch();
@@ -11579,16 +11583,22 @@ std::string CorpsOnglet(uint32 guid, WorldSession* session)
         }
     }
     // Lot D5 (15/10/2026) : `^A|audace|optin` (CoABounty 1.7, Lire : c[1] == "A"), EN FIN avant `F` : un addon
-    // d'avant ignore la ligne. Valeurs du cache (requete asynchrone de la demande precedente), vides si inconnues.
+    // d'avant ignore la ligne. Valeurs du cache (requete asynchrone de la demande precedente), vides si la ligne
+    // manque en base ; ligne OMISE si le cache est absent ou a IMPREVU_ONGLET_AGE_MS ou plus (revue de 154446f).
     {
+        bool frais = false;
         ImprevuOnglet e;
         {
             std::lock_guard<std::mutex> garde(verrouOnglet);
             auto it = imprevuOnglet.find(guid);
-            if (it != imprevuOnglet.end())
+            if (it != imprevuOnglet.end() && getMSTimeDiff(it->second.luMs, getMSTime()) < IMPREVU_ONGLET_AGE_MS)
+            {
                 e = it->second;
+                frais = true;
+            }
         }
-        corps += Acore::StringFormat("^A|{}|{}", e.audace, e.optin);
+        if (frais)
+            corps += Acore::StringFormat("^A|{}|{}", e.audace, e.optin);
         RelireImprevuOnglet(guid, session);
     }
     corps += "^F";
