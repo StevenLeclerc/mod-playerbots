@@ -5,6 +5,7 @@
  */
 
 #include "CoaRegistreCombat.h"
+#include "CoaGelBanc.h"
 #include "PlayerbotAI.h"
 #include "CoaSpecialization.h"
 #include "CoaBancSoin.h"
@@ -742,6 +743,16 @@ void PlayerbotAI::UpdateAIInternal([[maybe_unused]] uint32 elapsed, bool minimal
     botOutgoingPacketHandlers.Handle(helper);
     masterIncomingPacketHandlers.Handle(helper);
     masterOutgoingPacketHandlers.Handle(helper);
+
+    // CoA -- banc de garde G1 : hors combat, un bot gele n'agit pas (ni cible, ni trajet, ni objet) ; en combat il
+    // se bat normalement contre ce qui l'attaque (CoaGelBanc.h). Sans la cle : aucun effet.
+    if (CoaGelBanc(bot) && !bot->IsInCombat())
+    {
+        SetNextCheckDelay(sPlayerbotAIConfig.reactDelay);
+        if (pmo)
+            pmo->finish();
+        return;
+    }
 
     DoNextAction(minimal);
 

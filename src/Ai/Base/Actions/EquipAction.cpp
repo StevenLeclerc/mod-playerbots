@@ -5,6 +5,7 @@
  */
 
 #include "EquipAction.h"
+#include "CoaGelBanc.h"
 #include "Event.h"
 #include "ItemCountValue.h"
 #include "ItemPackets.h"
@@ -64,6 +65,9 @@ void EquipAction::EquipItem(FindItemVisitor* visitor)
 
 void EquipAction::EquipItem(Item* item)
 {
+    // CoA -- banc de garde G1 : equipement gele (CoaGelBanc.h). Sans la cle : aucun effet.
+    if (CoaGelBanc(bot))
+        return;
     uint8 bagIndex = item->GetBagSlot();
     uint8 slot = item->GetSlot();
     ItemTemplate const* itemProto = item->GetTemplate();
