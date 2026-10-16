@@ -111,6 +111,9 @@ struct CoaAbility
     // rendu tel quel quand AiPlayerbot.CoaIa.Classement vaut 0. `marques` : voir CoaMarque.
     uint16 kindAncien = 0;
     uint16 marques = 0;
+    // Revue du 16/10 : la surcharge de ce sort ne vaut que pour une specialisation de role Heal (CoaSurcharge::soigneur) ;
+    // toute autre specialisation garde kindAncien.
+    bool surchargeSoigneur = false;
 };
 
 struct ClassKit
@@ -623,6 +626,10 @@ struct CoaSurcharge
     uint16 ajoute;
     uint16 retire;
     uint8 force;
+    // Revue du 16/10 : sort a double usage FORCE EN SOIN (C3). La surcharge ne vaut que pour une specialisation de role
+    // Heal (GetCoaRole, CoaSpecStrategies.h) ; les autres gardent le classement d'avant (kindAncien), donc leur usage
+    // offensif, et ne le lancent jamais sur elles-memes (sorts hostiles, exclus des soins sur soi).
+    bool soigneur = false;
 };
 
 constexpr CoaSurcharge CoaSurcharges[] =
@@ -649,17 +656,21 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // Solar Invocation: Revelation (Sun Cleric 46-48, 98 ; C3). TargetA 25 : enracine un ennemi OU soigne un allie
     // (declenches 680702 et 680701). Range en attaque (Live : x879), jamais en soin. Soin d'un allie ; perte assumee de
     // l'enracinement. Recharge de categorie 767 partagee avec Solar Invocation: Ascension.
-    { 503651, KIND_HEAL | KIND_ALLY_CAST, KIND_HOSTILE | KIND_CONTROL | KIND_DAMAGE | KIND_AOE | KIND_INTERRUPT, 0 },
+    // Revue : soigneurs seulement (`soigneur`) -- la categorie 767 est partagee avec Ascension, Conquest et Resplendence :
+    // un Sun Cleric de degats perdait son enracinement, et un « coa soin soi » mettait ses Invocations offensives en
+    // recharge 30 s.
+    { 503651, KIND_HEAL | KIND_ALLY_CAST, KIND_HOSTILE | KIND_CONTROL | KIND_DAMAGE | KIND_AOE | KIND_INTERRUPT, 0, true },
     // Spirit Charge (Primalist 58 ; C3). Charge vers un allie, le soigne (TargetA 21) et frappe autour (TargetA 16) ;
     // SPELL_ATTR1_EXCLUDE_CASTER. « coa aoe » le visait sur l'ennemi : BAD_TARGETS (Live, code 12).
-    { 504570, KIND_HEAL | KIND_ALLY_CAST, KIND_HOSTILE | KIND_DAMAGE | KIND_AOE, 0 },
+    // Revue : soigneurs seulement -- le Primalist de degats garde son attaque de zone.
+    { 504570, KIND_HEAL | KIND_ALLY_CAST, KIND_HOSTILE | KIND_DAMAGE | KIND_AOE, 0, true },
     // Moonflow (Starcaller 43 ; C3). Soin de groupe et de raid (TargetA 56) ; le declenche 680803 (zone ennemie sous Lunar
     // Eclipse) le rangeait en attaque de zone : TARGET_NOT_PLAYER x54 a x281 par releve (SPELL_ATTR3_ONLY_ON_PLAYER).
-    { 575038, KIND_HEAL | KIND_GROUP_HEAL, KIND_HOSTILE | KIND_AOE | KIND_DAMAGE | KIND_CONTROL, 0 },
+    { 575038, KIND_HEAL | KIND_GROUP_HEAL, KIND_HOSTILE | KIND_AOE | KIND_DAMAGE | KIND_CONTROL, 0, true },
     // Kael's Command (Pyromancer 37 ; C3). Le Phenix s'endort (etourdissement 707060, d'ou KIND_CONTROL qui l'excluait de
     // tous les soins) et soigne en zone. Exige le Phenix (CasterAuraSpell 681128). HoT retire comme pour Ignis : recharge
     // 120 s, il ne doit pas partir a 85 % sur un seul membre.
-    { 800816, KIND_HEAL | KIND_GROUP_HEAL, KIND_CONTROL | KIND_HOT, 0 },
+    { 800816, KIND_HEAL | KIND_GROUP_HEAL, KIND_CONTROL | KIND_HOT, 0, true },
     // Fetid Ward (Necromancer 34, 36 ; C1b). Aura de 30 min (354 + 118) dont le soin declenche vise une zone : classee
     // HEAL|BUFF|GROUP_HEAL, refusee par « coa buff » (exclut HEAL) et par « coa defensive » (exclut GROUP_HEAL). Un buff.
     { 680388, KIND_BUFF, KIND_HEAL | KIND_GROUP_HEAL | KIND_SELF_HEAL | KIND_HOT | KIND_ALLY_CAST, 0 },
@@ -771,6 +782,7 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
                 if (surcharge)
                 {
                     ability.kind = uint16((ability.kind | surcharge->ajoute) & ~surcharge->retire);
+                    ability.surchargeSoigneur = surcharge->soigneur;
                     if (surcharge->ajoute & KIND_DEFENSIVE)
                         ability.marques &= ~uint16(MARQUE_DEFENSIF_FAIBLE);
                     ++surcharges;
@@ -858,6 +870,8 @@ std::vector<CoaKnownAbility> const& KnownKit(PlayerbotAI* botAI, Player* bot)
     if (found == all.end())
         return coaContext->knownKit;
 
+    // Revue du 16/10 : role lu une fois par construction du kit (CoaSurcharge::soigneur).
+    bool const soigneur = GetCoaRole(bot) == CoaRole::Heal;
     for (CoaAbility const& ability : found->second.abilities)
     {
         if (ability.requiredLevel > level || !bot->HasSpell(ability.spellId))
@@ -871,7 +885,8 @@ std::vector<CoaKnownAbility> const& KnownKit(PlayerbotAI* botAI, Player* bot)
         // Lot 1 : le classement choisi par AiPlayerbot.CoaIa.Classement ; a 0, ni les marques du lot 1 (soin d'autrui, cible
         // soi) ni le reste du nouveau classement. Les options sont relues a chaque construction (CoaKitLifeSeconds au plus).
         bool const lot1 = sPlayerbotAIConfig.coaIaClassement;
-        uint16 kind = lot1 ? ability.kind : ability.kindAncien;
+        // Revue du 16/10 : un sort force en soin ne l'est que pour un soigneur (CoaSurcharge::soigneur).
+        uint16 kind = lot1 && !(ability.surchargeSoigneur && !soigneur) ? ability.kind : ability.kindAncien;
         uint16 marques = ability.marques;
         if (!lot1)
             marques &= ~uint16(MARQUE_SOIN_SOI_SEUL | MARQUE_PAS_SUR_SOI);
