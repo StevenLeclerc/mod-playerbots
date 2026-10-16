@@ -790,6 +790,8 @@ public:
     bool coaIaAuraSurLanceur;    // lot 4 : « deja pose » lu sur le lanceur quand l'aura du sort est sur le lanceur
     bool coaIaTriSoins;          // lot 4 : soins tries par deficit de la cible et rendement en mana
     bool coaIaUtiliteAlignee;    // lot 4 : isUseful des soins et defensifs aligne sur ce que CastFirst refusera
+    bool coaIaFormeMaudite;      // lot 5 : Bloodmage sous lowHealth en combat -> forme maudite, puis ses defensifs de forme
+    bool coaIaVenomancerSoin;    // lot 5 : Venomancer sous 35 % en combat -> quitte sa forme, se soigne, la reprend
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;

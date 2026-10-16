@@ -296,6 +296,17 @@ public:
         uint8 tete = 0;  // prochain point a ecrire
     };
     CoaSurvieReleve survieReleve;
+
+    // IA soins/survie, lot 5 (16/10/2026, CoaAiObjectContext.cpp, CoaVenoEtat) : la forme du Venomancer quittee pour se
+    // soigner sous 35 %. `forme` 0 : aucune sortie en cours. `repriseMs` 0 : jamais repris (aucun ecart a respecter).
+    // Ecrit et lu par la seule IA de ce bot, sans verrou.
+    struct CoaVenoForme
+    {
+        uint32 forme = 0;      // Beetle Form 803183 ou Spider Form 800841, a reprendre
+        uint32 sortieMs = 0;   // getMSTime() de la sortie
+        uint32 repriseMs = 0;  // getMSTime() de la derniere reprise par ce lot
+    };
+    CoaVenoForme venoForme;
 };
 
 #endif

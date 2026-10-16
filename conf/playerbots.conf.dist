@@ -1672,6 +1672,21 @@ AiPlayerbot.CoaIa.TriSoins = 1
 # Default: 1
 AiPlayerbot.CoaIa.UtiliteAlignee = 1
 
+# Lot 5, decision de jeu du 16/10 (Bloodmage) : sous AiPlayerbot.LowHealth en combat, le bot entre
+# en forme maudite (Blood Curse et ses remplacants de specialisation, ou Eternal Curse ; jamais
+# Moon Gaze, qui l'etourdit) puis lance ses defensifs de forme, un a la fois : Endure the Curse,
+# Eternal Resolve, Wicked Howl. Hors arene 1v1 et duel. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.FormeMaudite = 1
+
+# Lot 5, decision de jeu du 16/10 (Venomancer, trois specialisations) : sous 35 % de vie en combat,
+# le bot quitte Beetle Form ou Spider Form, se soigne (Emerald Veil, Shadra's Prayer, interdits en
+# forme), et reprend sa forme a 40 %, quand ses soins ne sont plus prets, ou au bout de 5 s (tank)
+# ou 8 s ; pas de nouvelle sortie avant 15 s (tank) ou 8 s. Hors arene 1v1 et duel.
+# A 0 : comportement d'avant (une sortie en cours se termine par la reprise de la forme).
+# Default: 1
+AiPlayerbot.CoaIa.VenomancerSoin = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

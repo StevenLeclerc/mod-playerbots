@@ -3937,6 +3937,332 @@ public:
 };
 
 /*
+ * IA SOINS/SURVIE, LOT 5 (16/10/2026) : DEUX DECISIONS DE JEU DU COMMANDITAIRE (DIAG-banc-soins-sorts-jamais-lances-
+ * 20261016.md, C5 et C6). Les deux jouent en combat, bot vivant et non monte, hors arene 1v1 et duel (la survie d'arene
+ * IaSurvie garde la main, comme pour le lot 3). Rien ne touche un joueur humain : ces declencheurs ne vivent que dans
+ * les strategies de combat des bots CoA.
+ */
+bool CoaIaDecisionActive(Player* bot)
+{
+    return bot->IsAlive() && bot->IsInCombat() && !bot->IsMounted() && !(CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot));
+}
+
+// Le sort passerait les filtres de CastFirst qui ne dependent que du lanceur (ceux de CoaIaUnPret), sauf, a la demande,
+// l'aura exigee du lanceur (`sansAura` : elle viendra de la forme qu'on va prendre) ou la forme (`sansForme` : on va la
+// quitter). Le cout en vie (POWER_HEALTH, que CoaPeutPayer ne lit pas) est relu comme Spell::CheckPower : vie > cout.
+bool CoaIaPretSauf(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* cible, bool sansAura, bool sansForme, bool gcd)
+{
+    auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
+    time_t const now = time(nullptr);
+    SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+    if (!sansAura && CoaRefuseParAuraDuLanceur(bot, info))
+        return false;
+    if (sansForme ? (!info->IsPassive() && !bot->HasItemFitToSpellRequirements(info)) : CoaRefuseParFormeOuArme(bot, info))
+        return false;
+    if (!CoaPeutPayer(bot, info) || CoaExigeFamilierAbsent(bot, info))
+        return false;
+    if (info->PowerType == POWER_HEALTH && int32(bot->GetHealth()) <= info->CalcPowerCost(bot, info->GetSchoolMask()))
+        return false;
+    if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
+        return false;
+    if (cible && CoaSoinDejaPose(bot, spell, info, cible))
+        return false;
+    return !gcd || !bot->GetGlobalCooldownMgr().HasGlobalCooldown(info);
+}
+
+/*
+ * 1. BLOODMAGE (classe 20), AiPlayerbot.CoaIa.FormeMaudite. Decision : « sous 45 % de vie en combat, il entre en forme
+ * maudite, puis utilise ses defensifs de forme » -- Endure the Curse 681190 et Eternal Resolve 801962 (CasterAuraSpell
+ * 524861), Wicked Howl 804207 (CasterAuraSpell 525031). Avant : ecartes en silence par CastFirst hors forme (C5).
+ *
+ * Etabli le 16/10 : aucun sort du DBC ne pose 524861 ni 525031. C'est le module qui les pose sur la forme reelle
+ * (SyncCursedFormRequirement, mod-ascension-compat/src/AscensionBloodmageTalents.cpp:102) : les deux pour Blood Curse
+ * 562720, Accursed Form 562572 (spe 27) et Eternal Curse 800157 (spe 99) ; 525031 seul pour Sanguine Essence 680692
+ * (spe 25) et Transgression 801076 (spe 26), qui n'enferment pas la forme mortelle (LocksMortalForm). La table
+ * ci-dessous recopie cette liste (CursedForms) : un ajout cote module doit y etre reporte.
+ *
+ * Entrees SANS etourdissement : Blood Curse 562720 et ses remplacants (aura 36 forme 57, 30 s, recharge a la sortie,
+ * payes en vie : 40 % et 25 % de la vie de base), Eternal Curse 800157 (forme sans duree). Moon Gaze 562723 (forme 57 +
+ * MOD_STUN 300 s, « Cannot be used in combat ») n'est PAS dans la table : jamais lance ici (voir Classify, 02/10/2026).
+ *
+ * Regle : un defensif de forme a la fois (aucun deja actif) ; dans la forme, le defensif pret ; hors forme, la forme qui
+ * pose le marqueur d'un defensif pret par ailleurs (recharge, ressource). Jamais une seconde forme par-dessus une
+ * premiere (marqueur deja tenu). Prix connu (arene 1v1 du 11/10, CoaAreneSortForme) : la forme enferme les sorts mortels
+ * (524861 est l'ExcludeCasterAuraSpell de 47 d'entre eux), la rotation n'a plus que les sorts de forme pendant 30 s.
+ */
+constexpr uint32 CoaMauditMarqueur = 524861;      // SPELL_CURSED_FORM_REQUIREMENT_2 du module
+constexpr uint32 CoaMauditMarqueurBase = 525031;  // SPELL_CURSED_FORM_REQUIREMENT du module
+constexpr uint8 COA_MAUDIT_VERROU = 1;            // la forme pose 524861
+constexpr uint8 COA_MAUDIT_BASE = 2;              // la forme pose 525031
+
+uint8 CoaMauditMarqueursDeForme(uint32 forme)
+{
+    switch (forme)
+    {
+        case 562720: case 562572: case 800157:
+            return COA_MAUDIT_VERROU | COA_MAUDIT_BASE;
+        case 680692: case 801076:
+            return COA_MAUDIT_BASE;
+        default:
+            return 0;
+    }
+}
+
+uint8 CoaMauditMarqueurExige(SpellInfo const* info)
+{
+    return info->CasterAuraSpell == CoaMauditMarqueur ? COA_MAUDIT_VERROU :
+           info->CasterAuraSpell == CoaMauditMarqueurBase ? COA_MAUDIT_BASE : 0;
+}
+
+// Les sorts a lancer maintenant : `defensifs` (dans la forme) ou, a defaut, `formes`. Faux : rien a faire. Le calcul ne
+// lit le kit que pour un Bloodmage sous lowHealth en combat (deux comparaisons pour tout autre bot).
+bool CoaMauditPlanifier(PlayerbotAI* botAI, Player* bot, std::vector<Usable>* defensifsPrets, std::vector<Usable>* formesPretes)
+{
+    if (!sPlayerbotAIConfig.coaIaFormeMaudite || bot->getClass() != CLASS_SON_OF_ARUGAL ||
+        bot->GetHealthPct() >= float(sPlayerbotAIConfig.lowHealth) || !CoaIaDecisionActive(bot))
+        return false;
+    std::vector<Usable> defensifs = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
+        { return (kind & KIND_DEFENSIVE) && !(marques & MARQUE_PAS_SUR_SOI); });
+    defensifs.erase(std::remove_if(defensifs.begin(), defensifs.end(), [bot](Usable const& spell)
+        { return !CoaMauditMarqueurExige(EffectiveSpell(bot, spell.info)); }), defensifs.end());
+    if (defensifs.empty())
+        return false;
+    for (Usable const& spell : defensifs)
+        if (CoaAreneAuraDeSoi(bot, spell.info, EffectiveSpell(bot, spell.info)))
+            return false;
+    bool const verrou = bot->HasAura(CoaMauditMarqueur);
+    bool const base = bot->HasAura(CoaMauditMarqueurBase);
+    std::vector<Usable> prets;
+    uint8 manque = 0;
+    for (Usable const& spell : defensifs)
+    {
+        uint8 const exige = CoaMauditMarqueurExige(EffectiveSpell(bot, spell.info));
+        bool const tenu = exige == COA_MAUDIT_VERROU ? verrou : base;
+        if (tenu)
+        {
+            if (CoaIaPretSauf(botAI, bot, spell, bot, false, false, true))
+                prets.push_back(spell);
+        }
+        else if (CoaIaPretSauf(botAI, bot, spell, bot, true, false, false))
+            manque |= exige;
+    }
+    if (!prets.empty())
+    {
+        if (defensifsPrets)
+            *defensifsPrets = std::move(prets);
+        return true;
+    }
+    // Deja dans une forme maudite (un marqueur tenu) : jamais une seconde forme par-dessus.
+    if (!manque || verrou || base)
+        return false;
+    std::vector<Usable> formes = KnownAbilities(botAI, bot, [](uint16) { return true; });
+    formes.erase(std::remove_if(formes.begin(), formes.end(), [&](Usable const& spell)
+        { return !(CoaMauditMarqueursDeForme(EffectiveSpell(bot, spell.info)->Id) & manque) ||
+                 !CoaIaPretSauf(botAI, bot, spell, bot, false, false, true); }), formes.end());
+    if (formes.empty())
+        return false;
+    if (formesPretes)
+        *formesPretes = std::move(formes);
+    return true;
+}
+
+class CoaFormeMauditeAction : public Action
+{
+public:
+    CoaFormeMauditeAction(PlayerbotAI* botAI) : Action(botAI, "coa forme maudite") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        std::vector<Usable> defensifs;
+        std::vector<Usable> formes;
+        if (!CoaMauditPlanifier(botAI, bot, &defensifs, &formes))
+            return false;
+        if (!defensifs.empty())
+            return RecordUsage(USAGE_DEFENSIVE, CastFirst(botAI, bot, defensifs, bot, USAGE_DEFENSIVE));
+        return CastFirst(botAI, bot, formes, bot);
+    }
+
+    bool isUseful() override { return CoaMauditPlanifier(botAI, bot, nullptr, nullptr); }
+};
+
+class CoaFormeMauditeTrigger : public Trigger
+{
+public:
+    CoaFormeMauditeTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa forme maudite") {}
+
+    bool IsActive() override { return CoaMauditPlanifier(botAI, bot, nullptr, nullptr); }
+};
+
+/*
+ * 2. VENOMANCER (classe 29 ; specialisations 52 Fortitude tank, 53 Stalking, 54 Rot), AiPlayerbot.CoaIa.VenomancerSoin.
+ * Decision, mot pour mot : « il se heal des 35% ». Emerald Veil 801152 et Shadra's Prayer 502947 portent
+ * SPELL_ATTR0_NOT_SHAPESHIFTED, et Beetle Form 803183 / Spider Form 800841 (flags1 0x2d8, sans SHAPESHIFT_FLAG_STANCE) les
+ * interdisent : ecartes en silence par CoaRefuseParFormeOuArme (C6).
+ *
+ * Sous 35 % en combat, dans l'une des deux formes, avec un tel soin pret hors forme : le bot QUITTE la forme et soigne
+ * sur soi dans le meme passage (le retrait de l'aura remet la forme a zero tout de suite). Il la REPREND des qu'il remonte
+ * a 40 % (5 points d'hysteresis), des que plus aucun de ces soins n'est pret, ou au bout de 5 s hors forme pour un tank
+ * (8 s sinon) : le tank n'a pas ses 64 sorts de Beetle Form pendant ce temps. Contre la boucle sortir-entrer : apres une
+ * reprise, pas de nouvelle sortie avant 15 s pour un tank (8 s sinon). Une reprise impossible (mana : Beetle Form coute
+ * 30 % de la mana de base) est abandonnee au bout de 30 s ; « coa buff » remet la forme hors combat comme avant.
+ */
+constexpr uint32 CoaVenoBeetle = 803183;
+constexpr uint32 CoaVenoSpider = 800841;
+constexpr float CoaVenoSoinPv = 35.0f;
+constexpr float CoaVenoRemonteePv = 40.0f;
+constexpr uint32 CoaVenoHorsFormeTankMs = 5 * IN_MILLISECONDS;
+constexpr uint32 CoaVenoHorsFormeMs = 8 * IN_MILLISECONDS;
+constexpr uint32 CoaVenoEcartTankMs = 15 * IN_MILLISECONDS;
+constexpr uint32 CoaVenoEcartMs = 8 * IN_MILLISECONDS;
+constexpr uint32 CoaVenoAbandonMs = 30 * IN_MILLISECONDS;
+
+uint32 CoaVenoFormeTenue(Player* bot)
+{
+    ObjectGuid const moi = bot->GetGUID();
+    return bot->HasAura(CoaVenoBeetle, moi) ? CoaVenoBeetle : bot->HasAura(CoaVenoSpider, moi) ? CoaVenoSpider : 0;
+}
+
+// L'etat de la sortie de forme, remis a zero quand le bot est mort, a repris sa forme (par ce lot ou par « coa buff »), a
+// pris l'autre forme, ou quand la reprise est abandonnee.
+CoaAiObjectContext::CoaVenoForme& CoaVenoEtat(PlayerbotAI* botAI, Player* bot)
+{
+    CoaAiObjectContext::CoaVenoForme& e = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->venoForme;
+    if (e.forme && (!bot->IsAlive() || CoaVenoFormeTenue(bot) ||
+                    getMSTimeDiff(e.sortieMs, getMSTime()) >= CoaVenoAbandonMs))
+        e.forme = 0;
+    return e;
+}
+
+// Les soins sur soi que la forme interdit (sort effectif SPELL_ATTR0_NOT_SHAPESHIFTED), dans l'ordre du lot 3.
+std::vector<Usable> CoaVenoSoins(PlayerbotAI* botAI, Player* bot)
+{
+    std::vector<Usable> soins = CoaIaSoinsSurSoi(botAI, bot);
+    soins.erase(std::remove_if(soins.begin(), soins.end(), [bot](Usable const& spell)
+        { return !EffectiveSpell(bot, spell.info)->HasAttribute(SPELL_ATTR0_NOT_SHAPESHIFTED); }), soins.end());
+    return soins;
+}
+
+bool CoaVenoSoinPret(PlayerbotAI* botAI, Player* bot, bool sansForme, bool gcd)
+{
+    for (Usable const& spell : CoaVenoSoins(botAI, bot))
+        if (CoaIaPretSauf(botAI, bot, spell, bot, false, sansForme, gcd))
+            return true;
+    return false;
+}
+
+bool CoaVenoTank(Player* bot) { return GetCoaRole(bot) == CoaRole::Tank; }
+
+// Sortir de forme (ou continuer hors forme) pour se soigner.
+bool CoaVenoSoinVoulu(PlayerbotAI* botAI, Player* bot)
+{
+    if (!sPlayerbotAIConfig.coaIaVenomancerSoin || bot->getClass() != CLASS_PROPHET ||
+        bot->GetHealthPct() >= CoaVenoSoinPv || !CoaIaDecisionActive(bot))
+        return false;
+    CoaAiObjectContext::CoaVenoForme const& e = CoaVenoEtat(botAI, bot);
+    uint32 const maintenant = getMSTime();
+    bool const tank = CoaVenoTank(bot);
+    if (CoaVenoFormeTenue(bot))
+    {
+        if (e.repriseMs && getMSTimeDiff(e.repriseMs, maintenant) < (tank ? CoaVenoEcartTankMs : CoaVenoEcartMs))
+            return false;
+        return CoaVenoSoinPret(botAI, bot, true, true);
+    }
+    // Hors forme sans l'avoir quittee ici : le lot 3 (« coa soin soi ») soigne deja, rien a decider.
+    if (!e.forme || getMSTimeDiff(e.sortieMs, maintenant) >= (tank ? CoaVenoHorsFormeTankMs : CoaVenoHorsFormeMs))
+        return false;
+    return CoaVenoSoinPret(botAI, bot, false, true);
+}
+
+// La forme quittee par ce lot, a reprendre maintenant ; nullptr sinon. Ne depend pas de l'option : une sortie en cours se
+// termine meme si l'option vient d'etre eteinte.
+SpellInfo const* CoaVenoRepriseVoulue(PlayerbotAI* botAI, Player* bot, std::vector<Usable>* forme)
+{
+    if (bot->getClass() != CLASS_PROPHET || !bot->IsAlive() || !bot->IsInCombat() || bot->IsMounted())
+        return nullptr;
+    CoaAiObjectContext::CoaVenoForme const& e = CoaVenoEtat(botAI, bot);
+    if (!e.forme)
+        return nullptr;
+    bool const remonte = bot->GetHealthPct() >= CoaVenoRemonteePv;
+    bool const temps = getMSTimeDiff(e.sortieMs, getMSTime()) >= (CoaVenoTank(bot) ? CoaVenoHorsFormeTankMs : CoaVenoHorsFormeMs);
+    if (!remonte && !temps && CoaVenoSoinPret(botAI, bot, false, false))
+        return nullptr;
+    uint32 const voulue = e.forme;
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_STANCE) != 0; }))
+        if (spell.info->Id == voulue && CoaIaPretSauf(botAI, bot, spell, nullptr, false, false, true))
+        {
+            if (forme)
+                forme->assign(1, spell);
+            return spell.info;
+        }
+    return nullptr;
+}
+
+class CoaVenoSoinAction : public Action
+{
+public:
+    CoaVenoSoinAction(PlayerbotAI* botAI) : Action(botAI, "coa veno soin") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        if (!CoaVenoSoinVoulu(botAI, bot))
+            return false;
+        bool quittee = false;
+        if (uint32 const tenue = CoaVenoFormeTenue(bot))
+        {
+            CoaAiObjectContext::CoaVenoForme& e = CoaVenoEtat(botAI, bot);
+            e.forme = tenue;
+            e.sortieMs = getMSTime();
+            bot->RemoveAurasDueToSpell(tenue, bot->GetGUID());
+            quittee = true;
+        }
+        t_bancSoinEchec = BancSoinEchec();
+        std::vector<Usable> const soins = CoaVenoSoins(botAI, bot);
+        SpellInfo const* cast = RecordUsage(USAGE_SOIN_SOI, CastFirst(botAI, bot, soins, bot, USAGE_SOIN_SOI));
+        BancSoinTracer(bot, "soin_soi", cast, soins.empty());
+        return cast || quittee;
+    }
+
+    bool isUseful() override { return CoaVenoSoinVoulu(botAI, bot); }
+};
+
+class CoaVenoFormeAction : public Action
+{
+public:
+    CoaVenoFormeAction(PlayerbotAI* botAI) : Action(botAI, "coa veno forme") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        std::vector<Usable> forme;
+        if (!CoaVenoRepriseVoulue(botAI, bot, &forme))
+            return false;
+        if (!CastFirst(botAI, bot, forme, bot))
+            return false;
+        CoaAiObjectContext::CoaVenoForme& e = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->venoForme;
+        e.forme = 0;
+        e.repriseMs = std::max<uint32>(getMSTime(), 1);
+        return true;
+    }
+
+    bool isUseful() override { return CoaVenoRepriseVoulue(botAI, bot, nullptr) != nullptr; }
+};
+
+class CoaVenoSoinTrigger : public Trigger
+{
+public:
+    CoaVenoSoinTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa veno soin") {}
+
+    bool IsActive() override { return CoaVenoSoinVoulu(botAI, bot); }
+};
+
+class CoaVenoFormeTrigger : public Trigger
+{
+public:
+    CoaVenoFormeTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa veno forme") {}
+
+    bool IsActive() override { return CoaVenoRepriseVoulue(botAI, bot, nullptr) != nullptr; }
+};
+
+/*
  * Damage dealer: use the class abilities every tick, area attacks on packs, interrupts,
  * dispels, and a defensive when hurt. Melee specializations close in; ranged ones keep the
  * "reach spell" distance of CombatStrategy.
@@ -4020,6 +4346,12 @@ public:
                                                            NextAction("coa soin soi", ACTION_HIGH + 7) }));
         triggers.push_back(new TriggerNode("coa survie critique", { NextAction("coa defensive critique", ACTION_EMERGENCY) }));
         triggers.push_back(new TriggerNode("coa potion", { NextAction("healing potion", ACTION_HIGH + 7.5f) }));
+        // IA soins/survie, lot 5 : decisions de jeu du 16/10 (Bloodmage, Venomancer). Inertes pour toute autre classe et
+        // sous AiPlayerbot.CoaIa.FormeMaudite = 0 / VenomancerSoin = 0. Au-dessus de « coa defensive » (ACTION_HIGH + 8),
+        // sous « coa defensive critique » (ACTION_EMERGENCY) ; la reprise de forme passe devant la sortie.
+        triggers.push_back(new TriggerNode("coa forme maudite", { NextAction("coa forme maudite", ACTION_HIGH + 8.5f) }));
+        triggers.push_back(new TriggerNode("coa veno soin", { NextAction("coa veno soin", ACTION_HIGH + 8.5f) }));
+        triggers.push_back(new TriggerNode("coa veno forme", { NextAction("coa veno forme", ACTION_HIGH + 9) }));
     }
 
 protected:
@@ -4200,6 +4532,9 @@ public:
         creators["coa decrochage"] = &CoaActionFactoryInternal::coa_decrochage;
         creators["coa soin soi"] = &CoaActionFactoryInternal::coa_soin_soi;
         creators["coa defensive critique"] = &CoaActionFactoryInternal::coa_defensive_critique;
+        creators["coa forme maudite"] = &CoaActionFactoryInternal::coa_forme_maudite;
+        creators["coa veno soin"] = &CoaActionFactoryInternal::coa_veno_soin;
+        creators["coa veno forme"] = &CoaActionFactoryInternal::coa_veno_forme;
     }
 
 private:
@@ -4231,6 +4566,9 @@ private:
     {
         return new CoaDefensiveAction(botAI, "coa defensive critique", true);
     }
+    static Action* coa_forme_maudite(PlayerbotAI* botAI) { return new CoaFormeMauditeAction(botAI); }
+    static Action* coa_veno_soin(PlayerbotAI* botAI) { return new CoaVenoSoinAction(botAI); }
+    static Action* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -4244,6 +4582,9 @@ public:
         creators["coa survie"] = &CoaTriggerFactoryInternal::coa_survie;
         creators["coa survie critique"] = &CoaTriggerFactoryInternal::coa_survie_critique;
         creators["coa potion"] = &CoaTriggerFactoryInternal::coa_potion;
+        creators["coa forme maudite"] = &CoaTriggerFactoryInternal::coa_forme_maudite;
+        creators["coa veno soin"] = &CoaTriggerFactoryInternal::coa_veno_soin;
+        creators["coa veno forme"] = &CoaTriggerFactoryInternal::coa_veno_forme;
     }
 
 private:
@@ -4253,6 +4594,9 @@ private:
     static Trigger* coa_survie(PlayerbotAI* botAI) { return new CoaSurvieTrigger(botAI); }
     static Trigger* coa_survie_critique(PlayerbotAI* botAI) { return new CoaSurvieCritiqueTrigger(botAI); }
     static Trigger* coa_potion(PlayerbotAI* botAI) { return new CoaPotionTrigger(botAI); }
+    static Trigger* coa_forme_maudite(PlayerbotAI* botAI) { return new CoaFormeMauditeTrigger(botAI); }
+    static Trigger* coa_veno_soin(PlayerbotAI* botAI) { return new CoaVenoSoinTrigger(botAI); }
+    static Trigger* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeTrigger(botAI); }
 };
 
 }  // namespace
