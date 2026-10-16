@@ -1065,6 +1065,19 @@ bool PlayerbotAIConfig::Initialize()
     // Survie d'arene (11/10/2026) : VRAIE par defaut, mais n'agit que sous IaCommune (strategie « coa arene » composee).
     coaAreneIaSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaSurvie", true);
     // --- fin CoaArene IA
+    // --- IA soins/survie (16/10/2026) : chaque changement de comportement sous sa propre option, VRAIE par defaut.
+    coaIaClassement = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.Classement", true);
+    coaIaPostureRole = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PostureRole", true);
+    coaIaSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.Survie", true);
+    coaIaSurviePotion = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.SurviePotion", true);
+    coaIaReserveSoigneur = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveSoigneur", true);
+    coaIaReserveSoigneurMana =
+        std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaIa.ReserveSoigneurMana", 80), 100);
+    coaIaHotUnique = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.HotUnique", true);
+    coaIaAuraSurLanceur = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.AuraSurLanceur", true);
+    coaIaTriSoins = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.TriSoins", true);
+    coaIaUtiliteAlignee = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.UtiliteAlignee", true);
+    // --- fin IA soins/survie
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
     autoTeleportForLevel = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoTeleportForLevel", false);

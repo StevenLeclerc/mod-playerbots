@@ -31,6 +31,9 @@ struct CoaKnownAbility
     uint16 kind;
     uint32 dispelMask;
     uint32 firstSpellId;
+    // IA soins/survie (16/10/2026) : marques de Classify (MARQUE_* de CoaAiObjectContext.cpp), deja filtrees par les
+    // options AiPlayerbot.CoaIa.* au moment ou le kit est construit.
+    uint16 marques = 0;
 };
 
 /*

@@ -1598,6 +1598,25 @@ AiPlayerbot.CoaArene.IaPiliers = 0
 AiPlayerbot.CoaArene.IaSurvie = 1
 # --- fin CoaArene IA ------------------------------------------------------------------
 
+# --- IA soins/survie des bots CoA (16/10/2026, Ai/Class/Coa/CoaAiObjectContext.cpp) ----------
+# Corrections de l'IA de combat des classes CoA tirees du banc des soins (coa-project/docs/
+# DIAG-banc-soins-survie-20261016.md, DIAG-banc-soins-rotation-20261016.md,
+# DIAG-banc-soins-sorts-jamais-lances-20261016.md). Une option par changement de comportement,
+# toutes a 1 par defaut ; a 0, le comportement d'avant revient tel quel. Relues a chaud :
+# « .reload config » suffit (le kit d'un bot est reconstruit en 5 s au plus).
+#
+# Lot 1, classement des sorts : un bouclier ou une reduction de degats courte posee sur un
+# allie ou une zone d'allies est un defensif (et un bouclier de zone, un soin de zone) ; une
+# aura de zone persistante qui soigne est un soin de zone ; une table de surcharges commentee
+# (Defiance, Ignis Ultimatus, Hand of Yogg-Saron, Revelation, Spirit Charge, Moonflow, Kael's
+# Command, Fetid Ward, Carapace Regeneration, Aeon of Renewal, Libram of Grace, Horn of
+# Endurance, Infinite Shield) ; un soin dont la partie soin ne vise que le lanceur n'est plus
+# offert pour soigner un autre (Devour Curse) ; un sort qui exclut son lanceur ou vise un
+# ennemi n'est plus lance sur soi (Temple Guardian, Valkyr's Calling) ; un sort qui soigne sa
+# cible ennemie n'est plus lance du tout (Babify). Journal au demarrage : « coa ia soins: ».
+# Default: 1
+AiPlayerbot.CoaIa.Classement = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

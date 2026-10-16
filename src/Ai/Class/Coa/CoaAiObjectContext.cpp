@@ -44,6 +44,7 @@
 #include <ctime>
 #include <map>
 #include <mutex>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -73,6 +74,27 @@ enum AbilityKind : uint16
 };
 
 /*
+ * IA SOINS/SURVIE, LOT 1 (16/10/2026, coa-project/docs/DIAG-banc-soins-sorts-jamais-lances-20261016.md et
+ * DIAG-banc-soins-rotation-20261016.md). Les seize bits de AbilityKind sont tous pris : ce que Classify sait de plus sur
+ * un sort va dans ces marques, portees a cote de `kind` jusqu'aux actions (CoaAbility, CoaKnownAbility, Usable). Elles ne
+ * sont posees que par le classement du lot 1, et KnownKit ne transmet celles du lot 1 que sous AiPlayerbot.CoaIa.Classement
+ * (les autres servent aux lots 3 et 4, chacun sous son option).
+ */
+enum CoaMarque : uint16
+{
+    MARQUE_SOIN_SOI_SEUL   = 0x0001,  // sa partie soin ne vise que le lanceur : jamais offert pour soigner autrui
+    MARQUE_PAS_SUR_SOI     = 0x0002,  // ne se lance jamais sur le lanceur (SPELL_ATTR1_EXCLUDE_CASTER, cible explicite ennemie)
+    MARQUE_VOL_DE_VIE      = 0x0004,  // des degats qui soignent le lanceur (HEALTH_LEECH, PERIODIC_LEECH, drain)
+    MARQUE_DEFENSIF_FAIBLE = 0x0008,  // KIND_DEFENSIVE ne tient qu'a une reduction de degats subis de moins de 10 %
+    MARQUE_IMMOBILISE      = 0x0010,  // enracine son propre lanceur (aura MOD_ROOT sur soi)
+    // Internes a Classify (relevees en descendant dans les sorts declenches), effacees avant la fin :
+    MARQUE_I_SOIN_ALLIE    = 0x0100,  // un effet de soin vise un allie
+    MARQUE_I_DEF_FORT      = 0x0200,  // KIND_DEFENSIVE pose par un effet qui n'est pas une reduction de moins de 10 %
+    MARQUE_I_DRAIN         = 0x0400,  // HEALTH_LEECH ou PERIODIC_LEECH
+    MARQUE_I_INTERNES      = 0x0700
+};
+
+/*
  * Class abilities, indexed by class id, ordered by required level.
  *
  * Most CoA abilities are scripted (dummy or script effects), so what mod-ascension-compat says
@@ -85,12 +107,17 @@ struct CoaAbility
     uint16 kind;
     uint32 dispelMask;
     uint32 firstSpellId;  // first rank: ranks of one spell replace each other
+    // Lot 1 (16/10/2026) : `kind` est le classement du lot 1 (regles nouvelles et surcharges), `kindAncien` celui d'avant,
+    // rendu tel quel quand AiPlayerbot.CoaIa.Classement vaut 0. `marques` : voir CoaMarque.
+    uint16 kindAncien = 0;
+    uint16 marques = 0;
 };
 
 struct ClassKit
 {
     std::vector<CoaAbility> abilities;
-    uint16 kinds = 0;  // every kind some ability of the class has
+    uint16 kinds = 0;        // every kind some ability of the class has
+    uint16 kindsAncien = 0;  // la meme chose, classement d'avant le lot 1
 };
 
 // Ally targets: pet, the nearest ally, party and raid areas, ally or any unit, chain heal.
@@ -250,9 +277,77 @@ bool IsStance(SpellInfo const* info)
     return aura;
 }
 
+// Lot 1 : la valeur d'un effet sans lanceur et sans tirage, comme SpellEffectInfo::CalcValue la rend au plus bas
+// (SpellInfo.cpp : DieSides 0 -> BasePoints ; sinon BasePoints + 1 au minimum du tirage). Defiance 806228 : -81 + 1 = -80 ;
+// Righteous Tempest 807274 et Zenith 712325 : -1 + 1 = 0.
+int32 CoaValeurDeBase(SpellEffectInfo const& effect)
+{
+    return effect.BasePoints + (effect.DieSides ? 1 : 0);
+}
+
+// Lot 3 (DIAG survie, Righteous Tempest 807274 : un tourbillon de degats a « -1 % » de degats subis, lance 106 fois par
+// « coa defensive » en 12 essais) : une reduction de degats subis de moins de 10 % ne fait pas un defensif. Les autres
+// auras defensives (bouclier, parade, immunite...) ne sont pas mesurees ici.
+bool CoaDefensifFaible(SpellEffectInfo const& effect)
+{
+    return effect.ApplyAuraName == SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN && CoaValeurDeBase(effect) > -10;
+}
+
+// Lot 1 (DIAG sorts, C8) : la cible explicite du sort est une unite ENNEMIE, et jamais un allie. Valkyr's Calling 520024
+// (TargetA 6) etait lance par « coa defensive » sur le bot lui-meme : BAD_TARGETS puis banc de 20 s.
+bool CoaCibleExpliciteEnnemie(SpellInfo const* info)
+{
+    uint32 const masque = info->GetExplicitTargetMask();
+    return (masque & TARGET_FLAG_UNIT_ENEMY) &&
+           !(masque & (TARGET_FLAG_UNIT_ALLY | TARGET_FLAG_UNIT_PARTY | TARGET_FLAG_UNIT_RAID));
+}
+
+/*
+ * Lot 1 (DIAG rotation § 5.5, Babify 520499 du Chronomancer) : le sort SOIGNE SA CIBLE ENNEMIE. Babify pose sur l'ennemi un
+ * etourdissement, une transformation et une aura 23 qui declenche 801260 « Babify Regen », HEAL_PCT sur TargetA 6 : range
+ * dans la rotation d'attaque (KIND_HOSTILE | KIND_CONTROL), il rendait 183 000 points de vie a la creature du banc. Un tel
+ * sort n'est jamais lance sur un ennemi par la rotation : Classify lui retire toute marque.
+ *
+ * Regle lue dans les donnees, sans id : un effet de soin (HEAL, HEAL_PCT, HEAL_MAX_HEALTH, aura PERIODIC_HEAL) dont la
+ * cible est une unite ennemie (TARGET_UNIT_TARGET_ENEMY, zone ennemie en A ou en B) et aucune cible alliee, sur le sort
+ * ou un sort qu'il declenche par TRIGGER_SPELL ou par aura PERIODIC_TRIGGER_SPELL (deux niveaux). Les boucliers poses
+ * sur un ennemi n'y sont PAS : releve du 16/10 dans Spell.dbc, ce sont des marqueurs de debuff a 1 point (Rusty Shiv
+ * 561315, Genesis 500501...), et les immunites (Imprison 801067) sont des controles voulus. Un soin a destination
+ * ennemie mais sur zone alliee (Serpent's Fang 503936 : TargetA 53, TargetB 31) soigne les allies : non concerne. Une aura
+ * DUMMY qui porte un TriggerSpell (Soul Shock 803989) n'est pas suivie : rien ne dit qu'elle le declenche.
+ */
+bool CoaSoigneLaCibleEnnemie(SpellInfo const* info, uint8 profondeur = 0)
+{
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect())
+            continue;
+        uint32 const targetA = effect.TargetA.GetTarget();
+        uint32 const targetB = effect.TargetB.GetTarget();
+        bool const aura = IsAuraEffect(effect);
+        bool const soin = effect.Effect == SPELL_EFFECT_HEAL || effect.Effect == SPELL_EFFECT_HEAL_PCT ||
+                          effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH ||
+                          (aura && effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL);
+        bool const ennemie = targetA == TARGET_UNIT_TARGET_ENEMY || IsEnemyAreaTarget(targetA) || IsEnemyAreaTarget(targetB);
+        if (soin && ennemie && !IsAllyTarget(targetA) && !IsAllyTarget(targetB))
+            return true;
+        bool const suivi = effect.Effect == SPELL_EFFECT_TRIGGER_SPELL || effect.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE ||
+                           (aura && (effect.ApplyAuraName == SPELL_AURA_PERIODIC_TRIGGER_SPELL ||
+                                     effect.ApplyAuraName == SPELL_AURA_PERIODIC_TRIGGER_SPELL_WITH_VALUE));
+        if (suivi && effect.TriggerSpell && effect.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                if (CoaSoigneLaCibleEnnemie(declenche, profondeur + 1))
+                    return true;
+    }
+    return false;
+}
+
 // What a spell does, looking two levels into the spells it triggers: CoA abilities often
 // carry their heal, taunt or aura in a triggered spell.
-void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
+//
+// `lot1` (16/10/2026) : applique en plus les regles du lot 1 (AiPlayerbot.CoaIa.Classement) et pose les marques
+// (CoaMarque). Faux, Classify rend exactement le classement d'avant : ClassAbilities le calcule aussi, dans kindAncien.
+void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0, bool lot1 = false)
 {
     constexpr int32 LongAura = 5 * MINUTE * IN_MILLISECONDS;
     int32 const duration = info->GetMaxDuration();
@@ -343,7 +438,11 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
         if (aura && !self && IsControlAura(effect))
             ability.kind |= KIND_CONTROL;
 
-        bool const periodicHeal = aura && effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL;
+        // Lot 1 (DIAG sorts, C1 : Voodoo Cauldron 804684, effet 27 PERSISTENT_AREA_AURA + aura PERIODIC_HEAL sur
+        // TargetA 31) : une aura de zone persistante qui soigne periodiquement est un soin (de zone) periodique.
+        // IsAuraEffect ne la compte pas : le soin n'etait pas vu, et le sort sortait de Classify avec kind == 0.
+        bool const zonePersistante = lot1 && effect.Effect == SPELL_EFFECT_PERSISTENT_AREA_AURA;
+        bool const periodicHeal = (aura || zonePersistante) && effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL;
         bool const heal = effect.Effect == SPELL_EFFECT_HEAL || effect.Effect == SPELL_EFFECT_HEAL_PCT ||
                           effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH || periodicHeal;
         // A heal aimed at the caster alone (TARGET_UNIT_CASTER) is still a heal. Left out, such a
@@ -360,7 +459,17 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
                 ability.kind |= KIND_GROUP_HEAL;
             if (periodicHeal)
                 ability.kind |= KIND_HOT;
+            // Lot 1 (DIAG rotation C3-bis, Devour Curse 800402) : la partie soin vise-t-elle un allie ?
+            if (lot1 && ally)
+                ability.marques |= MARQUE_I_SOIN_ALLIE;
         }
+
+        // Lot 1 : des degats qui soignent le lanceur (vol de vie, lu par la survie du lot 3), et un sort qui enracine son
+        // propre lanceur (Ignis Ultimatus 680369 : aura 26 sur soi pendant sa canalisation de 2 s).
+        if (lot1 && (effect.Effect == SPELL_EFFECT_HEALTH_LEECH || (aura && effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH)))
+            ability.marques |= MARQUE_I_DRAIN;
+        if (lot1 && aura && self && effect.ApplyAuraName == SPELL_AURA_MOD_ROOT)
+            ability.marques |= MARQUE_IMMOBILISE;
 
         if (effect.Effect == SPELL_EFFECT_ATTACK_ME || (aura && effect.ApplyAuraName == SPELL_AURA_MOD_TAUNT))
             ability.kind |= KIND_TAUNT;
@@ -376,7 +485,37 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
             ability.kind |= KIND_INTERRUPT;
 
         if (aura && self && IsDefensiveAura(effect) && duration > 0 && duration < LongAura && !selfHover)
+        {
             ability.kind |= KIND_DEFENSIVE;
+            if (lot1 && !CoaDefensifFaible(effect))
+                ability.marques |= MARQUE_I_DEF_FORT;
+            // Lot 1 (DIAG rotation C5) : une aura de zone de groupe ou de raid centree sur le lanceur qui absorbe ou reduit
+            // les degats protege tout le groupe : c'est aussi un soin de zone.
+            if (lot1 && (effect.Effect == SPELL_EFFECT_APPLY_AREA_AURA_PARTY || effect.Effect == SPELL_EFFECT_APPLY_AREA_AURA_RAID) &&
+                (effect.ApplyAuraName == SPELL_AURA_SCHOOL_ABSORB || effect.ApplyAuraName == SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN))
+                ability.kind |= KIND_GROUP_HEAL;
+        }
+
+        /*
+         * Lot 1 (DIAG sorts C1, DIAG survie § 3 B ; DIAG rotation C5). Un bouclier ou une reduction de degats COURTE posee
+         * sur un allie choisi ou sur une zone d'allies n'etait ni soin, ni buff (< 5 min), ni defensif (le test ci-dessus
+         * exige TARGET_UNIT_CASTER) : kind == ALLY_CAST seul, et aucune action ne le lancait. Void Shield 578115, Blood Veil
+         * 572279, Inferno Barrier 582764, Timeguard 804441 (allie choisi, TargetA 21), Forbidden Ritual 502273 (TargetA 56),
+         * Spectral Warden 805716 (TargetB 30), Kiss of the Clouds 501446 (par son declenche 500292). Un allie choisi peut
+         * etre le lanceur lui-meme (sauf SPELL_ATTR1_EXCLUDE_CASTER : MARQUE_PAS_SUR_SOI), et une zone d'allies centree sur
+         * lui le couvre : KIND_DEFENSIVE, que « coa defensive » lance sur le bot. Le bouclier de ZONE est en plus un soin de
+         * zone (KIND_GROUP_HEAL), que « coa group heal » pose quand plusieurs membres sont touches.
+         */
+        if (lot1 && aura && !self && !enemy && IsDefensiveAura(effect) && duration > 0 && duration < LongAura && !selfHover &&
+            (IsAllyCastTarget(targetA) || IsAllyAreaTarget(targetA) || IsAllyAreaTarget(targetB)))
+        {
+            ability.kind |= KIND_DEFENSIVE;
+            if (!CoaDefensifFaible(effect))
+                ability.marques |= MARQUE_I_DEF_FORT;
+            if ((IsAllyAreaTarget(targetA) || IsAllyAreaTarget(targetB)) &&
+                (effect.ApplyAuraName == SPELL_AURA_SCHOOL_ABSORB || effect.ApplyAuraName == SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN))
+                ability.kind |= KIND_GROUP_HEAL;
+        }
 
         // La furtivite se reconnait a son aura. Elle ressemble a une posture — aucune duree,
         // sur le lanceur seul — mais elle ne doit surtout pas etre portee en permanence :
@@ -417,7 +556,8 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
                 CoaAbility sous = ability;
                 sous.kind = 0;
                 sous.dispelMask = 0;
-                Classify(triggered, sous, depth + 1);
+                sous.marques = 0;
+                Classify(triggered, sous, depth + 1, lot1);
                 // LOT 20 (13/10/2026, docs/ANALYSE-classes-faibles-arene-20261013.md § 1) : un soin porte par une aura
                 // qui DECLENCHE periodiquement un soin est un soin periodique, comme une aura PERIODIC_HEAL. Vital Shield
                 // 504849 (Bloodmage) : aura 23 (PERIODIC_TRIGGER_SPELL) -> 804309 (HEAL_PCT 2 % toutes les 5 s), 30 min.
@@ -428,11 +568,124 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0)
                     (sous.kind & KIND_HEAL))
                     sous.kind |= KIND_HOT;
                 if (reserveAuxMarques)
+                {
                     sous.kind &= ~uint16(KIND_HEAL | KIND_SELF_HEAL | KIND_GROUP_HEAL | KIND_HOT | KIND_ALLY_CAST);
+                    sous.marques &= ~uint16(MARQUE_I_SOIN_ALLIE);
+                }
                 ability.kind |= sous.kind;
                 ability.dispelMask |= sous.dispelMask;
+                ability.marques |= sous.marques;
             }
     }
+
+    if (depth || !lot1)
+        return;
+
+    // Lot 1, fin du classement du sort lui-meme (pas d'un declenche).
+    //
+    // DIAG rotation C3-bis (Devour Curse 800402 du Cultist : dissipation sur un allie choisi, TargetA 21, et soin du
+    // LANCEUR, TargetA 1) : KIND_ALLY_CAST venait de la dissipation, et CanHealOther l'offrait pour soigner le tank --
+    // 206 soins sur 206 tombes sur le Cultist lui-meme, environ 30 % de sa mana de soin. Un soin dont aucun effet de soin
+    // ne vise un allie n'est offert que pour le lanceur ; la dissipation garde KIND_ALLY_CAST.
+    if ((ability.kind & KIND_HEAL) && (ability.kind & KIND_SELF_HEAL) && !(ability.kind & KIND_GROUP_HEAL) &&
+        !(ability.marques & MARQUE_I_SOIN_ALLIE))
+        ability.marques |= MARQUE_SOIN_SOI_SEUL;
+    // DIAG sorts C8 : Temple Guardian 803796 (SPELL_ATTR1_EXCLUDE_CASTER, BAD_TARGETS x109 au banc sur soi) et Valkyr's
+    // Calling 520024 (cible ennemie) etaient lances par « coa defensive » sur le bot.
+    if (info->HasAttribute(SPELL_ATTR1_EXCLUDE_CASTER) || CoaCibleExpliciteEnnemie(info))
+        ability.marques |= MARQUE_PAS_SUR_SOI;
+    if ((ability.kind & KIND_DAMAGE) && ((ability.marques & MARQUE_I_DRAIN) || (ability.kind & KIND_SELF_HEAL)))
+        ability.marques |= MARQUE_VOL_DE_VIE;
+    if ((ability.kind & KIND_DEFENSIVE) && !(ability.marques & MARQUE_I_DEF_FORT))
+        ability.marques |= MARQUE_DEFENSIF_FAIBLE;
+    ability.marques &= ~uint16(MARQUE_I_INTERNES);
+
+    // Babify et les sorts qui soignent leur cible ennemie : voir CoaSoigneLaCibleEnnemie.
+    if (CoaSoigneLaCibleEnnemie(info))
+    {
+        ability.kind = 0;
+        ability.dispelMask = 0;
+        ability.marques = 0;
+    }
+}
+
+/*
+ * LOT 1 -- SURCHARGES DE CLASSEMENT (16/10/2026). Ce que Classify ne peut pas lire dans les effets : sorts reecrits par
+ * mod-ascension-compat au chargement (l'effet fait par script ne se voit plus), sorts a double usage, auras dont le role
+ * tient a un declencheur que Classify ne suit pas. Appliquees APRES Classify, au classement du lot 1 seulement (`kind`,
+ * jamais `kindAncien`), a l'id cite et a tous les rangs du meme sort (meme premier rang). `force` : reduction de degats
+ * equivalente en %, lue par le tri des defensifs du lot 3 quand l'effet n'est plus lisible (0 : calculee).
+ * Sources : DIAG-banc-soins-sorts-jamais-lances-20261016.md (§ 2, § 3) et DIAG-banc-soins-survie-20261016.md (§ 3).
+ */
+struct CoaSurcharge
+{
+    uint32 spellId;
+    uint16 ajoute;
+    uint16 retire;
+    uint8 force;
+};
+
+constexpr CoaSurcharge CoaSurcharges[] =
+{
+    // Defiance (Barbarian 1-3 ; C4, survie § 3 D). AscensionBarbarianCompletion.cpp:94 passe l'effet 1 (aura 87, -80 %) en
+    // DUMMY ; la reduction est faite par le coeur, Unit::GetHealthBasedDamageTakenMultiplier (Unit.cpp:9437) : x(0,2 + 0,5 x
+    // vie %), soit -80 % a 0 % de vie et -30 % a pleine vie. Classify n'y voyait plus rien : jamais tente (0 ligne au banc).
+    // Force 65 : la reduction a 30 % de vie. Gratuit, 15 s, recharge 180 s, aucune incapacite du lanceur.
+    { 806228, KIND_DEFENSIVE, 0, 65 },
+    // Ignis Ultimatus (Pyromancer 37 ; C4). AscensionPyromancerContracts.cpp:109 vide l'effet 0 (PERIODIC_DUMMY, declencheur
+    // efface) ; a la fin de la canalisation de 2 s, AscensionPyromancerAuras.cpp:122-129 lance 680370 (soin en cone allie
+    // devant le lanceur, TargetA 59) et 680371 (degats en cone ennemi), d'apres les piles de Flamecasting consommees.
+    // RISQUE GARDE : l'aura 26 (MOD_ROOT) ENRACINE le lanceur 2 s -- marque MARQUE_IMMOBILISE, que la survie (lot 3)
+    // ecarte. Soin de zone seulement : ni HoT (ce n'est pas un soin periodique : le diagnostic proposait GROUP_HEAL|HOT, le
+    // HoT l'aurait fait lancer a 85 % sur un seul membre), ni soin direct. Exige Ember 807533 (CasterAuraSpell), 60 s.
+    { 680369, KIND_HEAL | KIND_GROUP_HEAL, 0, 0 },
+    // Hand of Yogg-Saron (Cultist 40 ; C4). AscensionCultistContracts.cpp:226 vide l'effet 0 (PERIODIC_DUMMY) ; restent
+    // -15 % de degats subis et +15 % de degats infliges sur un ALLIE, 15 s (le soin 704473 ne part qu'avec le passif
+    // 524877, AscensionCultistAuras.cpp:221). SPELL_ATTR1_EXCLUDE_CASTER : jamais sur soi (MARQUE_PAS_SUR_SOI), donc
+    // seulement utile a une action qui protege un allie -- aucune ne le fait aujourd'hui. La regle C1 lui donne deja
+    // KIND_DEFENSIVE (aura 87 sur TargetA 21) ; l'entree le garantit et le documente.
+    { 704476, KIND_DEFENSIVE | KIND_ALLY_CAST, 0, 15 },
+    // Solar Invocation: Revelation (Sun Cleric 46-48, 98 ; C3). TargetA 25 : enracine un ennemi OU soigne un allie
+    // (declenches 680702 et 680701). Range en attaque (Live : x879), jamais en soin. Soin d'un allie ; perte assumee de
+    // l'enracinement. Recharge de categorie 767 partagee avec Solar Invocation: Ascension.
+    { 503651, KIND_HEAL | KIND_ALLY_CAST, KIND_HOSTILE | KIND_CONTROL | KIND_DAMAGE | KIND_AOE | KIND_INTERRUPT, 0 },
+    // Spirit Charge (Primalist 58 ; C3). Charge vers un allie, le soigne (TargetA 21) et frappe autour (TargetA 16) ;
+    // SPELL_ATTR1_EXCLUDE_CASTER. « coa aoe » le visait sur l'ennemi : BAD_TARGETS (Live, code 12).
+    { 504570, KIND_HEAL | KIND_ALLY_CAST, KIND_HOSTILE | KIND_DAMAGE | KIND_AOE, 0 },
+    // Moonflow (Starcaller 43 ; C3). Soin de groupe et de raid (TargetA 56) ; le declenche 680803 (zone ennemie sous Lunar
+    // Eclipse) le rangeait en attaque de zone : TARGET_NOT_PLAYER x54 a x281 par releve (SPELL_ATTR3_ONLY_ON_PLAYER).
+    { 575038, KIND_HEAL | KIND_GROUP_HEAL, KIND_HOSTILE | KIND_AOE | KIND_DAMAGE | KIND_CONTROL, 0 },
+    // Kael's Command (Pyromancer 37 ; C3). Le Phenix s'endort (etourdissement 707060, d'ou KIND_CONTROL qui l'excluait de
+    // tous les soins) et soigne en zone. Exige le Phenix (CasterAuraSpell 681128). HoT retire comme pour Ignis : recharge
+    // 120 s, il ne doit pas partir a 85 % sur un seul membre.
+    { 800816, KIND_HEAL | KIND_GROUP_HEAL, KIND_CONTROL | KIND_HOT, 0 },
+    // Fetid Ward (Necromancer 34, 36 ; C1b). Aura de 30 min (354 + 118) dont le soin declenche vise une zone : classee
+    // HEAL|BUFF|GROUP_HEAL, refusee par « coa buff » (exclut HEAL) et par « coa defensive » (exclut GROUP_HEAL). Un buff.
+    { 680388, KIND_BUFF, KIND_HEAL | KIND_GROUP_HEAL | KIND_SELF_HEAL | KIND_HOT | KIND_ALLY_CAST, 0 },
+    // Carapace Regeneration (Venomancer 52). Aura permanente (-4 % de degats physiques, soin periodique reecrit) qui exige
+    // Beetle Form 803183 : classee posture, « coa buff » ne la tentait que hors posture, donc hors Beetle
+    // (CASTER_AURASTATE x132). Un buff non exclusif de la forme. Risque : elle draine de la rage.
+    { 805931, KIND_BUFF, KIND_STANCE, 0 },
+    // Aeon of Renewal (Chronomancer 31). Aura permanente sur soi qui modifie Epoch : STANCE et HEAL a la fois, que « coa
+    // buff » excluait (filtre HEAL). Une posture seulement.
+    { 806290, 0, KIND_HEAL | KIND_HOT | KIND_ALLY_CAST | KIND_GROUP_HEAL | KIND_SELF_HEAL, 0 },
+    // Libram of Grace (Templar 22-24 ; C1). Soins recus +20 % et proc de soin, 20 s, recharge 180 s : kind 0 (proc non
+    // suivi, aura 118 ni defensive ni buff long). Un defensif.
+    { 801463, KIND_DEFENSIVE, 0, 20 },
+    // Horn of Endurance (Ranger 28-30 ; C1). Aura de groupe 30 s dont le proc soigne (560809/560808), focus +3/s : ALLY_CAST
+    // seul. Un defensif de recharge courte (60 s).
+    { 806359, KIND_DEFENSIVE, 0, 15 },
+    // Infinite Shield (Chronomancer 31, 33 ; C1). Sur un allie (TargetA 21), 10 charges de proc qui soignent (520458) ;
+    // SPELL_ATTR5_LIMIT_N. Le proc n'est pas suivi : ALLY_CAST seul. Un defensif (lance sur soi par « coa defensive »).
+    { 520457, KIND_DEFENSIVE | KIND_ALLY_CAST, 0, 20 },
+};
+
+CoaSurcharge const* CoaSurchargeDe(uint32 spellId)
+{
+    for (CoaSurcharge const& surcharge : CoaSurcharges)
+        if (surcharge.spellId == spellId)
+            return &surcharge;
+    return nullptr;
 }
 
 std::unordered_map<uint8, ClassKit> const& ClassAbilities()
@@ -457,10 +710,17 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
 
             CoaAbility ability = { learnable.SpellId, learnable.RequiredLevel, 0, 0, learnable.FirstSpellId };
             if (SpellInfo const* info = sSpellMgr->GetSpellInfo(learnable.SpellId))
-                Classify(info, ability);
+            {
+                // Lot 1 : le classement d'avant (kindAncien, AiPlayerbot.CoaIa.Classement = 0) et celui du lot 1 (kind,
+                // marques), calcules une fois, au premier bot, et choisis a chaque construction de kit (KnownKit).
+                CoaAbility ancien = ability;
+                Classify(info, ancien);
+                Classify(info, ability, 0, true);
+                ability.kindAncien = ancien.kind;
+                ability.dispelMask = ancien.dispelMask | ability.dispelMask;
+            }
 
             kit.abilities.push_back(ability);
-            kit.kinds |= ability.kind;
             return true;
         };
 
@@ -480,6 +740,35 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
 
                 ++count;
                 ranks += learnable.SpellId != learnable.FirstSpellId;
+            }
+        }
+
+        // Lot 1 : surcharges (CoaSurcharges), a l'id cite et aux autres rangs du meme sort, puis l'union des marques de
+        // chaque classe pour ClassHas, dans les deux classements.
+        uint32 surcharges = 0;
+        for (auto& [classId, kit] : byClass)
+        {
+            std::unordered_map<uint32, CoaSurcharge const*> parPremierRang;
+            for (CoaAbility const& ability : kit.abilities)
+                if (CoaSurcharge const* surcharge = CoaSurchargeDe(ability.spellId))
+                    parPremierRang[ability.firstSpellId] = surcharge;
+            for (CoaAbility& ability : kit.abilities)
+            {
+                CoaSurcharge const* surcharge = CoaSurchargeDe(ability.spellId);
+                if (!surcharge)
+                {
+                    auto const itr = parPremierRang.find(ability.firstSpellId);
+                    surcharge = itr != parPremierRang.end() ? itr->second : nullptr;
+                }
+                if (surcharge)
+                {
+                    ability.kind = uint16((ability.kind | surcharge->ajoute) & ~surcharge->retire);
+                    if (surcharge->ajoute & KIND_DEFENSIVE)
+                        ability.marques &= ~uint16(MARQUE_DEFENSIF_FAIBLE);
+                    ++surcharges;
+                }
+                kit.kinds |= ability.kind;
+                kit.kindsAncien |= ability.kindAncien;
             }
         }
 
@@ -504,6 +793,7 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
                  count, ranks, byClass.size());
         LOG_INFO("playerbots", "coa: {} heals, {} area attacks, {} buffs, {} defensives, {} dispels, {} interrupts",
                  heals, aoe, buffs, defensives, dispels, interrupts);
+        LOG_INFO("playerbots", "coa ia soins: classement du lot 1 calcule, {} entrees de kit surchargees", surcharges);
         return byClass;
     }();
 
@@ -515,7 +805,8 @@ bool ClassHas(Player* bot, uint16 kind)
 {
     auto const& all = ClassAbilities();
     auto const found = all.find(bot->getClass());
-    return found != all.end() && (found->second.kinds & kind);
+    return found != all.end() &&
+           ((sPlayerbotAIConfig.coaIaClassement ? found->second.kinds : found->second.kindsAncien) & kind);
 }
 
 struct Usable
@@ -523,6 +814,7 @@ struct Usable
     SpellInfo const* info;
     uint16 kind;
     uint32 dispelMask;
+    uint16 marques = 0;  // lot 1 : voir CoaMarque
 };
 
 // How long a bot's kit is trusted when neither its level nor the size of its spell book has
@@ -568,13 +860,30 @@ std::vector<CoaKnownAbility> const& KnownKit(PlayerbotAI* botAI, Player* bot)
         if (!info || info->IsPassive())
             continue;
 
-        coaContext->knownKit.push_back({ info, ability.kind, ability.dispelMask, ability.firstSpellId });
+        // Lot 1 : le classement choisi par AiPlayerbot.CoaIa.Classement ; a 0, ni les marques du lot 1 (soin d'autrui, cible
+        // soi) ni le reste du nouveau classement. Les options sont relues a chaque construction (CoaKitLifeSeconds au plus).
+        bool const lot1 = sPlayerbotAIConfig.coaIaClassement;
+        uint16 const kind = lot1 ? ability.kind : ability.kindAncien;
+        uint16 marques = ability.marques;
+        if (!lot1)
+            marques &= ~uint16(MARQUE_SOIN_SOI_SEUL | MARQUE_PAS_SUR_SOI);
+        coaContext->knownKit.push_back({ info, kind, ability.dispelMask, ability.firstSpellId, marques });
     }
 
     return coaContext->knownKit;
 }
 
 // Active abilities the bot has reached and actually knows, for which `wanted(kind)` is true.
+// Le filtre recoit `kind`, ou `kind` et `marques` (lot 1) s'il prend deux arguments.
+template <typename Filter>
+bool CoaVeut(Filter& wanted, uint16 kind, uint16 marques)
+{
+    if constexpr (std::is_invocable_v<Filter&, uint16, uint16>)
+        return wanted(kind, marques);
+    else
+        return wanted(kind);
+}
+
 template <typename Filter>
 std::vector<Usable> KnownAbilities(PlayerbotAI* botAI, Player* bot, Filter wanted)
 {
@@ -588,17 +897,17 @@ std::vector<Usable> KnownAbilities(PlayerbotAI* botAI, Player* bot, Filter wante
     // Abilities are ordered by required level, so a later rank replaces an earlier one.
     for (CoaKnownAbility const& ability : KnownKit(botAI, bot))
     {
-        if (!wanted(ability.kind))
+        if (!CoaVeut(wanted, ability.kind, ability.marques))
             continue;
 
         auto const at = std::find(firsts.begin(), firsts.end(), ability.firstSpellId);
         if (at == firsts.end())
         {
             firsts.push_back(ability.firstSpellId);
-            usable.push_back({ ability.info, ability.kind, ability.dispelMask });
+            usable.push_back({ ability.info, ability.kind, ability.dispelMask, ability.marques });
         }
         else
-            usable[size_t(at - firsts.begin())] = { ability.info, ability.kind, ability.dispelMask };
+            usable[size_t(at - firsts.begin())] = { ability.info, ability.kind, ability.dispelMask, ability.marques };
     }
 
     return usable;
@@ -612,9 +921,12 @@ bool IsFriendlyDispel(uint16 kind)
 // Whether a heal can land on somebody else than the bot. A spell that also aims at a chosen ally
 // (KIND_ALLY_CAST) or at an area of allies (KIND_GROUP_HEAL) still can, even when one of its
 // effects only heals the caster.
-bool CanHealOther(uint16 kind)
+// Lot 1 (DIAG rotation C3-bis) : sauf si l'allie choisi ne recoit pas le soin (MARQUE_SOIN_SOI_SEUL, Devour Curse 800402 :
+// la dissipation vise l'allie, le soin le lanceur). `marques` a 0 : le test d'avant.
+bool CanHealOther(uint16 kind, uint16 marques = 0)
 {
-    return !(kind & KIND_SELF_HEAL) || (kind & (KIND_ALLY_CAST | KIND_GROUP_HEAL));
+    return !(kind & KIND_SELF_HEAL) || (kind & KIND_GROUP_HEAL) ||
+           ((kind & KIND_ALLY_CAST) && !(marques & MARQUE_SOIN_SOI_SEUL));
 }
 
 SpellInfo const* EffectiveSpell(Player* bot, SpellInfo const* info);
@@ -2455,7 +2767,12 @@ public:
         // simply asked the impossible.
         if (target != bot)
             spells.erase(std::remove_if(spells.begin(), spells.end(),
-                [](Usable const& spell) { return !CanHealOther(spell.kind); }), spells.end());
+                [](Usable const& spell) { return !CanHealOther(spell.kind, spell.marques); }), spells.end());
+        // Lot 1 (DIAG sorts C8) : sur le bot lui-meme, jamais un sort qui exclut son lanceur ou vise un ennemi. Marque
+        // posee seulement sous AiPlayerbot.CoaIa.Classement (KnownKit) : sinon rien n'est retire.
+        else
+            spells.erase(std::remove_if(spells.begin(), spells.end(),
+                [](Usable const& spell) { return (spell.marques & MARQUE_PAS_SUR_SOI) != 0; }), spells.end());
 
         // CoA, lot S des evenements (08/10/2026) : la cible peut etre le joueur SERVI par un bot inscrit
         // (CoaDirecteur::JoueurASoigner), hors du groupe du bot. Un soin de zone y est refuse (explicite PARTY/RAID :
@@ -2492,8 +2809,9 @@ public:
         bool const horsGroupe = target && HorsGroupe(bot, target);
         return target && target->IsAlive() && target->GetHealthPct() < sPlayerbotAIConfig.almostFullHealth &&
                ClassHas(bot, wanted) &&
-               HasReadyAbility(botAI, bot,[wanted, onSelf, horsGroupe](uint16 kind)
-                   { return (kind & wanted) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) && (onSelf || CanHealOther(kind)) &&
+               HasReadyAbility(botAI, bot,[wanted, onSelf, horsGroupe](uint16 kind, uint16 marques)
+                   { return (kind & wanted) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) &&
+                            (onSelf ? !(marques & MARQUE_PAS_SUR_SOI) : CanHealOther(kind, marques)) &&
                             !(horsGroupe && (kind & KIND_GROUP_HEAL)); });
     }
 
@@ -2538,14 +2856,16 @@ public:
     {
         t_bancSoinEchec = BancSoinEchec();   // banc des soins (S0) : refus de CETTE action seulement
         bool vide = true;                    // aucun sort candidat, ni defensif ni soin sur soi
-        std::vector<Usable> const defensifs =
-            KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; });
+        // Lot 1 (DIAG sorts C8) : ni defensif ni soin qui exclut son lanceur ou vise un ennemi, puisque la cible est le bot.
+        std::vector<Usable> const defensifs = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
+            { return (kind & KIND_DEFENSIVE) && !(marques & MARQUE_PAS_SUR_SOI); });
         vide = defensifs.empty();
         SpellInfo const* cast = CastFirst(botAI, bot, defensifs, bot, USAGE_DEFENSIVE);
         if (!cast)
         {
-            std::vector<Usable> heals = KnownAbilities(botAI, bot, [](uint16 kind)
-                { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); });
+            std::vector<Usable> heals = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
+                { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)) &&
+                         !(marques & MARQUE_PAS_SUR_SOI); });
             if (SavingManaForHeals(botAI, bot))
                 CheapestFirst(bot, heals);
 
@@ -2560,8 +2880,9 @@ public:
 
     bool isUseful() override
     {
-        return bot->IsAlive() && ClassHas(bot, KIND_DEFENSIVE | KIND_HEAL) && HasReadyAbility(botAI, bot,[](uint16 kind)
-            { return (kind & KIND_DEFENSIVE) || ((kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE))); });
+        return bot->IsAlive() && ClassHas(bot, KIND_DEFENSIVE | KIND_HEAL) && HasReadyAbility(botAI, bot,[](uint16 kind, uint16 marques)
+            { return !(marques & MARQUE_PAS_SUR_SOI) &&
+                     ((kind & KIND_DEFENSIVE) || ((kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)))); });
     }
 };
 

@@ -778,6 +778,19 @@ public:
     bool coaAreneIaPiliers;      // L2 : Ranger en ARENE, casser la ligne de vue derriere un obstacle (defaut faux)
     bool coaAreneIaSurvie;       // survie d'arene 1v1 et duel (11/10) : paliers, soins sur soi, dissipation rentable (defaut vrai)
     // --- fin CoaArene IA
+    // --- IA soins/survie des bots CoA (16/10/2026, docs/DIAG-banc-soins-*-20261016.md, Ai/Class/Coa/CoaAiObjectContext.cpp).
+    // Chaque option garde un changement de comportement ; toutes VRAIES par defaut, a 0 l'ancien comportement revient.
+    bool coaIaClassement;        // lot 1 : classement des sorts (boucliers sur allie, surcharges, soin d'autrui, Babify)
+    bool coaIaPostureRole;       // lot 2 : une specialisation tank prend la posture qui ouvre ses defensifs
+    bool coaIaSurvie;            // lot 3 : survie de tous les roles (paliers 65/45/30 %, perte rapide, soin sur soi, vol de vie)
+    bool coaIaSurviePotion;      // lot 3 : potion de soin des 45 % de vie quand aucun defensif n'est pret
+    bool coaIaReserveSoigneur;   // lot 4 : un soigneur en groupe n'attaque en mana que groupe plein et mana haute
+    uint32 coaIaReserveSoigneurMana; // lot 4 : seuil de mana (%) de la reserve ci-dessus
+    bool coaIaHotUnique;         // lot 4 : un HoT a cible unique n'est pas deplace s'il tient ailleurs, sauf urgence
+    bool coaIaAuraSurLanceur;    // lot 4 : « deja pose » lu sur le lanceur quand l'aura du sort est sur le lanceur
+    bool coaIaTriSoins;          // lot 4 : soins tries par deficit de la cible et rendement en mana
+    bool coaIaUtiliteAlignee;    // lot 4 : isUseful des soins et defensifs aligne sur ce que CastFirst refusera
+    // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;
     bool enableNewRpgStrategy;
