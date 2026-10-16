@@ -679,6 +679,12 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // Infinite Shield (Chronomancer 31, 33 ; C1). Sur un allie (TargetA 21), 10 charges de proc qui soignent (520458) ;
     // SPELL_ATTR5_LIMIT_N. Le proc n'est pas suivi : ALLY_CAST seul. Un defensif (lance sur soi par « coa defensive »).
     { 520457, KIND_DEFENSIVE | KIND_ALLY_CAST, 0, 20 },
+    // Zenith (Runemaster ; revue du 16/10). Trois auras sur soi, 6 s, recharge 45 s : 107 (+100 % de chance de declencher
+    // les Weapon Engravings, description « your runic tattoos flare up »), 87 a -1 + 1 = 0 %, et 138. Son seul classement
+    // venait de l'aura 87 (KIND_DEFENSIVE), que la survie du lot 3 retire (MARQUE_DEFENSIF_FAIBLE) : plus aucune action ne
+    // le lancait. C'est un temps fort OFFENSIF : KIND_DAMAGE le met dans la rotation d'attaque (IsAttack), donc en combat,
+    // contre la cible courante (sort sur soi : la cible n'y joue aucun role), une fois par recharge.
+    { 712325, KIND_DAMAGE, KIND_DEFENSIVE, 0 },
 };
 
 CoaSurcharge const* CoaSurchargeDe(uint32 spellId)
