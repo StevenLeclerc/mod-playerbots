@@ -2941,6 +2941,52 @@ public:
     }
 };
 
+/*
+ * IA SOINS/SURVIE, LOT 2 (16/10/2026, DIAG-banc-soins-survie-20261016.md priorite 1 ; DIAG-banc-soins-sorts-jamais-
+ * lances-20261016.md C5) : LA POSTURE SELON LE ROLE. CoaBuffAction prenait la premiere posture du kit trie par niveau,
+ * quel que soit le role : les Guardian Vanguard (specialisation 21, tank) restaient en Assault Formation 803417 (niveau 1)
+ * et ne pouvaient lancer aucun des quatre sorts qui exigent Tower Formation 800317 (CasterAuraSpell) -- Raise Shield,
+ * Turn The Blade, Brace, et Knight's Calling, leur seul soin sur soi --, ecartes en silence par CastFirst.
+ *
+ * Regle generique, sans id : pour une specialisation TANK (GetCoaRole), la posture connue qui est l'aura de lanceur exigee
+ * (CasterAuraSpell) du plus grand nombre de sorts DEFENSIFS connus du kit. Egalite : le plus petit id (choix fixe, pas de
+ * va-et-vient). Aucun defensif ne depend d'une posture : 0, la regle d'avant s'applique. Hors combat seulement (comme
+ * « coa buff »), une fois par StanceRecastSeconds au plus (garde `recent` de CoaBuffAction).
+ *
+ * Postures ECARTEES de la regle (decisions de jeu en attente du commanditaire, a ne pas trancher ici) :
+ *   - Cursed Form 524861 et 525031 (Bloodmage, Eternal 99 tank) : entrer en forme maudite pour ses defensifs ;
+ *   - Spider Form 800841 et Beetle Form 803183 (Venomancer, Fortitude 52 tank) : formes, voir C6 du diagnostic.
+ */
+constexpr uint32 CoaPosturesHorsRegle[] = { 524861, 525031, 800841, 803183 };
+
+uint32 CoaPostureDeRole(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& postures)
+{
+    if (!sPlayerbotAIConfig.coaIaPostureRole || GetCoaRole(bot) != CoaRole::Tank)
+        return 0;
+    std::vector<Usable> const defensifs =
+        KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; });
+    if (defensifs.empty())
+        return 0;
+    uint32 meilleure = 0;
+    size_t meilleurCompte = 0;
+    for (Usable const& posture : postures)
+    {
+        if (!(posture.kind & KIND_STANCE))
+            continue;
+        uint32 const id = posture.info->Id;
+        if (std::find(std::begin(CoaPosturesHorsRegle), std::end(CoaPosturesHorsRegle), id) != std::end(CoaPosturesHorsRegle))
+            continue;
+        size_t const compte = size_t(std::count_if(defensifs.begin(), defensifs.end(),
+            [id](Usable const& spell) { return spell.info->CasterAuraSpell == id; }));
+        if (compte > meilleurCompte || (compte && compte == meilleurCompte && id < meilleure))
+        {
+            meilleure = id;
+            meilleurCompte = compte;
+        }
+    }
+    return meilleure;
+}
+
 // Out of combat: long buffs on the bot and its group.
 class CoaBuffAction : public Action
 {
@@ -2992,7 +3038,9 @@ public:
             GetAscensionActiveSpecialization(bot) == StalkingSpecialization &&
             std::any_of(spells.begin(), spells.end(), [](Usable const& spell)
                 { return (spell.kind & KIND_STANCE) && spell.info->Id == SpiderForm; });
-        bool const inStance = wantsSpider ? bot->HasAura(SpiderForm) :
+        // Lot 2 : la posture de son role pour un tank (CoaPostureDeRole) ; il en change s'il en porte une autre.
+        uint32 const voulue = wantsSpider ? 0 : CoaPostureDeRole(botAI, bot, spells);
+        bool const inStance = wantsSpider ? bot->HasAura(SpiderForm) : voulue ? bot->HasAura(voulue) :
             std::any_of(spells.begin(), spells.end(), [this](Usable const& spell)
                 { return (spell.kind & KIND_STANCE) && bot->HasAura(spell.info->Id); });
         // Beetle Form 803183 is a true shapeshift: 800841 carries SPELL_ATTR0_NOT_SHAPESHIFTED, so
@@ -3017,6 +3065,8 @@ public:
                 if ((spell.kind & KIND_STANCE) && (member != bot || inStance))
                     continue;
                 if (wantsSpider && (spell.kind & KIND_STANCE) && spell.info->Id != SpiderForm)
+                    continue;
+                if (voulue && (spell.kind & KIND_STANCE) && spell.info->Id != voulue)
                     continue;
 
                 if (member->HasAura(spell.info->Id))
@@ -3636,7 +3686,9 @@ bool CoaChassePrendreSaForme(PlayerbotAI* botAI, Player* bot)
     bool const wantsSpider = bot->getClass() == CLASS_PROPHET &&
         GetAscensionActiveSpecialization(bot) == StalkingSpecialization &&
         std::any_of(postures.begin(), postures.end(), [](Usable const& spell) { return spell.info->Id == SpiderForm; });
-    bool const inStance = wantsSpider ? bot->HasAura(SpiderForm) :
+    // Lot 2 : la posture de son role pour un tank, comme CoaBuffAction (CoaPostureDeRole).
+    uint32 const voulue = wantsSpider ? 0 : CoaPostureDeRole(botAI, bot, postures);
+    bool const inStance = wantsSpider ? bot->HasAura(SpiderForm) : voulue ? bot->HasAura(voulue) :
         std::any_of(postures.begin(), postures.end(), [bot](Usable const& spell) { return bot->HasAura(spell.info->Id); });
     if (inStance)
         return false;
@@ -3646,6 +3698,8 @@ bool CoaChassePrendreSaForme(PlayerbotAI* botAI, Player* bot)
     for (Usable const& spell : postures)
     {
         if (wantsSpider && spell.info->Id != SpiderForm)
+            continue;
+        if (voulue && spell.info->Id != voulue)
             continue;
         SpellCastResult const check = StrictCheck(bot, spell.info, bot);
         if (check != SPELL_CAST_OK)

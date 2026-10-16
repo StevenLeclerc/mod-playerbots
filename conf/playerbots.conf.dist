@@ -1617,6 +1617,14 @@ AiPlayerbot.CoaArene.IaSurvie = 1
 # Default: 1
 AiPlayerbot.CoaIa.Classement = 1
 
+# Lot 2, posture selon le role : hors combat, une specialisation TANK prend la posture qui est
+# l'aura exigee (CasterAuraSpell) du plus grand nombre de ses sorts defensifs connus, et en
+# change si elle en porte une autre (Guardian Vanguard : Tower Formation 800317 au lieu
+# d'Assault Formation). Sans defensif lie a une posture, rien ne change. Cursed Form du
+# Bloodmage et formes du Venomancer sont hors de la regle (decisions de jeu en attente).
+# Default: 1
+AiPlayerbot.CoaIa.PostureRole = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
