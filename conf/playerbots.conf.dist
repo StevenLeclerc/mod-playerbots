@@ -1690,12 +1690,15 @@ AiPlayerbot.CoaIa.FormeMaudite = 1
 AiPlayerbot.CoaIa.VenomancerSoin = 1
 
 # C1, 16/10 (coa-project/docs/DIAG-banc-soins-inertie-pyro-sunc-20261016.md) : un bot SOIGNEUR des classes
-# custom (role Heal) dont la cible ennemie devient invalide (hors de vue, creature en esquive, morte,
-# effrayee...) l'efface SANS quitter le moteur de combat, tant que le coeur le tient en combat ET que lui-meme
+# custom (role Heal) dont la cible ennemie devient invalide (hors de vue, creature en esquive, morte...)
+# l'efface SANS quitter le moteur de combat, tant que le coeur le tient en combat ET que lui-meme
 # est blesse ou attaque, ou qu'un membre vivant du groupe a 100 yd au plus est en combat ou blesse. Il continue
 # donc a soigner et reprend une cible par « dps assist ». Combat fini (coeur hors combat, ou plus personne en
 # combat ni blesse) : « drop target » d'origine, retour au moteur hors combat. Avant : « drop target » le
 # rendait au moteur hors combat, sans aucun soin, 40 a 130 s pendant que son groupe mourait.
+# Une cible encore vivante et vue que « dps target » propose (effrayee, metamorphosee, controlee) est
+# GARDEE, sans quoi « dps assist » la reprendrait a chaque tour ; le soigneur ne la frappe alors pas
+# (« coa attack », « coa aoe ») tant qu'elle porte un controle que les degats brisent, peur comprise.
 # Tanks, degats et classes 1 a 11 : inchanges. A 0 : comportement d'avant.
 # Default: 1
 AiPlayerbot.CoaIa.SoigneurResteEnCombat = 1

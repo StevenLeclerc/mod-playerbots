@@ -3073,6 +3073,25 @@ bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spe
     return false;
 }
 
+/*
+ * Revue C1 (16/10, AiPlayerbot.CoaIa.SoigneurResteEnCombat) : depuis C1, un soigneur garde une cible vivante et vue que
+ * « dps target » propose encore, meme controlee (CoaInvalidTargetTrigger) ; avant, « drop target » a 99 l'effacait
+ * toujours. Ses attaques (« coa attack », « coa aoe ») ne frappent donc pas une cible porteuse d'un controle que les
+ * degats brisent : HasBreakableByDamageCrowdControlAura du coeur (Unit.cpp : confusion/metamorphose, peur,
+ * etourdissement, racines, transformation, a AuraInterruptFlags TAKE_DAMAGE 0x2 ; le canal du bot lui-meme exclu),
+ * plus toute aura MOD_FEAR : Fear 5782 et Psychic Scream 8122 n'ont PAS 0x2 (Spell.dbc champ 32 = 0x480000, temoins
+ * Polymorph 118 = 0x80002, Gouge 1776 = 0x2), ils cassent par proc et le coeur ne les compte pas. Option a 0 ou bot
+ * qui n'est pas soigneur (GetCoaRole, Dps pour les classes 1 a 11) : rien ne change.
+ */
+bool CoaSoigneurEpargneControle(Player* bot, Unit* target)
+{
+    if (!sPlayerbotAIConfig.coaIaSoigneurResteEnCombat || !bot || !target)
+        return false;
+    if (!target->HasBreakableByDamageCrowdControlAura(bot) && !target->HasAuraType(SPELL_AURA_MOD_FEAR))
+        return false;
+    return GetCoaRole(bot) == CoaRole::Heal;
+}
+
 class CoaAttackAction : public Action
 {
 public:
@@ -3082,6 +3101,8 @@ public:
     {
         Unit* target = AI_VALUE(Unit*, "current target");
         if (!target || !target->IsAlive())
+            return false;
+        if (CoaSoigneurEpargneControle(bot, target))
             return false;
 
         // Playerbots only starts the melee swing for melee bots. A ranged CoA bot caught in melee
@@ -3187,7 +3208,7 @@ public:
     bool isUseful() override
     {
         Unit* target = AI_VALUE(Unit*, "current target");
-        return target && target->IsAlive();
+        return target && target->IsAlive() && !CoaSoigneurEpargneControle(bot, target);
     }
 
 private:
@@ -3206,6 +3227,8 @@ public:
         Unit* target = AI_VALUE(Unit*, "current target");
         if (!target || !target->IsAlive())
             return false;
+        if (CoaSoigneurEpargneControle(bot, target))
+            return false;
 
         std::vector<Usable> spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
@@ -3221,7 +3244,7 @@ public:
     bool isUseful() override
     {
         Unit* target = AI_VALUE(Unit*, "current target");
-        return target && target->IsAlive() && ClassHas(bot, KIND_AOE) &&
+        return target && target->IsAlive() && !CoaSoigneurEpargneControle(bot, target) && ClassHas(bot, KIND_AOE) &&
                HasReadyAbility(botAI, bot,[](uint16 kind) { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
     }
 };
