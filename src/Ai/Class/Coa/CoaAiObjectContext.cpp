@@ -15,6 +15,8 @@
 #include "Action.h"
 #include "Battleground.h"
 #include "CoaSpecialization.h"
+#include "ChooseTargetActions.h"
+#include "LootObjectStack.h"
 #include "MovementActions.h"
 #include "Multiplier.h"
 #include "ObjectAccessor.h"
@@ -4308,6 +4310,103 @@ public:
 };
 
 /*
+ * C1 du 16/10 (coa-project/docs/DIAG-banc-soins-inertie-pyro-sunc-20261016.md, option
+ * AiPlayerbot.CoaIa.SoigneurResteEnCombat) : un soigneur ne quitte plus son moteur de combat parce que sa
+ * cible ennemie est devenue invalide.
+ *
+ * Avant : « invalid target » -> « drop target » (99, CombatStrategy.cpp) -> ChangeEngine(BOT_STATE_NON_COMBAT)
+ * (ChooseTargetActions.cpp, DropTargetAction::Execute). Le moteur hors combat n'a aucun soin, le coeur tient
+ * le bot en combat, et le seul retour (« dps assist », DpsAssistStrategy.cpp) exige une cible VUE depuis sa
+ * place : 40 a 130 s d'inertie a mana pleine, groupe mort.
+ *
+ * Vrai seulement pour un soigneur CoA (role Heal : GetCoaRole rend Dps pour les classes 1 a 11), vivant,
+ * que le coeur tient en combat, et dont le combat vit encore : lui-meme blesse ou attaque, ou un membre
+ * vivant du groupe, sur la meme carte et a 100 yd au plus, en combat ou blesse. Des que c'est faux (coeur
+ * hors combat, ou plus personne en combat ni blesse), le chemin d'origine reprend et rend le bot au moteur
+ * hors combat : pas de soigneur coince en combat.
+ *
+ * Cout : appele seulement quand « invalid target » est deja vrai ; au pire une boucle sur le groupe.
+ */
+bool CoaSoigneurResteEnCombat(Player* bot)
+{
+    if (!sPlayerbotAIConfig.coaIaSoigneurResteEnCombat || !bot || !bot->IsAlive() || !bot->IsInCombat())
+        return false;
+    if (GetCoaRole(bot) != CoaRole::Heal)
+        return false;
+    if (bot->GetHealthPct() < 100.0f || !bot->getAttackers().empty())
+        return true;
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        // Meme carte d'abord (P-137 : rien d'un autre fil), puis la distance, puis l'etat.
+        if (!member || member == bot || !member->IsInWorld() || member->GetMapId() != bot->GetMapId() ||
+            !member->IsAlive() || !bot->IsWithinDistInMap(member, 100.0f))
+            continue;
+        if (member->IsInCombat() || member->GetHealthPct() < 100.0f)
+            return true;
+    }
+    return false;
+}
+
+/*
+ * Remplace « invalid target » dans « coa heal » (CoaHealStrategy::InitTriggers). Hors du cas ci-dessus, meme
+ * verdict que l'amont (InvalidTargetTrigger, GenericTriggers.cpp). Dans le cas ci-dessus, ne part que sur une
+ * cible NON NULLE : InvalidTargetValue rend vrai pour une cible nulle (InvalidTargetValue.cpp, `return
+ * !target;`), et l'effacement repasserait alors a chaque tour, a 99, devant tous les soins (Engine.cpp
+ * s'arrete a la premiere action executee).
+ */
+class CoaInvalidTargetTrigger : public Trigger
+{
+public:
+    CoaInvalidTargetTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa invalid target") {}
+
+    bool IsActive() override
+    {
+        if (!AI_VALUE2(bool, "invalid target", "current target"))
+            return false;
+        if (!CoaSoigneurResteEnCombat(bot))
+            return true;
+        return AI_VALUE(Unit*, "current target") != nullptr;
+    }
+};
+
+/*
+ * Remplace « drop target » derriere « coa invalid target ». Dans le cas de CoaSoigneurResteEnCombat : le meme
+ * effacement que DropTargetAction::Execute (butin d'une cible morte, cible courante, selection, AttackStop),
+ * SANS ChangeEngine. Sinon : DropTargetAction::Execute, tel quel.
+ */
+class CoaDropTargetAction : public Action
+{
+public:
+    CoaDropTargetAction(PlayerbotAI* botAI) : Action(botAI, "coa drop target"), amont(botAI) {}
+
+    bool Execute(Event event) override
+    {
+        if (!CoaSoigneurResteEnCombat(bot))
+            return amont.Execute(event);
+
+        Unit* target = AI_VALUE(Unit*, "current target");
+        if (target && target->isDead())
+        {
+            ObjectGuid guid = target->GetGUID();
+            if (guid)
+                context->GetValue<LootObjectStack*>("available loot")->Get()->Add(guid);
+        }
+        context->GetValue<Unit*>("current target")->Set(nullptr);
+        bot->SetTarget(ObjectGuid::Empty);
+        bot->SetSelection(ObjectGuid());
+        bot->AttackStop();
+        return true;
+    }
+
+private:
+    DropTargetAction amont;
+};
+
+/*
  * Damage dealer: use the class abilities every tick, area attacks on packs, interrupts,
  * dispels, and a defensive when hurt. Melee specializations close in; ranged ones keep the
  * "reach spell" distance of CombatStrategy.
@@ -4440,7 +4539,22 @@ public:
 
     void InitTriggers(std::vector<TriggerNode*>& triggers) override
     {
+        size_t const debut = triggers.size();
         CoaCombatStrategy::InitTriggers(triggers);
+
+        // C1 du 16/10 (CoaSoigneurResteEnCombat) : « invalid target » -> « drop target » (CombatStrategy) devient
+        // « coa invalid target » -> « coa drop target », a la meme pertinence. Seuls les noeuds poses par cet
+        // appel sont touches : le vecteur est celui du moteur entier (Engine::Init). Le choix entre l'ancien et
+        // le nouveau comportement se fait a chaque tour, sur l'option : a 0, le declencheur rend le verdict de
+        // l'amont et l'action appelle DropTargetAction::Execute.
+        for (size_t i = debut; i < triggers.size(); ++i)
+        {
+            if (triggers[i] && triggers[i]->getName() == "invalid target")
+            {
+                delete triggers[i];
+                triggers[i] = new TriggerNode("coa invalid target", { NextAction("coa drop target", 99) });
+            }
+        }
 
         // A wounded member out of healing range or line of sight: close in first, above
         // healing (which would fail the range check) and attacking.
@@ -4580,6 +4694,7 @@ public:
         creators["coa forme maudite"] = &CoaActionFactoryInternal::coa_forme_maudite;
         creators["coa veno soin"] = &CoaActionFactoryInternal::coa_veno_soin;
         creators["coa veno forme"] = &CoaActionFactoryInternal::coa_veno_forme;
+        creators["coa drop target"] = &CoaActionFactoryInternal::coa_drop_target;
     }
 
 private:
@@ -4614,6 +4729,7 @@ private:
     static Action* coa_forme_maudite(PlayerbotAI* botAI) { return new CoaFormeMauditeAction(botAI); }
     static Action* coa_veno_soin(PlayerbotAI* botAI) { return new CoaVenoSoinAction(botAI); }
     static Action* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeAction(botAI); }
+    static Action* coa_drop_target(PlayerbotAI* botAI) { return new CoaDropTargetAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -4630,6 +4746,7 @@ public:
         creators["coa forme maudite"] = &CoaTriggerFactoryInternal::coa_forme_maudite;
         creators["coa veno soin"] = &CoaTriggerFactoryInternal::coa_veno_soin;
         creators["coa veno forme"] = &CoaTriggerFactoryInternal::coa_veno_forme;
+        creators["coa invalid target"] = &CoaTriggerFactoryInternal::coa_invalid_target;
     }
 
 private:
@@ -4642,6 +4759,7 @@ private:
     static Trigger* coa_forme_maudite(PlayerbotAI* botAI) { return new CoaFormeMauditeTrigger(botAI); }
     static Trigger* coa_veno_soin(PlayerbotAI* botAI) { return new CoaVenoSoinTrigger(botAI); }
     static Trigger* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeTrigger(botAI); }
+    static Trigger* coa_invalid_target(PlayerbotAI* botAI) { return new CoaInvalidTargetTrigger(botAI); }
 };
 
 }  // namespace

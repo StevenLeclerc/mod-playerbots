@@ -1689,6 +1689,17 @@ AiPlayerbot.CoaIa.FormeMaudite = 1
 # Default: 1
 AiPlayerbot.CoaIa.VenomancerSoin = 1
 
+# C1, 16/10 (coa-project/docs/DIAG-banc-soins-inertie-pyro-sunc-20261016.md) : un bot SOIGNEUR des classes
+# custom (role Heal) dont la cible ennemie devient invalide (hors de vue, creature en esquive, morte,
+# effrayee...) l'efface SANS quitter le moteur de combat, tant que le coeur le tient en combat ET que lui-meme
+# est blesse ou attaque, ou qu'un membre vivant du groupe a 100 yd au plus est en combat ou blesse. Il continue
+# donc a soigner et reprend une cible par « dps assist ». Combat fini (coeur hors combat, ou plus personne en
+# combat ni blesse) : « drop target » d'origine, retour au moteur hors combat. Avant : « drop target » le
+# rendait au moteur hors combat, sans aucun soin, 40 a 130 s pendant que son groupe mourait.
+# Tanks, degats et classes 1 a 11 : inchanges. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.SoigneurResteEnCombat = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

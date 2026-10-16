@@ -792,6 +792,7 @@ public:
     bool coaIaUtiliteAlignee;    // lot 4 : isUseful des soins et defensifs aligne sur ce que CastFirst refusera
     bool coaIaFormeMaudite;      // lot 5 : Bloodmage sous lowHealth en combat -> forme maudite, puis ses defensifs de forme
     bool coaIaVenomancerSoin;    // lot 5 : Venomancer sous 35 % en combat -> quitte sa forme, se soigne, la reprend
+    bool coaIaSoigneurResteEnCombat; // C1 (16/10) : soigneur en combat, cible invalide effacee sans quitter le moteur de combat
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;
