@@ -1625,6 +1625,21 @@ AiPlayerbot.CoaIa.Classement = 1
 # Default: 1
 AiPlayerbot.CoaIa.PostureRole = 1
 
+# Lot 3, survie de tous les roles (hors arene 1v1 et duel, ou la survie d'arene garde la main) :
+# defensif leger (recharge <= 60 s) sous AiPlayerbot.MediumHealth ou sur une perte rapide (15
+# points de vie en 4 s au plus), defensif moyen sous AiPlayerbot.LowHealth, gros defensif
+# (recharge >= 120 s) sous 30 % ; candidats tries par force (reduction ou absorption) ; une
+# reduction de degats subis de moins de 10 % n'est plus un defensif (Righteous Tempest) ; soin
+# sur soi sous MediumHealth pour les tanks et les degats (« coa soin soi »), soins de zone qui
+# couvrent le lanceur en dernier recours ; vol de vie en tete de la rotation sous MediumHealth.
+# Default: 1
+AiPlayerbot.CoaIa.Survie = 1
+
+# Lot 3, potion de soin des AiPlayerbot.LowHealth quand aucun defensif n'est pret (avant : sous
+# AiPlayerbot.CriticalHealth seulement). Exige la strategie « potions » et une potion en sac.
+# Default: 1
+AiPlayerbot.CoaIa.SurviePotion = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

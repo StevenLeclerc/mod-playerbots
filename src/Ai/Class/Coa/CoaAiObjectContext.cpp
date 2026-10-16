@@ -863,10 +863,14 @@ std::vector<CoaKnownAbility> const& KnownKit(PlayerbotAI* botAI, Player* bot)
         // Lot 1 : le classement choisi par AiPlayerbot.CoaIa.Classement ; a 0, ni les marques du lot 1 (soin d'autrui, cible
         // soi) ni le reste du nouveau classement. Les options sont relues a chaque construction (CoaKitLifeSeconds au plus).
         bool const lot1 = sPlayerbotAIConfig.coaIaClassement;
-        uint16 const kind = lot1 ? ability.kind : ability.kindAncien;
+        uint16 kind = lot1 ? ability.kind : ability.kindAncien;
         uint16 marques = ability.marques;
         if (!lot1)
             marques &= ~uint16(MARQUE_SOIN_SOI_SEUL | MARQUE_PAS_SUR_SOI);
+        // Lot 3 (AiPlayerbot.CoaIa.Survie) : une reduction de degats subis de moins de 10 % n'est pas un defensif
+        // (Righteous Tempest 807274, Zenith 712325 : « -1 % », soit 0). Le sort garde ses autres marques (degats...).
+        if (sPlayerbotAIConfig.coaIaSurvie && (marques & MARQUE_DEFENSIF_FAIBLE))
+            kind &= ~uint16(KIND_DEFENSIVE);
         coaContext->knownKit.push_back({ info, kind, ability.dispelMask, ability.firstSpellId, marques });
     }
 
@@ -2044,6 +2048,7 @@ enum UsageKind : uint8
     USAGE_POSTE_CATALOGUE,
     USAGE_POSTE_AUBERGE, USAGE_POSTE_VOLERIE, USAGE_POSTE_CIMETIERE, USAGE_POSTE_ROUTE,
     USAGE_POSTE_PEUPLE,
+    USAGE_SOIN_SOI,  // IA soins/survie, lot 3 : « coa soin soi » (soin sur soi des tanks et des degats)
     USAGE_MAX
 };
 
@@ -2142,7 +2147,8 @@ constexpr char const* UsageNames[USAGE_MAX] =
     "stealth", "poste pris", "poste atteint", "traque", "retour", "decrochage",
     "poste catalogue",
     "poste auberge", "poste volerie", "poste cimetiere", "poste route",
-    "poste peuple"
+    "poste peuple",
+    "soin soi"
 };
 
 bool PreemptsAttackCast(uint8 usage)
@@ -2151,6 +2157,7 @@ bool PreemptsAttackCast(uint8 usage)
     {
         case USAGE_HEAL: case USAGE_GROUP_HEAL: case USAGE_HOT:
         case USAGE_TAUNT: case USAGE_DEFENSIVE: case USAGE_DISPEL: case USAGE_INTERRUPT:
+        case USAGE_SOIN_SOI:
             return true;
         default:
             return false;
@@ -2237,7 +2244,7 @@ void ReportUsage(time_t now)
     // ability was left to try. Kinds that record no failure print nothing.
     for (UsageKind kind : { USAGE_HEAL, USAGE_GROUP_HEAL, USAGE_HOT, USAGE_TAUNT, USAGE_DISPEL,
                             USAGE_ATTACK, USAGE_AOE, USAGE_DEFENSIVE, USAGE_INTERRUPT, USAGE_BUFF,
-                            USAGE_STEALTH })
+                            USAGE_STEALTH, USAGE_SOIN_SOI })
     {
         std::vector<std::pair<std::pair<uint32, uint16>, uint32>> top(UsageFailures[kind].begin(), UsageFailures[kind].end());
         if (top.empty())
@@ -2576,6 +2583,204 @@ bool OrdonnerParLaya(PlayerbotAI* botAI, Player* bot, Unit* target, std::vector<
 // burst. Inerte sans AiPlayerbot.CoaArene.*. Voir l'en-tete du fichier inclus.
 #include "CoaAreneIa.inc"
 
+/*
+ * IA SOINS/SURVIE, LOT 3 (16/10/2026, coa-project/docs/DIAG-banc-soins-survie-20261016.md, priorites 2, 5 et 6) : LA
+ * SURVIE DE TOUS LES ROLES, sous AiPlayerbot.CoaIa.Survie. Avant : un bot de degats ou un tank n'avait qu'un point
+ * d'entree, « coa defensive » sous 45 % (65 % pour un tank), qui lancait le premier defensif pret dans l'ordre du niveau
+ * requis, puis un soin MONO-cible sur soi ; aucun soin sur soi hors de ce repli, aucune reaction a une perte rapide, le vol
+ * de vie jamais avance, la potion seulement sous 25 %. Mesure au banc (volet B) : premier defensif a 43 % de vie en
+ * mediane (degats, B1).
+ *
+ * Paliers, recopies de la survie d'arene (CoaAreneIa.inc, IaSurvie : pression 70 / danger 50 / critique 30, pente de 15
+ * points en 2 a 4 s, recharge legere <= 60 s) sans l'arene :
+ *   - defensif LEGER (recharge <= 60 s) sous mediumHealth (65 %) ou sur une perte rapide (>= 15 points en 4 s au plus) ;
+ *   - defensif MOYEN (60 a 120 s) sous lowHealth (45 %), le filet d'avant ;
+ *   - GROS defensif (recharge >= 120 s) sous 30 % ;
+ *   - candidats tries par force (reduction ou absorption equivalente), puis par niveau requis ;
+ *   - soin sur soi sous 65 % (« coa soin soi », tanks et degats ; le soigneur se soigne par « coa heal »), soins de zone
+ *     qui incluent le lanceur admis en dernier recours ; jamais un sort qui enracine son lanceur (MARQUE_IMMOBILISE) ;
+ *   - vol de vie en tete de la rotation d'attaque sous 65 % ;
+ *   - potion des 45 % quand aucun defensif n'est pret (AiPlayerbot.CoaIa.SurviePotion).
+ * En arene 1v1 et en duel, la survie d'arene (IaSurvie) garde la main : rien de ce lot n'y joue (CoaIaSurvieActive),
+ * comme « coa defensive » que le multiplicateur d'arene y coupe deja.
+ */
+constexpr float CoaIaCritiquePv = 30.0f;
+constexpr float CoaIaPerteRapidePv = 15.0f;
+constexpr uint32 CoaIaReleveMs = 250;
+constexpr uint32 CoaIaPerteFenetreMs = 4000;
+constexpr uint32 CoaIaRechargeLegereMs = 60 * IN_MILLISECONDS;
+constexpr uint32 CoaIaRechargeLourdeMs = 120 * IN_MILLISECONDS;
+// Force d'un defensif dont l'effet ne se lit pas (script, proc) : au milieu, derriere les forts mesures.
+constexpr float CoaIaForceInconnue = 20.0f;
+
+bool CoaIaSurvieActive(Player* bot)
+{
+    return sPlayerbotAIConfig.coaIaSurvie && bot->IsAlive() && !(CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot));
+}
+
+// Plus forte baisse de vie (en points de %) sur les 4 dernieres secondes, et met a jour le releve (CoaSurvieReleve).
+float CoaIaPerteRecente(PlayerbotAI* botAI, Player* bot)
+{
+    CoaAiObjectContext::CoaSurvieReleve& r = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->survieReleve;
+    if (!bot->IsAlive())
+    {
+        r = CoaAiObjectContext::CoaSurvieReleve();
+        return 0.0f;
+    }
+    uint32 const maintenant = getMSTime();
+    float const pv = bot->GetHealthPct();
+    uint8 const dernier = uint8((r.tete + 15) % 16);
+    if (!r.n || getMSTimeDiff(r.ms[dernier], maintenant) >= CoaIaReleveMs)
+    {
+        r.ms[r.tete] = maintenant;
+        r.pv[r.tete] = pv;
+        r.tete = uint8((r.tete + 1) % 16);
+        if (r.n < 16)
+            ++r.n;
+    }
+    float pire = 0.0f;
+    for (uint8 i = 0; i < r.n; ++i)
+    {
+        uint8 const idx = uint8((r.tete + 15 - i) % 16);
+        if (getMSTimeDiff(r.ms[idx], maintenant) > CoaIaPerteFenetreMs)
+            break;
+        pire = std::max(pire, r.pv[idx] - pv);
+    }
+    return pire;
+}
+
+uint32 CoaIaRechargeMs(SpellInfo const* info)
+{
+    return std::max(info->RecoveryTime, info->CategoryRecoveryTime);
+}
+
+// Le palier de vie admet-il ce defensif (sort effectif) ?
+bool CoaIaDefensifAdmis(SpellInfo const* info, float pv, bool perteRapide)
+{
+    uint32 const recharge = CoaIaRechargeMs(info);
+    if (pv < CoaIaCritiquePv)
+        return true;
+    if (recharge >= CoaIaRechargeLourdeMs)
+        return false;
+    if (pv < float(sPlayerbotAIConfig.lowHealth))
+        return true;
+    if (recharge > CoaIaRechargeLegereMs)
+        return false;
+    return pv < float(sPlayerbotAIConfig.mediumHealth) || perteRapide;
+}
+
+// Force d'un defensif : reduction de degats equivalente, en %. Surcharge du lot 1 d'abord (effet fait par script), sinon
+// lue dans les effets (valeurs de base, sans tirage), un niveau de sort declenche ; 0 si rien ne se lit.
+float CoaIaForceDefensive(Player* bot, SpellInfo const* info, uint8 profondeur = 0)
+{
+    if (!profondeur)
+        if (CoaSurcharge const* surcharge = CoaSurchargeDe(info->Id))
+            if (surcharge->force)
+                return float(surcharge->force);
+    float const vieMax = std::max(1.0f, float(bot->GetMaxHealth()));
+    float force = 0.0f;
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect())
+            continue;
+        if (IsAuraEffect(effect))
+        {
+            float const valeur = float(CoaValeurDeBase(effect));
+            switch (effect.ApplyAuraName)
+            {
+                case SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN: force = std::max(force, -valeur); break;
+                case SPELL_AURA_SCHOOL_IMMUNITY: force = std::max(force, 100.0f); break;
+                case SPELL_AURA_SCHOOL_ABSORB: force = std::max(force, std::min(100.0f, valeur * 100.0f / vieMax)); break;
+                case SPELL_AURA_MOD_INCREASE_HEALTH_PERCENT: force = std::max(force, valeur); break;
+                case SPELL_AURA_MOD_INCREASE_HEALTH: force = std::max(force, std::min(100.0f, valeur * 100.0f / vieMax)); break;
+                case SPELL_AURA_MOD_PARRY_PERCENT: case SPELL_AURA_MOD_DODGE_PERCENT: case SPELL_AURA_MOD_BLOCK_PERCENT:
+                    force = std::max(force, valeur / 2.0f);
+                    break;
+                default:
+                    break;
+            }
+        }
+        else if ((effect.Effect == SPELL_EFFECT_TRIGGER_SPELL || effect.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE) &&
+                 effect.TriggerSpell && effect.TriggerSpell != info->Id && !profondeur)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                force = std::max(force, CoaIaForceDefensive(bot, declenche, 1));
+    }
+    return force;
+}
+
+// Les defensifs que le palier admet, du plus fort au plus faible (ordre du niveau requis a force egale). `trier` faux :
+// la liste seule (isUseful, declencheurs).
+std::vector<Usable> CoaIaDefensifs(PlayerbotAI* botAI, Player* bot, float pv, bool perteRapide, bool trier)
+{
+    std::vector<Usable> defensifs = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
+        { return (kind & KIND_DEFENSIVE) && !(marques & MARQUE_PAS_SUR_SOI); });
+    defensifs.erase(std::remove_if(defensifs.begin(), defensifs.end(), [bot, pv, perteRapide](Usable const& spell)
+        { return !CoaIaDefensifAdmis(EffectiveSpell(bot, spell.info), pv, perteRapide); }), defensifs.end());
+    if (trier && defensifs.size() > 1)
+    {
+        // Relevee une fois par sort, puis triee : jamais de calcul dans le comparateur.
+        std::vector<std::pair<float, Usable>> classes;
+        classes.reserve(defensifs.size());
+        for (Usable const& spell : defensifs)
+        {
+            float force = CoaIaForceDefensive(bot, EffectiveSpell(bot, spell.info));
+            classes.emplace_back(force > 0.0f ? force : CoaIaForceInconnue, spell);
+        }
+        std::stable_sort(classes.begin(), classes.end(), [](auto const& a, auto const& b) { return a.first > b.first; });
+        for (size_t i = 0; i < classes.size(); ++i)
+            defensifs[i] = classes[i].second;
+    }
+    return defensifs;
+}
+
+// Un soin de zone lance sur le bot le couvre-t-il ? Non s'il soigne en cone devant le lanceur (TARGET_UNIT_CONE_ALLY).
+bool CoaIaZoneInclutLanceur(SpellInfo const* info)
+{
+    for (SpellEffectInfo const& effect : info->Effects)
+        if (effect.IsEffect() &&
+            (effect.TargetA.GetTarget() == TARGET_UNIT_CONE_ALLY || effect.TargetB.GetTarget() == TARGET_UNIT_CONE_ALLY))
+            return false;
+    return true;
+}
+
+// Les soins sur soi : mono-cible d'abord (ordre d'avant : le moins cher d'abord sous la reserve de mana), puis, en dernier
+// recours, les soins de zone qui couvrent le lanceur. Jamais un sort qui exclut le lanceur, vise un ennemi, ou enracine.
+std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
+{
+    std::vector<Usable> soins = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
+        { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)) &&
+                 !(marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)); });
+    if (SavingManaForHeals(botAI, bot))
+        CheapestFirst(bot, soins);
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
+             { return (kind & KIND_GROUP_HEAL) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) &&
+                      !(marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)); }))
+        if (CoaIaZoneInclutLanceur(EffectiveSpell(bot, spell.info)))
+            soins.push_back(spell);
+    return soins;
+}
+
+// Un sort de la liste passerait les filtres de CastFirst qui ne dependent que du lanceur (memes tests que
+// HasReadyAbility), et n'est pas deja pose par le bot sur `cible` (CoaSoinDejaPose).
+bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spells, Unit* cible)
+{
+    auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
+    time_t const now = time(nullptr);
+    for (Usable const& spell : spells)
+    {
+        SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+        if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info) ||
+            CoaExigeFamilierAbsent(bot, info))
+            continue;
+        if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
+            continue;
+        if (cible && CoaSoinDejaPose(bot, spell, info, cible))
+            continue;
+        return true;
+    }
+    return false;
+}
+
 class CoaAttackAction : public Action
 {
 public:
@@ -2644,6 +2849,18 @@ public:
         // tourniquet, comme le burst : l'index se relit sur l'ordre d'avant. Voir CoaAreneOrdonnerRapprochement.
         CoaAreneOrdonnerRapprochement(botAI, bot, target, usable);
 
+        // IA soins/survie, lot 3 : sous mediumHealth, le vol de vie passe devant (ordre seulement, rien de retire).
+        // L'index du tourniquet se relit sur l'ordre d'avant, comme pour le burst.
+        std::vector<Usable> avantVol;
+        if (bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth) && CoaIaSurvieActive(bot) &&
+            std::any_of(usable.begin(), usable.end(), [](Usable const& spell) { return (spell.marques & MARQUE_VOL_DE_VIE) != 0; }))
+        {
+            if (tourniquet.empty())
+                avantVol = usable;
+            std::stable_partition(usable.begin(), usable.end(),
+                [](Usable const& spell) { return (spell.marques & MARQUE_VOL_DE_VIE) != 0; });
+        }
+
         // The cast goes through CastFirst rather than through a second loop of its own. The one
         // written here judged every refusal by PlayerbotAI::CastSpell to be the spell's fault and
         // benched it for a minute after three of them - while CastSpell also refuses for reasons
@@ -2661,7 +2878,7 @@ public:
         SpellInfo const* const cast = CastFirst(botAI, bot, usable, target, USAGE_ATTACK);
         if (cast)
         {
-            std::vector<Usable> const& ordre = tourniquet.empty() ? usable : tourniquet;
+            std::vector<Usable> const& ordre = !tourniquet.empty() ? tourniquet : !avantVol.empty() ? avantVol : usable;
             auto const itr = std::find_if(ordre.begin(), ordre.end(),
                 [cast](Usable const& spell) { return spell.info == cast; });
             if (itr != ordre.end())
@@ -2856,6 +3073,24 @@ public:
     {
         t_bancSoinEchec = BancSoinEchec();   // banc des soins (S0) : refus de CETTE action seulement
         bool vide = true;                    // aucun sort candidat, ni defensif ni soin sur soi
+        // IA soins/survie, lot 3 : paliers de vie, tri par force, soins de zone en dernier recours (CoaIaDefensifs).
+        if (CoaIaSurvieActive(bot))
+        {
+            float const pv = bot->GetHealthPct();
+            bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
+            std::vector<Usable> const defensifs = CoaIaDefensifs(botAI, bot, pv, perte, true);
+            vide = defensifs.empty();
+            SpellInfo const* cast = CastFirst(botAI, bot, defensifs, bot, USAGE_DEFENSIVE);
+            if (!cast && pv < float(sPlayerbotAIConfig.mediumHealth))
+            {
+                std::vector<Usable> const soins = CoaIaSoinsSurSoi(botAI, bot);
+                vide = vide && soins.empty();
+                cast = CastFirst(botAI, bot, soins, bot, USAGE_DEFENSIVE);
+            }
+            RecordUsage(USAGE_DEFENSIVE, cast);
+            BancSoinTracer(bot, "defensive", cast, vide);
+            return cast;
+        }
         // Lot 1 (DIAG sorts C8) : ni defensif ni soin qui exclut son lanceur ou vise un ennemi, puisque la cible est le bot.
         std::vector<Usable> const defensifs = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
             { return (kind & KIND_DEFENSIVE) && !(marques & MARQUE_PAS_SUR_SOI); });
@@ -2880,9 +3115,42 @@ public:
 
     bool isUseful() override
     {
+        if (CoaIaSurvieActive(bot))
+        {
+            if (!ClassHas(bot, KIND_DEFENSIVE | KIND_HEAL | KIND_GROUP_HEAL))
+                return false;
+            float const pv = bot->GetHealthPct();
+            bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
+            return CoaIaUnPret(botAI, bot, CoaIaDefensifs(botAI, bot, pv, perte, false), bot) ||
+                   (pv < float(sPlayerbotAIConfig.mediumHealth) && CoaIaUnPret(botAI, bot, CoaIaSoinsSurSoi(botAI, bot), bot));
+        }
         return bot->IsAlive() && ClassHas(bot, KIND_DEFENSIVE | KIND_HEAL) && HasReadyAbility(botAI, bot,[](uint16 kind, uint16 marques)
             { return !(marques & MARQUE_PAS_SUR_SOI) &&
                      ((kind & KIND_DEFENSIVE) || ((kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)))); });
+    }
+};
+
+// IA soins/survie, lot 3 : soin sur soi sous mediumHealth (65 %) pour les tanks et les degats, qui n'ont pas « coa heal ».
+// Le soigneur se soigne par « coa heal » (le bot est candidat de « party member to heal ») : exclu ici.
+class CoaSoinSoiAction : public Action
+{
+public:
+    CoaSoinSoiAction(PlayerbotAI* botAI) : Action(botAI, "coa soin soi") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        t_bancSoinEchec = BancSoinEchec();
+        std::vector<Usable> const soins = CoaIaSoinsSurSoi(botAI, bot);
+        SpellInfo const* cast = RecordUsage(USAGE_SOIN_SOI, CastFirst(botAI, bot, soins, bot, USAGE_SOIN_SOI));
+        BancSoinTracer(bot, "soin_soi", cast, soins.empty());
+        return cast;
+    }
+
+    bool isUseful() override
+    {
+        return CoaIaSurvieActive(bot) && GetCoaRole(bot) != CoaRole::Heal &&
+               bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth) && ClassHas(bot, KIND_HEAL | KIND_GROUP_HEAL) &&
+               CoaIaUnPret(botAI, bot, CoaIaSoinsSurSoi(botAI, bot), bot);
     }
 };
 
@@ -3283,6 +3551,55 @@ public:
     }
 };
 
+// IA soins/survie, lot 3 : vie sous mediumHealth, ou perte rapide (CoaIaPerteRapidePv points en 4 s au plus). Arme
+// « coa defensive » (palier leger) et « coa soin soi ». Met a jour le releve de vie a chaque passage.
+class CoaSurvieTrigger : public Trigger
+{
+public:
+    CoaSurvieTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa survie") {}
+
+    bool IsActive() override
+    {
+        if (!CoaIaSurvieActive(bot))
+            return false;
+        float const perte = CoaIaPerteRecente(botAI, bot);
+        return bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth) || perte >= CoaIaPerteRapidePv;
+    }
+};
+
+// IA soins/survie, lot 3 : vie sous 30 %, le palier des gros defensifs (recharge >= 120 s).
+class CoaSurvieCritiqueTrigger : public Trigger
+{
+public:
+    CoaSurvieCritiqueTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa survie critique") {}
+
+    bool IsActive() override { return CoaIaSurvieActive(bot) && bot->GetHealthPct() < CoaIaCritiquePv; }
+};
+
+// IA soins/survie, lot 3 (AiPlayerbot.CoaIa.SurviePotion) : vie sous lowHealth (45 %) et aucun defensif pret -> potion de
+// soin (« healing potion », action amont : isPossible exige l'objet). Seulement si le bot porte la strategie « potions »
+// (absente en champ de bataille, AiFactory) : la meme que celle du repli amont sous criticalHealth (25 %).
+class CoaPotionTrigger : public Trigger
+{
+public:
+    CoaPotionTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa potion") {}
+
+    bool IsActive() override
+    {
+        if (!sPlayerbotAIConfig.coaIaSurviePotion || !bot->IsAlive() || !bot->IsInCombat() ||
+            (CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot)))
+            return false;
+        float const pv = bot->GetHealthPct();
+        if (pv >= float(sPlayerbotAIConfig.lowHealth) || !botAI->HasStrategy("potions", BOT_STATE_COMBAT))
+            return false;
+        std::vector<Usable> const defensifs = CoaIaSurvieActive(bot)
+            ? CoaIaDefensifs(botAI, bot, pv, CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv, false)
+            : KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
+                  { return (kind & KIND_DEFENSIVE) && !(marques & MARQUE_PAS_SUR_SOI); });
+        return !CoaIaUnPret(botAI, bot, defensifs, bot);
+    }
+};
+
 /*
  * Damage dealer: use the class abilities every tick, area attacks on packs, interrupts,
  * dispels, and a defensive when hurt. Melee specializations close in; ranged ones keep the
@@ -3361,6 +3678,12 @@ public:
         triggers.push_back(new TriggerNode("coa dispel", { NextAction("coa dispel", DispelPriority()) }));
         triggers.push_back(new TriggerNode("medium aoe", { NextAction("coa aoe", ACTION_HIGH + 2) }));
         triggers.push_back(new TriggerNode("low health", { NextAction("coa defensive", ACTION_HIGH + 8) }));
+        // IA soins/survie, lot 3 : declencheurs inertes sous AiPlayerbot.CoaIa.Survie = 0 (et SurviePotion = 0), qui
+        // rendent alors le comportement d'avant.
+        triggers.push_back(new TriggerNode("coa survie", { NextAction("coa defensive", ACTION_HIGH + 8),
+                                                           NextAction("coa soin soi", ACTION_HIGH + 7) }));
+        triggers.push_back(new TriggerNode("coa survie critique", { NextAction("coa defensive", ACTION_EMERGENCY) }));
+        triggers.push_back(new TriggerNode("coa potion", { NextAction("healing potion", ACTION_HIGH + 7.5f) }));
     }
 
 protected:
@@ -3539,6 +3862,7 @@ public:
         creators["coa stealth"] = &CoaActionFactoryInternal::coa_stealth;
         creators["coa chasse"] = &CoaActionFactoryInternal::coa_chasse;
         creators["coa decrochage"] = &CoaActionFactoryInternal::coa_decrochage;
+        creators["coa soin soi"] = &CoaActionFactoryInternal::coa_soin_soi;
     }
 
 private:
@@ -3565,6 +3889,7 @@ private:
     // des freres (Engine::addStrategy -> GetSiblingStrategy, Engine.cpp:365-379)
     // ne concerne QUE les strategies. Les fabriques d'actions ne retirent rien.
     static Action* coa_decrochage(PlayerbotAI* botAI) { return new CoaDecrochageAction(botAI); }
+    static Action* coa_soin_soi(PlayerbotAI* botAI) { return new CoaSoinSoiAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -3575,12 +3900,18 @@ public:
         creators["coa dispel"] = &CoaTriggerFactoryInternal::coa_dispel;
         creators["coa enemy casting"] = &CoaTriggerFactoryInternal::coa_enemy_casting;
         creators["coa ambush"] = &CoaTriggerFactoryInternal::coa_ambush;
+        creators["coa survie"] = &CoaTriggerFactoryInternal::coa_survie;
+        creators["coa survie critique"] = &CoaTriggerFactoryInternal::coa_survie_critique;
+        creators["coa potion"] = &CoaTriggerFactoryInternal::coa_potion;
     }
 
 private:
     static Trigger* coa_dispel(PlayerbotAI* botAI) { return new CoaDispelTrigger(botAI); }
     static Trigger* coa_enemy_casting(PlayerbotAI* botAI) { return new CoaEnemyCastingTrigger(botAI); }
     static Trigger* coa_ambush(PlayerbotAI* botAI) { return new CoaAmbushTrigger(botAI); }
+    static Trigger* coa_survie(PlayerbotAI* botAI) { return new CoaSurvieTrigger(botAI); }
+    static Trigger* coa_survie_critique(PlayerbotAI* botAI) { return new CoaSurvieCritiqueTrigger(botAI); }
+    static Trigger* coa_potion(PlayerbotAI* botAI) { return new CoaPotionTrigger(botAI); }
 };
 
 }  // namespace

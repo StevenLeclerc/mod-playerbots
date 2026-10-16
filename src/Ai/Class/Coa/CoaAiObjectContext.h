@@ -285,6 +285,17 @@ public:
 
     // CoaArene IA : voir CoaAreneEtat plus haut.
     CoaAreneEtat arene;
+
+    // IA soins/survie, lot 3 (16/10/2026, CoaAiObjectContext.cpp, CoaIaPerteRecente) : releve de la vie du bot pour la
+    // « perte rapide », 16 points espaces d'au moins 250 ms (4 s). Ecrit et lu par la seule IA de ce bot, sans verrou.
+    struct CoaSurvieReleve
+    {
+        uint32 ms[16] = {};
+        float pv[16] = {};
+        uint8 n = 0;     // points valides
+        uint8 tete = 0;  // prochain point a ecrire
+    };
+    CoaSurvieReleve survieReleve;
 };
 
 #endif
