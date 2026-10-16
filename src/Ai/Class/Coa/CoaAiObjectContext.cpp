@@ -4140,8 +4140,16 @@ uint32 CoaVenoFormeTenue(Player* bot)
 CoaAiObjectContext::CoaVenoForme& CoaVenoEtat(PlayerbotAI* botAI, Player* bot)
 {
     CoaAiObjectContext::CoaVenoForme& e = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->venoForme;
-    if (e.forme && (!bot->IsAlive() || CoaVenoFormeTenue(bot) ||
-                    getMSTimeDiff(e.sortieMs, getMSTime()) >= CoaVenoAbandonMs))
+    if (!e.forme)
+        return e;
+    // Relecture : une forme reprise par un AUTRE chemin (« coa buff », ou CoaChassePrendreSaForme qui la remet toutes les
+    // 5 s pendant une traque, en combat compris) compte comme une reprise : l'ecart anti-boucle s'applique aussi.
+    if (bot->IsAlive() && CoaVenoFormeTenue(bot))
+    {
+        e.forme = 0;
+        e.repriseMs = std::max<uint32>(getMSTime(), 1);
+    }
+    else if (!bot->IsAlive() || getMSTimeDiff(e.sortieMs, getMSTime()) >= CoaVenoAbandonMs)
         e.forme = 0;
     return e;
 }
