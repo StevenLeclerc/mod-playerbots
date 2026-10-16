@@ -282,6 +282,7 @@ void ExecuterOrdreConvoi(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
         }
         v.attaqueS = 0;                  // garde des egares desarmee (comme charger_vers)
         v.egareDepuisS = 0;
+        v.assailli = cible->GetGUID();   // revue 16/10 : l'immunite sera rendue quand ce protege ne sera plus
         cr->SetReactState(REACT_AGGRESSIVE);
         cr->AI()->AttackStart(cible);
         ++appliques;
@@ -320,6 +321,27 @@ void SuivreProtege(EvInvoque& v, Creature* cr, uint32 maintenant)
         return;
     v.etatConvoiS = std::max<uint32>(maintenant, 1);
     JournaliserProtege(v, cr, "etat");
+}
+
+// Revue 16/10 : SuivreInvoques, chaque seconde. `assaillir` retire IMMUNE_TO_NPC a ses bandits (sinon ils ne peuvent
+// pas frapper le protege) ; rien ne le rendait : apres la mort du convoi (ou sa victoire), ils restaient frappables et
+// agressifs envers les PNJ du monde (gardes, donneurs de quete -- faction 14, la raison de la migration 2026_10_10_01)
+// jusqu'au retrait hors de vue (300 s au plus) ou sans fin si le service ne clot pas. Protege mort, absent du registre,
+// ou retrait demande : l'immunite est rendue. Unit::SetImmuneToNPC(true) clot les combats contre des PNJ et GARDE ceux
+// contre les joueurs (refs PvE dont l'autre n'est pas PLAYER_CONTROLLED) : un bandit aux prises avec le joueur continue.
+void SuivreAssaillant(EvInvoque& v, Creature* cr)
+{
+    if (v.assailli.IsEmpty() || v.mort || !cr || !cr->IsAlive())
+        return;
+    bool const protegeVivant = std::any_of(evInvoques.begin(), evInvoques.end(), [&v](EvInvoque const& p)
+                                           { return p.protege && !p.mort && p.joueur == v.joueur && p.guid == v.assailli; });
+    if (protegeVivant && !v.retraitDepuisS)
+        return;
+    v.assailli = ObjectGuid::Empty;
+    cr->SetImmuneToNPC(true);
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=ordre ordre=assaillir joueur={} valeur={}"
+             " motif=immunite_rendue raison={} combat={}", v.id, v.joueur, v.entree, protegeVivant ? "retrait" : "protege_fini",
+             cr->IsInCombat() ? 1 : 0);
 }
 
 // ------------------------------------------------------------------ V2 : la BARRICADE (voir l'en-tete du fichier)

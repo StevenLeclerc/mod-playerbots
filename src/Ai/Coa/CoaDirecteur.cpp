@@ -1132,20 +1132,30 @@ constexpr uint32 BILAN_MS = 5 * MINUTE * IN_MILLISECONDS;
 // Seau a jetons, MaxCommandesParMinute. Fil monde seul.
 double jetons = -1.0;
 uint32 jetonsMs = 0;
+// Revue 16/10 : seau PROPRE a `recompenser`, de meme capacite. Une part gagnee ne dispute plus ses jetons aux verbes de
+// mise en scene (un gros evenement vidait le seau commun : la part etait refusee `budget` puis reemise des minutes plus
+// tard), mais une boucle d'emission du service reste bornee (pas de paiement sans limite de debit).
+double jetonsRecompense = -1.0;
+uint32 jetonsRecompenseMs = 0;
 
-bool PrendreJeton()
+bool PrendreJetonDe(double& seau, uint32& seauMs)
 {
     double const capacite = sPlayerbotAIConfig.directeurMaxCommandesParMinute;
     uint32 const maintenant = getMSTime();
-    if (jetons < 0.0)
-        jetons = capacite;
+    if (seau < 0.0)
+        seau = capacite;
     else
-        jetons = std::min(capacite, jetons + getMSTimeDiff(jetonsMs, maintenant) * capacite / 60000.0);
-    jetonsMs = maintenant;
-    if (jetons < 1.0)
+        seau = std::min(capacite, seau + getMSTimeDiff(seauMs, maintenant) * capacite / 60000.0);
+    seauMs = maintenant;
+    if (seau < 1.0)
         return false;
-    jetons -= 1.0;
+    seau -= 1.0;
     return true;
+}
+
+bool PrendreJeton()
+{
+    return PrendreJetonDe(jetons, jetonsMs);
 }
 
 void Journaliser(CoaDirCommande const& c, char const* statut, char const* raison)
@@ -4829,6 +4839,9 @@ struct EvInvoque
     uint32 etatConvoiS = 0;      // protege : Maintenant() de la derniere ligne `sous_action=convoi motif=etat`
     bool rapide = false;         // convoi v2 : protege lance au trot (`escorter:<vitesse>`) : etat toutes les 2 s
     uint8 palier = 0;            // renfort de palier : 75, 50 ou 25 ; 0 : autre
+    // Revue 16/10 : assaillant du convoi (ordre `assaillir`) -- le protege vise. IMMUNE_TO_NPC lui est rendu quand ce
+    // protege est mort ou parti, ou au retrait (SuivreAssaillant, CoaDirecteurConvoi.inc). Vide : pas assaillant.
+    ObjectGuid assailli;
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
 
@@ -5082,6 +5095,7 @@ void ArmerProtege(Creature* cr, EvInvoque& v);
 void ExecuterOrdreConvoi(CoaDirCommande const& c, EvAppLu const& lu, Player* p);
 void JournaliserProtege(EvInvoque const& v, Creature* cr, char const* motif);
 void SuivreProtege(EvInvoque& v, Creature* cr, uint32 maintenant);
+void SuivreAssaillant(EvInvoque& v, Creature* cr);
 bool EstProtegeDe(Unit const* u, uint32 joueur);
 
 void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
@@ -5581,6 +5595,8 @@ void SuivreInvoques()
         }
         // 13/10 : protege du convoi -- reaction passive, et son etat toutes les EV_CONVOI_ETAT_S secondes.
         SuivreProtege(v, cr, maintenant);
+        // Revue 16/10 : assaillant dont le protege n'est plus -- l'immunite aux PNJ lui est rendue.
+        SuivreAssaillant(v, cr);
         // 10/10 : garde des egares (relance, puis retrait compte).
         if (!v.mort && v.attaqueS && !v.retraitDepuisS && SuivreEgare(v, cr, maintenant))
         {
@@ -7944,6 +7960,8 @@ void LireReactions()
         " IFNULL(CAST(JSON_EXTRACT(params, '$.gardes') AS CHAR), ''),"
         " IFNULL(CAST(JSON_EXTRACT(params, '$.pot_de_vin_c') AS CHAR), '')"
         " FROM coa_dir_arc WHERE genre = 'contrat' AND statut = 'actif' AND etape = 'piste'"
+        // Revue 16/10 : un arc echu que le service n'a pas clos (service arrete) ne fait plus reagir sa cible.
+        " AND (fin_prevue IS NULL OR fin_prevue > UTC_TIMESTAMP())"
         " AND JSON_EXTRACT(params, '$.reaction') IS NOT NULL ORDER BY id LIMIT {}",
         REACTIONS_MAX);
     // Relecture T6 (M2) : `nullptr` dit aussi bien « aucun contrat » que « requete en echec ». Une requete temoin
@@ -8334,12 +8352,27 @@ bool OffreOuverte(uint32 arc, uint32& cuivre, uint32& resteS)
     return true;
 }
 
+// Revue 16/10 : option Reactions coupee ou bus eteint. Les reactions sont oubliees ET l'immobilite qu'elles ont posee
+// (fuite montee arrivee : 30 min ; offre de soudoiement : 50 s) est levee, sinon la cible reste en « stay » hors contrat.
+// Bus eteint : ViderRepos a deja tout leve, LeverImmobile n'y fait rien (garde nbImmobiles).
+void OublierReactions()
+{
+    if (reactionsContrat.empty())
+        return;
+    for (auto const& [arc, e] : reactionsContrat)
+        if ((e.reaction == "fuite_monture" && e.fuites) || (e.reaction == "soudoiement" && e.offre))
+            LeverImmobile(e.cible);
+    reactionsContrat.clear();
+    reactionsLuesS = 0;   // relecture immediate au rallumage
+}
+
 void SuivreReactions()
 {
-    if (!sPlayerbotAIConfig.directeurReactions)
+    // Revue 16/10 : bus eteint = inertie. Avant, les cibles de contrat continuaient de reagir (gardes sautes, chasseur
+    // engage) bus coupe, et ViderRepos defaisait a chaque tick l'immobilite que PoserImmobileAuMoins reposait.
+    if (!sPlayerbotAIConfig.directeurReactions || !sPlayerbotAIConfig.directeurBus)
     {
-        if (!reactionsContrat.empty())
-            reactionsContrat.clear();
+        OublierReactions();
         return;
     }
     uint32 const maintenant = Maintenant();
@@ -8364,6 +8397,9 @@ void SuivreReactions()
             }
             continue;
         }
+        // Revue 16/10 : `.directeur stop` du chasseur : sa cible ne reagit plus (le service clot l'arc ensuite).
+        if (CoaDirecteur::EstArrete(e.joueur))
+            continue;
         Player* chasseur = JoueurConnecte(e.joueur);
         Player* cible = JoueurConnecte(e.cible);
         if (!chasseur || !cible || !Humain(chasseur) || !chasseur->IsInWorld() || !cible->IsInWorld() ||
@@ -10178,8 +10214,10 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "arene");
         return;
     }
-    // 5. budget (`retirer` du lot D en est exempt : `menage`, plus haut)
-    if (!menage && !PrendreJeton())
+    // 5. budget (`retirer` du lot D en est exempt : `menage`, plus haut). Revue 16/10 : `recompenser` puise dans son
+    // seau propre (PrendreJetonDe), pas dans le seau commun : une part gagnee n'attend plus la fin d'un gros evenement.
+    bool const recompense = c.verbe == CoaDirVerbe::Recompenser;
+    if (!menage && !(recompense ? PrendreJetonDe(jetonsRecompense, jetonsRecompenseMs) : PrendreJeton()))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REFUS_BUDGET);
         Refuser(c, "budget");
@@ -11629,6 +11667,43 @@ constexpr uint32 TRAQUE_MARGE_ARC_S = 600;   // contrats.ARC_MARGE_S
 constexpr uint32 TRAQUE_RESTE_MAX_S = 2100;  // contrats.DUREE_S + PREP_MAX_S
 
 std::unordered_map<uint32, uint32> derniereTraque;       // guid -> getMSTime(), sous verrouOnglet
+
+// Revue 16/10 : l'addon sonde toutes les 5 s meme sans contrat ; chaque sondage payait une requete synchrone au fil
+// monde, pour repondre `T|-` presque toujours. Une SEULE requete, au plus toutes les TRAQUE_CONTRATS_RELIRE_MS, dit
+// quels joueurs ont un contrat actif ; les autres recoivent `T|-` sans base. Un contrat accepte se voit au plus 2 s
+// plus tard ; un contrat clos depuis la lecture retombe sur la requete complete, qui repond `T|-` comme avant.
+// Fil monde seul (CorpsTraqueur), sous verrouOnglet par prudence.
+constexpr uint32 TRAQUE_CONTRATS_RELIRE_MS = 2000;
+constexpr uint32 TRAQUE_CONTRATS_MAX = 4096;
+std::unordered_set<uint32> traqueAvecContrat;
+uint32 traqueContratsLusMs = 0;
+bool traqueContratsValides = false;   // faux : lecture en echec ou tronquee -> requete par joueur, comme avant
+
+// -> faux si le joueur n'a surement aucun contrat actif (la requete par joueur est alors inutile).
+bool PeutAvoirContrat(uint32 guid)
+{
+    uint32 const maintenantMs = getMSTime();
+    std::lock_guard<std::mutex> garde(verrouOnglet);
+    if (!traqueContratsLusMs || getMSTimeDiff(traqueContratsLusMs, maintenantMs) >= TRAQUE_CONTRATS_RELIRE_MS)
+    {
+        traqueContratsLusMs = maintenantMs ? maintenantMs : 1;
+        traqueAvecContrat.clear();
+        QueryResult r = CharacterDatabase.Query(
+            "SELECT DISTINCT joueur FROM coa_dir_arc WHERE genre = 'contrat' AND statut = 'actif' LIMIT {}",
+            TRAQUE_CONTRATS_MAX);
+        if (r)
+        {
+            do
+                traqueAvecContrat.insert(r->Fetch()[0].Get<uint32>());
+            while (r->NextRow());
+            traqueContratsValides = traqueAvecContrat.size() < TRAQUE_CONTRATS_MAX;
+        }
+        else
+            // `nullptr` = aucun contrat OU requete en echec : une requete temoin tranche.
+            traqueContratsValides = static_cast<bool>(CharacterDatabase.Query("SELECT 1"));
+    }
+    return !traqueContratsValides || traqueAvecContrat.count(guid) != 0;
+}
 // guid -> (arc, etat) de la derniere ligne journalisee, sous verrouOnglet : une ligne par changement d'etat
 // d'un contrat (prep -> piste, piste <-> refuge, carte, mort...), jamais une par lecture.
 std::unordered_map<uint32, std::pair<uint32, std::string>> traqueJournalisee;
@@ -11666,6 +11741,8 @@ std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, ui
     arcLu = cibleLue = distanceLue = 0;
     etatLu = "-";
     uint32 const guid = joueur->GetGUID().GetCounter();
+    if (!PeutAvoirContrat(guid))
+        return "T|-";
     QueryResult a = CharacterDatabase.Query(
         "SELECT id, IFNULL(etape, ''),"
         " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.cible')), 'null'), ''),"

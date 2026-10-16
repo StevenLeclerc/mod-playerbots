@@ -537,7 +537,13 @@ void SuivreAttires()
             // Une creature deja aux prises avec un AUTRE que le joueur (ni lui, ni son familier) garde son combat.
             Unit* victime = cr->GetVictim();
             bool const autreCombat = cr->IsInCombat() && victime && (!j || victime->GetCharmerOrOwnerPlayerOrPlayerItself() != j);
-            SortirAttire(a, cr, "rentre", raison, !autreCombat, j && j->GetMapId() == cr->GetMapId() ? cr->GetExactDist2d(j) : -1.0f);
+            // Revue 16/10 : deja ENGAGEE et en combat, un humain ou un chasseur qui passe ne la fait plus evader (elle
+            // rentrait a pleine vie en plein combat : le joueur perdait son kill, un tiers pouvait le provoquer). Elle
+            // passe en Retour sans evasion : plus de laisse prolongee, la laisse naturelle et la fin du combat decident.
+            bool const tiersEnCombat = a.phase == PhaseAttire::Engage && cr->IsInCombat() && !autreCombat &&
+                                       (std::strcmp(raison, "humain") == 0 || std::strcmp(raison, "chasseur") == 0);
+            SortirAttire(a, cr, tiersEnCombat ? "fin" : "rentre", raison, !autreCombat && !tiersEnCombat,
+                         j && j->GetMapId() == cr->GetMapId() ? cr->GetExactDist2d(j) : -1.0f);
             ++i;
             continue;
         }

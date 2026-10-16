@@ -102,10 +102,36 @@ void QuitterGroupeDEvenement(uint32 botLow, GroupeDEvenement const& e, char cons
         g->RemoveMember(botGuid, GROUP_REMOVEMETHOD_DEFAULT);
         retire = true;
     }
+    // Revue 16/10 : un groupe CREE par le Directeur est en butin libre (plus bas). S'il survit au depart du dernier bot
+    // de l'evenement (le joueur a invite un ami entre-temps), il revient au mode par defaut du coeur (GROUP_LOOT,
+    // Group::Create), sans quoi deux humains restaient en butin libre sans l'avoir choisi. Seulement s'il est encore en
+    // FREE_FOR_ALL : un choix fait depuis par le chef est garde. Le groupe est RELU (RemoveMember a pu le dissoudre).
+    bool butinRendu = false;
+    if (retire && e.cree && !dissous)
+        if (Group* reste = sGroupMgr->GetGroupByGUID(e.groupe))
+            if (reste->GetLootMethod() == FREE_FOR_ALL && !reste->isBGGroup() && !reste->isBFGroup() &&
+                !reste->isLFGGroup())
+            {
+                bool autreBot = false;
+                for (auto const& [autre, ge] : groupesEvenement)
+                    if (autre != botLow && ge.groupe == e.groupe &&
+                        reste->IsMember(ObjectGuid::Create<HighGuid::Player>(autre)))
+                    {
+                        autreBot = true;
+                        break;
+                    }
+                if (!autreBot)
+                {
+                    reste->SetLootMethod(GROUP_LOOT);
+                    reste->SendUpdate();
+                    butinRendu = true;
+                }
+            }
     LOG_INFO("playerbots",
              "coa directeur groupe: id={} guid={} joueur={} motif=quitte raison={} retire={} dissous={} membres_avant={}"
-             " cree={} attente_s={}",
-             e.id, botLow, e.joueur, raison, retire ? 1 : 0, dissous ? 1 : 0, membres, e.cree ? 1 : 0, attente);
+             " cree={} attente_s={} butin_rendu={}",
+             e.id, botLow, e.joueur, raison, retire ? 1 : 0, dissous ? 1 : 0, membres, e.cree ? 1 : 0, attente,
+             butinRendu ? 1 : 0);
 }
 
 // Pourquoi ce bot ne peut pas rejoindre le joueur (nullptr : il le peut). `groupe` : le groupe du joueur, ou nul.
