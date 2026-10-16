@@ -3735,7 +3735,14 @@ public:
         return RecordUsage(USAGE_BUFF, nullptr);
     }
 
-    bool isUseful() override { return ClassHas(bot, KIND_BUFF | KIND_STANCE); }
+    bool isUseful() override
+    {
+        // Revue du lot 5 : hors combat, la sortie de forme du Venomancer (CoaVenoEtat) est oubliee, ecart anti-boucle
+        // compris : la forme que « coa buff » remet ici n'est pas une reprise, et le combat suivant repart a neuf.
+        if (!bot->IsInCombat())
+            static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->venoForme = CoaAiObjectContext::CoaVenoForme();
+        return ClassHas(bot, KIND_BUFF | KIND_STANCE);
+    }
 
 private:
     std::map<std::pair<ObjectGuid, uint32>, time_t> recent;
@@ -4147,6 +4154,8 @@ uint32 CoaVenoFormeTenue(Player* bot)
     return bot->HasAura(CoaVenoBeetle, moi) ? CoaVenoBeetle : bot->HasAura(CoaVenoSpider, moi) ? CoaVenoSpider : 0;
 }
 
+bool CoaVenoTank(Player* bot) { return GetCoaRole(bot) == CoaRole::Tank; }
+
 // L'etat de la sortie de forme, remis a zero quand le bot est mort, a repris sa forme (par ce lot ou par « coa buff »), a
 // pris l'autre forme, ou quand la reprise est abandonnee.
 CoaAiObjectContext::CoaVenoForme& CoaVenoEtat(PlayerbotAI* botAI, Player* bot)
@@ -4156,10 +4165,15 @@ CoaAiObjectContext::CoaVenoForme& CoaVenoEtat(PlayerbotAI* botAI, Player* bot)
         return e;
     // Relecture : une forme reprise par un AUTRE chemin (« coa buff », ou CoaChassePrendreSaForme qui la remet toutes les
     // 5 s pendant une traque, en combat compris) compte comme une reprise : l'ecart anti-boucle s'applique aussi.
+    // Revue du lot 5 : seulement en combat et peu apres la sortie (borne hors forme + la cadence de 5 s de la traque) ; une
+    // forme retrouvee plus tard (combat fini sans passage de « coa buff ») efface l'etat sans armer l'ecart.
     if (bot->IsAlive() && CoaVenoFormeTenue(bot))
     {
+        bool const recente = bot->IsInCombat() && getMSTimeDiff(e.sortieMs, getMSTime()) <
+            (CoaVenoTank(bot) ? CoaVenoHorsFormeTankMs : CoaVenoHorsFormeMs) + 5 * IN_MILLISECONDS;
         e.forme = 0;
-        e.repriseMs = std::max<uint32>(getMSTime(), 1);
+        if (recente)
+            e.repriseMs = std::max<uint32>(getMSTime(), 1);
     }
     else if (!bot->IsAlive() || getMSTimeDiff(e.sortieMs, getMSTime()) >= CoaVenoAbandonMs)
         e.forme = 0;
@@ -4182,8 +4196,6 @@ bool CoaVenoSoinPret(PlayerbotAI* botAI, Player* bot, bool sansForme, bool gcd)
             return true;
     return false;
 }
-
-bool CoaVenoTank(Player* bot) { return GetCoaRole(bot) == CoaRole::Tank; }
 
 // Sortir de forme (ou continuer hors forme) pour se soigner.
 bool CoaVenoSoinVoulu(PlayerbotAI* botAI, Player* bot)
