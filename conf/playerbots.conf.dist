@@ -1640,6 +1640,37 @@ AiPlayerbot.CoaIa.Survie = 1
 # Default: 1
 AiPlayerbot.CoaIa.SurviePotion = 1
 
+# Lot 4, rotation des soigneurs. ReserveSoigneur : un soigneur EN GROUPE n'attaque avec des sorts
+# payes en mana que si tout le groupe proche est au-dessus de AiPlayerbot.AlmostFullHealth et sa
+# mana au-dessus de ReserveSoigneurMana (en %) ; hors groupe, rien ne change.
+# Default: 1
+AiPlayerbot.CoaIa.ReserveSoigneur = 1
+# Default: 80
+AiPlayerbot.CoaIa.ReserveSoigneurMana = 80
+
+# Lot 4 : un HoT a cible unique (SPELL_ATTR5_LIMIT_N) deja tenu par le bot sur un autre membre
+# avec plus de 30 % de sa duree n'est pas deplace, sauf urgence (cible sous LowHealth, porteur
+# au-dessus de MediumHealth). Nanobot Reconstruction du Tinker.
+# Default: 1
+AiPlayerbot.CoaIa.HotUnique = 1
+
+# Lot 4 : « deja pose » cherche sur le lanceur quand toutes les auras du sort se posent sur lui
+# (Ingredient: Jungle Shrooms du Witch Doctor, relance en boucle). Vaut pour tous les bots CoA.
+# Default: 1
+AiPlayerbot.CoaIa.AuraSurLanceur = 1
+
+# Lot 4 : soins directs tries selon le deficit de la cible et le rendement en mana (vie par
+# point de ressource), le plus rapide d'abord sous AiPlayerbot.CriticalHealth ; remplace le
+# « moins cher d'abord » sous la reserve pour ces soins et pour le soin sur soi du lot 3.
+# Default: 1
+AiPlayerbot.CoaIa.TriSoins = 1
+
+# Lot 4 : les tests d'utilite des actions de soin et de defense suivent ce que le lancement
+# refusera (recharge globale, soin deja pose, HoT tenu ailleurs, refus certains sur la cible) :
+# plus d'action « utile » qui ne lance rien. Sans effet sur le choix des sorts.
+# Default: 1
+AiPlayerbot.CoaIa.UtiliteAlignee = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

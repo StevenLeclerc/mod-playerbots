@@ -1162,6 +1162,26 @@ bool CoaAuraPoseePar(Unit* cible, ObjectGuid lanceur, SpellInfo const* info)
 // le bot sur `cible`. Juge sur `info`, le sort EFFECTIF (EffectiveSpell), celui que PlayerbotAI::CastSpell lance : un
 // remplacement qui pose une AUTRE aura n'est pas ecarte parce que l'aura du sort de base est la (meme regle que
 // CoaAreneRefusTactique, revue du 11/10). `spell.kind` : les marques du sort de la liste.
+/*
+ * IA soins/survie, lot 4 (DIAG rotation C2, AiPlayerbot.CoaIa.AuraSurLanceur) : toutes les auras du sort se posent sur
+ * le LANCEUR. Ingredient: Jungle Shrooms 801660 (Witch Doctor) : aura 23 sur soi (TargetA 1), permanente, qui declenche le
+ * soin de zone 802703. « Deja pose » le cherchait sur le PATIENT, ne le trouvait jamais, et le sort etait relance en boucle
+ * (1 855 lancers au volet A, 5 % de la mana de base chacun ; 131 s sans soin direct sur un membre a 45 %).
+ */
+bool CoaAuraSurLanceur(SpellInfo const* info)
+{
+    bool aura = false;
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect() || !IsAuraEffect(effect))
+            continue;
+        if (effect.TargetA.GetTarget() != TARGET_UNIT_CASTER)
+            return false;
+        aura = true;
+    }
+    return aura;
+}
+
 bool CoaSoinDejaPose(Player* bot, Usable const& spell, SpellInfo const* info, Unit* cible)
 {
     if (!cible || !cible->IsInWorld() || !(spell.kind & (KIND_HEAL | KIND_DEFENSIVE)) ||
@@ -1169,6 +1189,9 @@ bool CoaSoinDejaPose(Player* bot, Usable const& spell, SpellInfo const* info, Un
         return false;
     if (CoaSoinDirect(info))
         return false;
+    // Lot 4 : une aura qui ne se pose que sur le lanceur se cherche sur lui, quel que soit le patient.
+    if (sPlayerbotAIConfig.coaIaAuraSurLanceur && CoaAuraSurLanceur(info))
+        return CoaAuraPoseePar(bot, bot->GetGUID(), info);
     return CoaAuraPoseePar(cible, bot->GetGUID(), info);
 }
 
@@ -1204,6 +1227,11 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
             continue;
         // Same pet test as CastFirst (banc d'arene du 11/10).
         if (CoaExigeFamilierAbsent(bot, info))
+            continue;
+        // IA soins/survie, lot 4 (AiPlayerbot.CoaIa.UtiliteAlignee) : sous la recharge globale, CastFirst ne lance rien
+        // (il rend nullptr au premier sort qui l'a) : un sort qui la subit n'est pas pret. Le moteur passe a l'action
+        // suivante, comme apres un echec (Engine::DoNextAction) : rien ne change en jeu, sinon les actions vides tracees.
+        if (sPlayerbotAIConfig.coaIaUtiliteAlignee && bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
             continue;
         if (!bot->HasSpellCooldown(info->Id) && !IsBenched(benched, spell.info->Id, now) &&
             !IsBenched(benched, info->Id, now))
@@ -2743,6 +2771,181 @@ bool CoaIaZoneInclutLanceur(SpellInfo const* info)
     return true;
 }
 
+/*
+ * IA SOINS/SURVIE, LOT 4 (16/10/2026, coa-project/docs/DIAG-banc-soins-rotation-20261016.md, points 1, 3, 4, 5, 6).
+ */
+
+// C4 (AiPlayerbot.CoaIa.ReserveSoigneur) : un soigneur en groupe n'attaque avec des sorts payes en mana que si tout le
+// groupe proche (40 yd) est au-dessus de almostFullHealth (85 %) ET sa mana au-dessus de CoaIa.ReserveSoigneurMana (80 %).
+// Avant : la reserve n'entrait en jeu que sous 35 % de mana (CoaHealerManaReserve) ; Tinker A1, essai 423 : mana de 89 a
+// 32 % en 32 s sans un soin, puis le tank sous 65 % avec moins de 35 % de mana pour le soigner. Hors groupe (bot qui
+// quete seul), rien ne change : « party member to heal » ne rend que lui-meme.
+bool CoaIaSoigneurRetient(PlayerbotAI* botAI, Player* bot)
+{
+    if (!sPlayerbotAIConfig.coaIaReserveSoigneur || bot->getPowerType() != POWER_MANA || GetCoaRole(bot) != CoaRole::Heal)
+        return false;
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+    bool besoin = bot->GetPowerPct(POWER_MANA) < float(sPlayerbotAIConfig.coaIaReserveSoigneurMana);
+    for (GroupReference* ref = group->GetFirstMember(); ref && !besoin; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        // Meme lieu d'abord (P-137 : rien d'un autre fil), puis la vie.
+        if (member && member->IsInWorld() && member->GetMapId() == bot->GetMapId() &&
+            bot->IsWithinDistInMap(member, 40.0f) && member->IsAlive() &&
+            member->GetHealthPct() < float(sPlayerbotAIConfig.almostFullHealth))
+            besoin = true;
+    }
+    if (!besoin)
+        return false;
+    // Comme SavingManaForHeals : un bot qui ne connait aucun soin ne retient rien.
+    return !KnownAbilities(botAI, bot, [](uint16 kind)
+        { return (kind & (KIND_HEAL | KIND_HOT)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); }).empty();
+}
+
+// C2-bis (AiPlayerbot.CoaIa.HotUnique) : HoT a cible unique (SpellInfo::IsSingleTarget, SPELL_ATTR5_LIMIT_N) que le bot
+// tient deja sur une AUTRE unite avec plus de 30 % de sa duree : ne pas le deplacer, sauf urgence (cible sous lowHealth,
+// porteur au-dessus de mediumHealth). Nanobot Reconstruction 502561 (Tinker) : 483 lancers au volet A, deplace de membre
+// en membre a chaque recharge globale, 17 % de mana de base chacun -- la mana du Tinker fondait en 46 s.
+bool CoaIaHotTenuAilleurs(Player* bot, SpellInfo const* info, uint32 listeId, Unit* cible)
+{
+    if (!info->IsSingleTarget())
+        return false;
+    for (Aura const* aura : bot->GetSingleCastAuras())
+    {
+        if (!aura || (aura->GetId() != info->Id && aura->GetId() != listeId))
+            continue;
+        WorldObject* owner = aura->GetOwner();
+        if (!owner || owner == cible || owner->GetMap() != bot->GetMap())
+            continue;
+        int32 const max = aura->GetMaxDuration();
+        int32 const reste = aura->GetDuration();
+        if (max > 0 && reste >= 0 && int64(reste) * 10 <= int64(max) * 3)
+            continue;
+        Unit const* porteur = owner->ToUnit();
+        if (!porteur || !porteur->IsAlive())
+            continue;
+        if (cible->GetHealthPct() < float(sPlayerbotAIConfig.lowHealth) &&
+            porteur->GetHealthPct() > float(sPlayerbotAIConfig.mediumHealth))
+            continue;
+        return true;
+    }
+    return false;
+}
+
+// C3 : vie que le sort rendra a `cible`, lue dans ses effets (valeurs de base sans tirage, bonus de soin du lanceur
+// Unit::SpellHealingBonusDone), HoT sur toute sa duree, un niveau de declenche par TRIGGER_SPELL ou par aura
+// PERIODIC_TRIGGER_SPELL. 0 ou 1 point : soin fait par script, illisible.
+float CoaIaSoinEstime(Player* bot, SpellInfo const* info, Unit* cible, uint8 profondeur = 0)
+{
+    float total = 0.0f;
+    float const vieMax = float(cible->GetMaxHealth());
+    int32 const duree = info->GetMaxDuration();
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& effect = info->Effects[i];
+        if (!effect.IsEffect())
+            continue;
+        uint32 const valeur = uint32(std::max(0, CoaValeurDeBase(effect)));
+        int32 const ticks = (duree > 0 && effect.Amplitude > 0) ? duree / effect.Amplitude : 1;
+        if (effect.Effect == SPELL_EFFECT_HEAL)
+            total += float(bot->SpellHealingBonusDone(cible, info, valeur, HEAL, i));
+        else if (effect.Effect == SPELL_EFFECT_HEAL_PCT)
+            total += vieMax * float(valeur) / 100.0f;
+        else if (effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH)
+            total += vieMax;
+        else if ((effect.Effect == SPELL_EFFECT_TRIGGER_SPELL || effect.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE) &&
+                 effect.TriggerSpell && effect.TriggerSpell != info->Id && !profondeur)
+        {
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                total += CoaIaSoinEstime(bot, declenche, cible, 1);
+        }
+        else if (IsAuraEffect(effect) && effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL)
+            total += float(bot->SpellHealingBonusDone(cible, info, valeur, DOT, i)) * float(ticks);
+        else if (IsAuraEffect(effect) && effect.ApplyAuraName == SPELL_AURA_PERIODIC_TRIGGER_SPELL && effect.TriggerSpell &&
+                 effect.TriggerSpell != info->Id && !profondeur)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                total += CoaIaSoinEstime(bot, declenche, cible, 1) * float(ticks);
+    }
+    return total;
+}
+
+/*
+ * C3 (AiPlayerbot.CoaIa.TriSoins) : soins tries selon le deficit de la cible et le rendement en mana. Cultist (40), mesure :
+ * Devour Curse et Dark Infusion lances 205 et 134 fois au-dessus de 35 % de mana, Eldritch Mending (le meilleur soin) 6
+ * fois -- l'ordre etait celui du niveau requis, et CheapestFirst ne jouait que sous la reserve.
+ *   - d'abord les soins dont l'estimation tient dans 1,2 x le deficit, du meilleur rendement (vie par point de ressource,
+ *     un sort gratuit en tete) au moins bon ; puis ceux qui deborderaient, du plus petit au plus grand ;
+ *   - un soin illisible (estimation <= 1, script) garde sa place dans la liste ; les autres se trient entre eux, et
+ *     seulement dans leur groupe (`rang`, l'ordre direct / HoT / zone de « coa heal ») ;
+ *   - cible sous criticalHealth : le plus rapide (temps d'incantation) d'abord, a l'interieur de chaque groupe.
+ * Les estimations sont relevees une fois par sort avant le tri (jamais dans le comparateur : CalcValue tire au sort).
+ * Limite : le cout est celui du DBC (CalcPowerCost) ; un cout fait par script (Touch of Moonlight 574328 du Starcaller,
+ * 10 % de la mana maximale, AscensionStarcallerData.h) n'est pas vu.
+ */
+template <typename Rang>
+void CoaIaTrierSoins(Player* bot, Unit* cible, std::vector<Usable>& spells, Rang rang)
+{
+    size_t const n = spells.size();
+    if (n < 2 || !cible)
+        return;
+    struct Cle
+    {
+        float estime;
+        float rendement;
+        int32 incantation;
+        int rang;
+    };
+    std::vector<Cle> cles(n);
+    for (size_t i = 0; i < n; ++i)
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spells[i].info);
+        float const estime = CoaIaSoinEstime(bot, info, cible);
+        int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+        cles[i] = { estime, estime / float(std::max(cout, 1)), info->CalcCastTime(bot), rang(spells[i].kind) };
+    }
+    float const deficit = std::max(1.0f, float(cible->GetMaxHealth()) - float(cible->GetHealth()));
+    bool const critique = cible->GetHealthPct() < float(sPlayerbotAIConfig.criticalHealth);
+
+    std::vector<Usable> const avant = spells;
+    std::vector<size_t> ordre(n);
+    for (size_t i = 0; i < n; ++i)
+        ordre[i] = i;
+    // Groupe par groupe (`rang` contigu : la liste est deja triee par groupe), seuls les soins lisibles bougent, et ils
+    // reprennent les places des soins lisibles.
+    size_t debut = 0;
+    while (debut < n)
+    {
+        size_t fin = debut;
+        while (fin < n && cles[fin].rang == cles[debut].rang)
+            ++fin;
+        std::vector<size_t> places;
+        for (size_t i = debut; i < fin; ++i)
+            if (cles[i].estime > 1.0f)
+                places.push_back(i);
+        std::vector<size_t> lisibles = places;
+        std::stable_sort(lisibles.begin(), lisibles.end(), [&cles, deficit](size_t a, size_t b)
+        {
+            bool const tientA = cles[a].estime <= 1.2f * deficit;
+            bool const tientB = cles[b].estime <= 1.2f * deficit;
+            if (tientA != tientB)
+                return tientA;
+            if (tientA)
+                return cles[a].rendement > cles[b].rendement;
+            return cles[a].estime < cles[b].estime;
+        });
+        for (size_t k = 0; k < places.size(); ++k)
+            ordre[places[k]] = lisibles[k];
+        if (critique)
+            std::stable_sort(ordre.begin() + long(debut), ordre.begin() + long(fin),
+                [&cles](size_t a, size_t b) { return cles[a].incantation < cles[b].incantation; });
+        debut = fin;
+    }
+    for (size_t i = 0; i < n; ++i)
+        spells[i] = avant[ordre[i]];
+}
+
 // Les soins sur soi : mono-cible d'abord (ordre d'avant : le moins cher d'abord sous la reserve de mana), puis, en dernier
 // recours, les soins de zone qui couvrent le lanceur. Jamais un sort qui exclut le lanceur, vise un ennemi, ou enracine.
 std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
@@ -2750,7 +2953,10 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
     std::vector<Usable> soins = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
         { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)) &&
                  !(marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)); });
-    if (SavingManaForHeals(botAI, bot))
+    // Lot 4 (TriSoins) : par deficit et rendement (CoaIaTrierSoins), a la place du moins cher d'abord sous la reserve.
+    if (sPlayerbotAIConfig.coaIaTriSoins)
+        CoaIaTrierSoins(bot, bot, soins, [](uint16) { return 0; });
+    else if (SavingManaForHeals(botAI, bot))
         CheapestFirst(bot, soins);
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
              { return (kind & KIND_GROUP_HEAL) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) &&
@@ -2775,6 +2981,11 @@ bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spe
         if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
             continue;
         if (cible && CoaSoinDejaPose(bot, spell, info, cible))
+            continue;
+        // Lot 4 (AiPlayerbot.CoaIa.UtiliteAlignee) : aussi la recharge globale et les refus certains lus sur la cible,
+        // que CastFirst applique (HasReadyAbility). Ni portee ni ligne de vue : trop cheres a chaque passage.
+        if (sPlayerbotAIConfig.coaIaUtiliteAlignee &&
+            (bot->GetGlobalCooldownMgr().HasGlobalCooldown(info) || (cible && CoaRefusCibleCertain(bot, info, cible))))
             continue;
         return true;
     }
@@ -2804,7 +3015,9 @@ public:
         // measured on 18/09 that is the usual state: in 99% of the casts turned down for want of
         // power the bot sat below 10% mana. Under its reserve it attacks with what costs nothing
         // (and its weapon), keeping the rest for heals.
-        bool const saveMana = SavingManaForHeals(botAI, bot);
+        // IA soins/survie, lot 4 (C4) : un soigneur en groupe retient aussi sa mana tant que le groupe n'est pas plein ou
+        // que sa mana est sous CoaIa.ReserveSoigneurMana (CoaIaSoigneurRetient).
+        bool const saveMana = SavingManaForHeals(botAI, bot) || CoaIaSoigneurRetient(botAI, bot);
 
         std::vector<Usable> usable = KnownAbilities(botAI, bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
         // CoaArene, survie (11/10, arene 1v1 et duel, IaSurvie) : les etendards et autres sorts au sol de soutien ne sont
@@ -2915,7 +3128,7 @@ public:
 
         std::vector<Usable> spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
-        if (SavingManaForHeals(botAI, bot))
+        if (SavingManaForHeals(botAI, bot) || CoaIaSoigneurRetient(botAI, bot))
             DropManaSpells(bot, spells);
         // CoaArene, survie (11/10) : comme dans « coa attack », ni etendard ni soutien au sol vise sur l'adversaire.
         CoaAreneRetirerSoutiens(botAI, bot, spells);
@@ -2952,7 +3165,52 @@ public:
         if (!target || !target->IsAlive())
             return false;
 
+        std::vector<Usable> spells = Candidats(target);
+
+        // IA soins/survie, lot 4 (C3, AiPlayerbot.CoaIa.TriSoins) : soin direct trie par deficit et rendement, dans
+        // chaque groupe direct / HoT / zone ; le moins cher d'abord sous la reserve ne s'y applique plus. Zone et HoT
+        // gardent l'ordre d'avant.
+        if (sPlayerbotAIConfig.coaIaTriSoins && mode == Mode::Direct)
+            CoaIaTrierSoins(bot, target, spells, Rang);
+        else if (SavingManaForHeals(botAI, bot))
+            CheapestFirst(bot, spells);
+
+        UsageKind const usage = mode == Mode::Group ? USAGE_GROUP_HEAL : mode == Mode::OverTime ? USAGE_HOT : USAGE_HEAL;
+        if (spells.empty())
+            RecordFailure(usage, 0, FAILURE_NOTHING);
+
+        // Banc des soins (S0) : remis a zero ICI, apres le FAILURE_NOTHING ci-dessus (le cas `vide` le dit deja).
+        t_bancSoinEchec = BancSoinEchec();
+        SpellInfo const* cast = RecordUsage(usage, CastFirst(botAI, bot, spells, target, usage));
+        BancSoinTracer(bot, mode == Mode::Group ? "group_heal" : mode == Mode::OverTime ? "hot" : "heal", cast,
+                       spells.empty());
+        return cast;
+    }
+
+    bool isUseful() override
+    {
+        Unit* target = AI_VALUE(Unit*, "party member to heal");
+        uint16 const wanted = mode == Mode::Group ? KIND_GROUP_HEAL : mode == Mode::OverTime ? KIND_HOT : KIND_HEAL;
+        // IA soins/survie, lot 4 (AiPlayerbot.CoaIa.UtiliteAlignee) : les memes candidats qu'Execute (Candidats : HoT deja
+        // pose, cible unique tenue ailleurs, soin d'autrui, hors groupe), puis les memes refus que CastFirst (CoaIaUnPret :
+        // recharge globale, deja pose, refus certains sur la cible). Avant, l'action se disait utile et ne trouvait rien :
+        // 2 388 « hot rien code=1001 » du Chronomancer au banc.
+        if (sPlayerbotAIConfig.coaIaUtiliteAlignee)
+            return target && target->IsAlive() && target->GetHealthPct() < sPlayerbotAIConfig.almostFullHealth &&
+                   ClassHas(bot, wanted) && CoaIaUnPret(botAI, bot, Candidats(target), target);
+        return IsUsefulAvant(target, wanted);
+    }
+
+private:
+    // Direct / HoT / zone : l'ordre des groupes de « coa heal ».
+    static int Rang(uint16 kind) { return ((kind & KIND_GROUP_HEAL) ? 2 : 0) + ((kind & KIND_HOT) ? 1 : 0); }
+
+    // Les soins candidats pour `target`, avant tout tri de rendement : ce que Execute lance, et ce que isUseful juge
+    // (lot 4). Options du lot 4 a 0 : la liste d'avant, a l'identique.
+    std::vector<Usable> Candidats(Unit* target)
+    {
         std::vector<Usable> spells;
+        ObjectGuid const caster = bot->GetGUID();
         switch (mode)
         {
             case Mode::Group:
@@ -2961,9 +3219,15 @@ public:
             case Mode::OverTime:
             {
                 spells = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_HOT) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
-                ObjectGuid const caster = bot->GetGUID();
+                // Lot 4 (C2, AuraSurLanceur) : une aura qui ne se pose que sur le lanceur se cherche sur lui.
+                bool const surLanceur = sPlayerbotAIConfig.coaIaAuraSurLanceur;
+                Player* const lanceur = bot;
                 spells.erase(std::remove_if(spells.begin(), spells.end(),
-                    [target, caster](Usable const& spell) { return target->HasAura(spell.info->Id, caster); }),
+                    [target, caster, surLanceur, lanceur](Usable const& spell)
+                    {
+                        Unit* const porteur = surLanceur && CoaAuraSurLanceur(spell.info) ? lanceur : target;
+                        return porteur->HasAura(spell.info->Id, caster);
+                    }),
                     spells.end());
                 break;
             }
@@ -2972,10 +3236,20 @@ public:
                 spells = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_HEAL) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); });
                 std::stable_sort(spells.begin(), spells.end(), [](Usable const& a, Usable const& b)
                 {
-                    auto rank = [](uint16 kind) { return ((kind & KIND_GROUP_HEAL) ? 2 : 0) + ((kind & KIND_HOT) ? 1 : 0); };
-                    return rank(a.kind) < rank(b.kind);
+                    return Rang(a.kind) < Rang(b.kind);
                 });
                 break;
+        }
+
+        // Lot 4 (C2-bis, HotUnique) : un HoT a cible unique tenu ailleurs n'est pas deplace, sauf urgence.
+        if (sPlayerbotAIConfig.coaIaHotUnique)
+        {
+            Player* const lanceur = bot;
+            spells.erase(std::remove_if(spells.begin(), spells.end(), [target, lanceur](Usable const& spell)
+                {
+                    return (spell.kind & KIND_HOT) &&
+                           CoaIaHotTenuAilleurs(lanceur, EffectiveSpell(lanceur, spell.info), spell.info->Id, target);
+                }), spells.end());
         }
 
         // Since a heal aimed at the caster alone is classified as a heal (KIND_SELF_HEAL), it has
@@ -2999,25 +3273,12 @@ public:
             spells.erase(std::remove_if(spells.begin(), spells.end(),
                 [](Usable const& spell) { return (spell.kind & KIND_GROUP_HEAL) != 0; }), spells.end());
 
-        if (SavingManaForHeals(botAI, bot))
-            CheapestFirst(bot, spells);
-
-        UsageKind const usage = mode == Mode::Group ? USAGE_GROUP_HEAL : mode == Mode::OverTime ? USAGE_HOT : USAGE_HEAL;
-        if (spells.empty())
-            RecordFailure(usage, 0, FAILURE_NOTHING);
-
-        // Banc des soins (S0) : remis a zero ICI, apres le FAILURE_NOTHING ci-dessus (le cas `vide` le dit deja).
-        t_bancSoinEchec = BancSoinEchec();
-        SpellInfo const* cast = RecordUsage(usage, CastFirst(botAI, bot, spells, target, usage));
-        BancSoinTracer(bot, mode == Mode::Group ? "group_heal" : mode == Mode::OverTime ? "hot" : "heal", cast,
-                       spells.empty());
-        return cast;
+        return spells;
     }
 
-    bool isUseful() override
+    // isUseful d'avant le lot 4 (UtiliteAlignee = 0), inchange.
+    bool IsUsefulAvant(Unit* target, uint16 wanted)
     {
-        Unit* target = AI_VALUE(Unit*, "party member to heal");
-        uint16 const wanted = mode == Mode::Group ? KIND_GROUP_HEAL : mode == Mode::OverTime ? KIND_HOT : KIND_HEAL;
         // Same rule as Execute: a caster-only heal makes this action useful for the bot itself,
         // never for another member, or the action would run every tick and cast nothing.
         bool const onSelf = target == bot;
@@ -3032,7 +3293,6 @@ public:
                             !(horsGroupe && (kind & KIND_GROUP_HEAL)); });
     }
 
-private:
     Mode mode;
 
     // Lot S : une cible autre que le bot et hors de son groupe ou raid (le joueur servi d'un evenement).
