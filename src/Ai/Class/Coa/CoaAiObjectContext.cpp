@@ -2759,6 +2759,40 @@ float CoaIaForceDefensive(Player* bot, SpellInfo const* info, uint8 profondeur =
     return force;
 }
 
+/*
+ * Revue du 16/10 : un sort a cible unique (SpellInfo::IsSingleTarget, SPELL_ATTR5_LIMIT_N : relance, il quitte son porteur)
+ * que le bot tient deja sur un AUTRE membre vivant de son groupe ou raid, sur sa carte. Infinite Shield 520457 (Chronomancer,
+ * bouclier a 10 charges de proc) : « coa defensive » sous 65 % l'otait au tank pour le poser sur le Chronomancer. La survie
+ * ne le pose pas sur le bot, sauf au palier critique (CoaIaCritiquePv). Meme lecture que CoaIaHotTenuAilleurs (lot 4), sans
+ * seuil de duree : un bouclier pose ailleurs y reste tant qu'il tient.
+ */
+bool CoaIaUniqueTenuAilleurs(Player* bot, SpellInfo const* info, uint32 listeId)
+{
+    if (!info->IsSingleTarget())
+        return false;
+    for (Aura const* aura : bot->GetSingleCastAuras())
+    {
+        if (!aura || (aura->GetId() != info->Id && aura->GetId() != listeId))
+            continue;
+        WorldObject* owner = aura->GetOwner();
+        if (!owner || owner == bot || owner->GetMap() != bot->GetMap())
+            continue;
+        Unit const* porteur = owner->ToUnit();
+        if (porteur && porteur->IsAlive() && bot->IsInRaidWith(porteur))
+            return true;
+    }
+    return false;
+}
+
+// Retire les sorts a cible unique tenus sur un autre membre (CoaIaUniqueTenuAilleurs), hors palier critique.
+void CoaIaRetirerUniquesTenus(Player* bot, std::vector<Usable>& spells)
+{
+    if (bot->GetHealthPct() < CoaIaCritiquePv)
+        return;
+    spells.erase(std::remove_if(spells.begin(), spells.end(), [bot](Usable const& spell)
+        { return CoaIaUniqueTenuAilleurs(bot, EffectiveSpell(bot, spell.info), spell.info->Id); }), spells.end());
+}
+
 // Les defensifs que le palier admet, du plus fort au plus faible (ordre du niveau requis a force egale). `trier` faux :
 // la liste seule (isUseful, declencheurs).
 std::vector<Usable> CoaIaDefensifs(PlayerbotAI* botAI, Player* bot, float pv, bool perteRapide, bool trier)
@@ -2767,6 +2801,7 @@ std::vector<Usable> CoaIaDefensifs(PlayerbotAI* botAI, Player* bot, float pv, bo
         { return (kind & KIND_DEFENSIVE) && !(marques & MARQUE_PAS_SUR_SOI); });
     defensifs.erase(std::remove_if(defensifs.begin(), defensifs.end(), [bot, pv, perteRapide](Usable const& spell)
         { return !CoaIaDefensifAdmis(EffectiveSpell(bot, spell.info), pv, perteRapide); }), defensifs.end());
+    CoaIaRetirerUniquesTenus(bot, defensifs);
     if (trier && defensifs.size() > 1)
     {
         // Relevee une fois par sort, puis triee : jamais de calcul dans le comparateur.
@@ -2986,6 +3021,8 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
                       !(marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)); }))
         if (CoaIaZoneInclutLanceur(EffectiveSpell(bot, spell.info)))
             soins.push_back(spell);
+    // Revue du 16/10 : un HoT ou un soin a cible unique tenu sur un autre membre n'est pas retire pour le bot.
+    CoaIaRetirerUniquesTenus(bot, soins);
     return soins;
 }
 
