@@ -1622,7 +1622,7 @@ AiPlayerbot.CoaIa.Classement = 1
 # l'aura exigee (CasterAuraSpell) du plus grand nombre de ses sorts defensifs connus, et en
 # change si elle en porte une autre (Guardian Vanguard : Tower Formation 800317 au lieu
 # d'Assault Formation). Sans defensif lie a une posture, rien ne change. Cursed Form du
-# Bloodmage et formes du Venomancer sont hors de la regle (decisions de jeu en attente).
+# Bloodmage et formes du Venomancer sont hors de la regle (lot 5 : CoaIa.FormeMaudite, VenomancerSoin).
 # Default: 1
 AiPlayerbot.CoaIa.PostureRole = 1
 
@@ -1675,7 +1675,8 @@ AiPlayerbot.CoaIa.UtiliteAlignee = 1
 # Lot 5, decision de jeu du 16/10 (Bloodmage) : sous AiPlayerbot.LowHealth en combat, le bot entre
 # en forme maudite (Blood Curse et ses remplacants de specialisation, ou Eternal Curse ; jamais
 # Moon Gaze, qui l'etourdit) puis lance ses defensifs de forme, un a la fois : Endure the Curse,
-# Eternal Resolve, Wicked Howl. Hors arene 1v1 et duel. A 0 : comportement d'avant.
+# Eternal Resolve, Wicked Howl. Une forme payee en vie n'est prise que s'il lui reste 15 %
+# de vie apres paiement. Hors arene 1v1 et duel. A 0 : comportement d'avant.
 # Default: 1
 AiPlayerbot.CoaIa.FormeMaudite = 1
 

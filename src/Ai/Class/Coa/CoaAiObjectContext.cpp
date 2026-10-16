@@ -3557,7 +3557,7 @@ public:
  * va-et-vient). Aucun defensif ne depend d'une posture : 0, la regle d'avant s'applique. Hors combat seulement (comme
  * « coa buff »), une fois par StanceRecastSeconds au plus (garde `recent` de CoaBuffAction).
  *
- * Postures ECARTEES de la regle (decisions de jeu en attente du commanditaire, a ne pas trancher ici) :
+ * Postures ECARTEES de la regle (decisions de jeu du 16/10, tranchees par le lot 5 : CoaMauditPlanifier, CoaVenoSoinVoulu) :
  *   - Cursed Form 524861 et 525031 (Bloodmage, Eternal 99 tank) : entrer en forme maudite pour ses defensifs ;
  *   - Spider Form 800841 et Beetle Form 803183 (Venomancer, Fortitude 52 tank) : formes, voir C6 du diagnostic.
  */
@@ -3995,6 +3995,9 @@ constexpr uint32 CoaMauditMarqueurBase = 525031;  // SPELL_CURSED_FORM_REQUIREME
 constexpr uint8 COA_MAUDIT_VERROU = 1;            // la forme pose 524861
 constexpr uint8 COA_MAUDIT_BASE = 2;              // la forme pose 525031
 
+// Vie gardee apres le paiement d'une forme payee en vie (relecture du lot 5).
+constexpr float CoaMauditResteMinPv = 15.0f;
+
 uint8 CoaMauditMarqueursDeForme(uint32 forme)
 {
     switch (forme)
@@ -4055,10 +4058,20 @@ bool CoaMauditPlanifier(PlayerbotAI* botAI, Player* bot, std::vector<Usable>* de
     // Deja dans une forme maudite (un marqueur tenu) : jamais une seconde forme par-dessus.
     if (!manque || verrou || base)
         return false;
+    // Relecture : la forme se paie en vie (Blood Curse 40 %, Accursed Form 25 % de la vie de base). Spell::CheckPower ne
+    // refuse que vie <= cout : a 12 % le bot serait descendu a 2 % pour une forme. Il garde au moins CoaMauditResteMinPv.
+    float const vieMax = std::max(1.0f, float(bot->GetMaxHealth()));
     std::vector<Usable> formes = KnownAbilities(botAI, bot, [](uint16) { return true; });
     formes.erase(std::remove_if(formes.begin(), formes.end(), [&](Usable const& spell)
-        { return !(CoaMauditMarqueursDeForme(EffectiveSpell(bot, spell.info)->Id) & manque) ||
-                 !CoaIaPretSauf(botAI, bot, spell, bot, false, false, true); }), formes.end());
+        {
+            SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+            if (!(CoaMauditMarqueursDeForme(info->Id) & manque) || !CoaIaPretSauf(botAI, bot, spell, bot, false, false, true))
+                return true;
+            if (info->PowerType != POWER_HEALTH)
+                return false;
+            float const reste = float(bot->GetHealth()) - float(std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask())));
+            return reste * 100.0f / vieMax < CoaMauditResteMinPv;
+        }), formes.end());
     if (formes.empty())
         return false;
     if (formesPretes)
