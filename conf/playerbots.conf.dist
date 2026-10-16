@@ -1602,8 +1602,9 @@ AiPlayerbot.CoaArene.IaSurvie = 1
 # Corrections de l'IA de combat des classes CoA tirees du banc des soins (coa-project/docs/
 # DIAG-banc-soins-survie-20261016.md, DIAG-banc-soins-rotation-20261016.md,
 # DIAG-banc-soins-sorts-jamais-lances-20261016.md). Une option par changement de comportement,
-# toutes a 1 par defaut ; a 0, le comportement d'avant revient tel quel. Relues a chaud :
-# « .reload config » suffit (le kit d'un bot est reconstruit en 5 s au plus).
+# toutes a 1 par defaut ; a 0, le comportement d'avant revient tel quel. Relues a chaud,
+# comme les options CoaArene : « .reload config » puis « playerbots rndbot reload » (le kit
+# d'un bot est ensuite reconstruit en 5 s au plus). Aucune recomposition des strategies.
 #
 # Lot 1, classement des sorts : un bouclier ou une reduction de degats courte posee sur un
 # allie ou une zone d'allies est un defensif (et un bouclier de zone, un soin de zone) ; une
