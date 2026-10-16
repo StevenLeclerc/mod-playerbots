@@ -4369,7 +4369,16 @@ public:
             return false;
         if (!CoaSoigneurResteEnCombat(bot))
             return true;
-        return AI_VALUE(Unit*, "current target") != nullptr;
+        Unit* target = AI_VALUE(Unit*, "current target");
+        if (!target)
+            return false;
+        // Relecture : une cible vivante et vue que « dps target » propose encore (effrayee, isolee : ni
+        // AttackersValue ni AttackAction ne l'ecartent) serait reprise au tour suivant par « dps assist » (50), puis
+        // effacee de nouveau a 99 -- un tour sur deux, sans un soin entre les deux. On la garde : les soins ne
+        // dependent pas de la cible ennemie. Une cible morte, cachee (LOS lue ici) ou en esquive reste effacee.
+        if (target->IsAlive() && target == AI_VALUE(Unit*, "dps target") && bot->IsWithinLOSInMap(target))
+            return false;
+        return true;
     }
 };
 
