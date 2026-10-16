@@ -4074,9 +4074,15 @@ bool CoaMauditPlanifier(PlayerbotAI* botAI, Player* bot, std::vector<Usable>* de
         return false;
     // La forme se paie en vie (Blood Curse 40 %, Accursed Form 25 % de la vie de base) : CoaIaPretSauf garde le plancher
     // CoaIaResteMinPv.
+    // Revue du lot 5 : seulement une forme a DUREE BORNEE (Blood Curse 562720, Accursed Form 562572 : 30 s ; Transgression
+    // 801076 : 15 s). Eternal Curse 800157 et Sanguine Essence 680692 n'ont pas de duree : prises ici, elles resteraient
+    // (Eternal Curse enferme la forme mortelle, rien ne la retire). La spe 25 (Blood Curse remplace par Sanguine Essence)
+    // n'entre donc plus en forme pour Wicked Howl ; la spe 99 entre par Blood Curse, qu'elle garde. Deja en forme, rien
+    // ne change : le defensif pret part.
     std::vector<Usable> formes = KnownAbilities(botAI, bot, [](uint16) { return true; });
     formes.erase(std::remove_if(formes.begin(), formes.end(), [&](Usable const& spell)
-        { return !(CoaMauditMarqueursDeForme(EffectiveSpell(bot, spell.info)->Id) & manque) ||
+        { SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+          return !(CoaMauditMarqueursDeForme(info->Id) & manque) || info->GetMaxDuration() <= 0 ||
                  !CoaIaPretSauf(botAI, bot, spell, bot, false, false, true); }), formes.end());
     if (formes.empty())
         return false;

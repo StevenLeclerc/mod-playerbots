@@ -1673,8 +1673,9 @@ AiPlayerbot.CoaIa.TriSoins = 1
 AiPlayerbot.CoaIa.UtiliteAlignee = 1
 
 # Lot 5, decision de jeu du 16/10 (Bloodmage) : sous AiPlayerbot.LowHealth en combat, le bot entre
-# en forme maudite (Blood Curse et ses remplacants de specialisation, ou Eternal Curse ; jamais
-# Moon Gaze, qui l'etourdit) puis lance ses defensifs de forme, un a la fois : Endure the Curse,
+# en forme maudite a duree bornee (Blood Curse, Accursed Form, Transgression ; ni Eternal Curse
+# ni Sanguine Essence, sans duree ; jamais Moon Gaze, qui l'etourdit) puis lance ses defensifs
+# de forme, un a la fois : Endure the Curse,
 # Eternal Resolve, Wicked Howl. Une forme payee en vie n'est prise que s'il lui reste 15 %
 # de vie apres paiement. Hors arene 1v1 et duel. A 0 : comportement d'avant.
 # Default: 1
