@@ -2664,6 +2664,19 @@ constexpr uint32 CoaIaRechargeLourdeMs = 120 * IN_MILLISECONDS;
 // Force d'un defensif dont l'effet ne se lit pas (script, proc) : au milieu, derriere les forts mesures.
 constexpr float CoaIaForceInconnue = 20.0f;
 
+// Revue du lot 5 : vie gardee apres le paiement d'un sort paye en vie (PowerType POWER_HEALTH ; Bloodmage : formes
+// maudites, Eternal Resolve 801962 22 %, Wicked Howl 804207 17 % de la vie de base). Spell::CheckPower ne refuse que
+// vie <= cout ; la survie (lots 3 et 5) ne lance pas un sort qui laisserait le bot sous ce plancher.
+constexpr float CoaIaResteMinPv = 15.0f;
+
+bool CoaIaPayeEnVieTropCher(Player* bot, SpellInfo const* info)
+{
+    if (info->PowerType != POWER_HEALTH)
+        return false;
+    float const reste = float(bot->GetHealth()) - float(std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask())));
+    return reste * 100.0f / std::max(1.0f, float(bot->GetMaxHealth())) < CoaIaResteMinPv;
+}
+
 bool CoaIaSurvieActive(Player* bot)
 {
     return sPlayerbotAIConfig.coaIaSurvie && bot->IsAlive() && !(CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot));
@@ -2800,7 +2813,8 @@ std::vector<Usable> CoaIaDefensifs(PlayerbotAI* botAI, Player* bot, float pv, bo
     std::vector<Usable> defensifs = KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
         { return (kind & KIND_DEFENSIVE) && !(marques & MARQUE_PAS_SUR_SOI); });
     defensifs.erase(std::remove_if(defensifs.begin(), defensifs.end(), [bot, pv, perteRapide](Usable const& spell)
-        { return !CoaIaDefensifAdmis(EffectiveSpell(bot, spell.info), pv, perteRapide); }), defensifs.end());
+        { return !CoaIaDefensifAdmis(EffectiveSpell(bot, spell.info), pv, perteRapide) ||
+                 CoaIaPayeEnVieTropCher(bot, EffectiveSpell(bot, spell.info)); }), defensifs.end());
     CoaIaRetirerUniquesTenus(bot, defensifs);
     if (trier && defensifs.size() > 1)
     {
@@ -3023,6 +3037,9 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
             soins.push_back(spell);
     // Revue du 16/10 : un HoT ou un soin a cible unique tenu sur un autre membre n'est pas retire pour le bot.
     CoaIaRetirerUniquesTenus(bot, soins);
+    // Revue du lot 5 : plancher de vie apres paiement (CoaIaPayeEnVieTropCher).
+    soins.erase(std::remove_if(soins.begin(), soins.end(), [bot](Usable const& spell)
+        { return CoaIaPayeEnVieTropCher(bot, EffectiveSpell(bot, spell.info)); }), soins.end());
     return soins;
 }
 
@@ -3949,7 +3966,7 @@ bool CoaIaDecisionActive(Player* bot)
 
 // Le sort passerait les filtres de CastFirst qui ne dependent que du lanceur (ceux de CoaIaUnPret), sauf, a la demande,
 // l'aura exigee du lanceur (`sansAura` : elle viendra de la forme qu'on va prendre) ou la forme (`sansForme` : on va la
-// quitter). Le cout en vie (POWER_HEALTH, que CoaPeutPayer ne lit pas) est relu comme Spell::CheckPower : vie > cout.
+// quitter). Le cout en vie (POWER_HEALTH, que CoaPeutPayer ne lit pas) laisse au moins CoaIaResteMinPv (revue du lot 5).
 bool CoaIaPretSauf(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* cible, bool sansAura, bool sansForme, bool gcd)
 {
     auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
@@ -3961,7 +3978,7 @@ bool CoaIaPretSauf(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* c
         return false;
     if (!CoaPeutPayer(bot, info) || CoaExigeFamilierAbsent(bot, info))
         return false;
-    if (info->PowerType == POWER_HEALTH && int32(bot->GetHealth()) <= info->CalcPowerCost(bot, info->GetSchoolMask()))
+    if (CoaIaPayeEnVieTropCher(bot, info))
         return false;
     if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
         return false;
@@ -3994,9 +4011,6 @@ constexpr uint32 CoaMauditMarqueur = 524861;      // SPELL_CURSED_FORM_REQUIREME
 constexpr uint32 CoaMauditMarqueurBase = 525031;  // SPELL_CURSED_FORM_REQUIREMENT du module
 constexpr uint8 COA_MAUDIT_VERROU = 1;            // la forme pose 524861
 constexpr uint8 COA_MAUDIT_BASE = 2;              // la forme pose 525031
-
-// Vie gardee apres le paiement d'une forme payee en vie (relecture du lot 5).
-constexpr float CoaMauditResteMinPv = 15.0f;
 
 uint8 CoaMauditMarqueursDeForme(uint32 forme)
 {
@@ -4058,20 +4072,12 @@ bool CoaMauditPlanifier(PlayerbotAI* botAI, Player* bot, std::vector<Usable>* de
     // Deja dans une forme maudite (un marqueur tenu) : jamais une seconde forme par-dessus.
     if (!manque || verrou || base)
         return false;
-    // Relecture : la forme se paie en vie (Blood Curse 40 %, Accursed Form 25 % de la vie de base). Spell::CheckPower ne
-    // refuse que vie <= cout : a 12 % le bot serait descendu a 2 % pour une forme. Il garde au moins CoaMauditResteMinPv.
-    float const vieMax = std::max(1.0f, float(bot->GetMaxHealth()));
+    // La forme se paie en vie (Blood Curse 40 %, Accursed Form 25 % de la vie de base) : CoaIaPretSauf garde le plancher
+    // CoaIaResteMinPv.
     std::vector<Usable> formes = KnownAbilities(botAI, bot, [](uint16) { return true; });
     formes.erase(std::remove_if(formes.begin(), formes.end(), [&](Usable const& spell)
-        {
-            SpellInfo const* const info = EffectiveSpell(bot, spell.info);
-            if (!(CoaMauditMarqueursDeForme(info->Id) & manque) || !CoaIaPretSauf(botAI, bot, spell, bot, false, false, true))
-                return true;
-            if (info->PowerType != POWER_HEALTH)
-                return false;
-            float const reste = float(bot->GetHealth()) - float(std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask())));
-            return reste * 100.0f / vieMax < CoaMauditResteMinPv;
-        }), formes.end());
+        { return !(CoaMauditMarqueursDeForme(EffectiveSpell(bot, spell.info)->Id) & manque) ||
+                 !CoaIaPretSauf(botAI, bot, spell, bot, false, false, true); }), formes.end());
     if (formes.empty())
         return false;
     if (formesPretes)
