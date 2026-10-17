@@ -3869,6 +3869,10 @@ public:
             CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter()))
             return RecordUsage(USAGE_BUFF, nullptr);
 
+        // I7 du 17/10 : un serviteur leve hors combat (CoaIaServiteurVoulu).
+        if (SpellInfo const* serviteur = LeverUnServiteur())
+            return RecordUsage(USAGE_BUFF, serviteur);
+
         std::vector<Usable> const spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & (KIND_BUFF | KIND_STANCE)) && !(kind & KIND_STEALTH) &&
                      !(kind & (KIND_HOSTILE | KIND_DAMAGE | KIND_TAUNT | KIND_HEAL | KIND_CONTROL)); });
@@ -3977,11 +3981,51 @@ public:
         // compris : la forme que « coa buff » remet ici n'est pas une reprise, et le combat suivant repart a neuf.
         if (!bot->IsInCombat())
             static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->venoForme = CoaAiObjectContext::CoaVenoForme();
-        return ClassHas(bot, KIND_BUFF | KIND_STANCE);
+        return ClassHas(bot, KIND_BUFF | KIND_STANCE) || CoaIaServiteurVoulu(bot);
     }
 
 private:
+    /*
+     * I7 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Necromancer 34-36) : hors arene, aucun
+     * Necromancer ne levait de serviteur -- l'invocation n'existait que dans l'IA d'arene (CoaAreneFamilierTrigger, cadres
+     * ARENE et DUEL). Sacrifice Undead, Transfer Life et Vampiric Aura restaient sans objet. Hors combat (« coa buff »),
+     * un bot a Life Force (CoaAreneKitLifeForce : l'aura de capacite 805011 du module) SANS serviteur vivant
+     * (CoaAreneAFamilier) leve UN serviteur : le moins cher de ses invocations permanentes (CoaAreneEstFamilier), comme la
+     * preparation d'arene. Plafond : un seul, puisqu'il n'est tente que sans serviteur. Jamais en arene (InArena, la
+     * preparation a sa propre regle) ni en duel. Un essai toutes les CoaIaServiteurReessaiSecondes au plus, reussi ou non.
+     * Sous AiPlayerbot.CoaIa.Survie : pas d'option propre (le diagnostic en proposait une, eteinte par defaut).
+     */
+    static constexpr time_t CoaIaServiteurReessaiSecondes = 30;
+
+    bool CoaIaServiteurVoulu(Player* lanceur) const
+    {
+        return sPlayerbotAIConfig.coaIaSurvie && lanceur->IsAlive() && !lanceur->IsInCombat() && !lanceur->InArena() &&
+               !lanceur->duel && CoaAreneKitLifeForce(lanceur) && !CoaAreneAFamilier(lanceur) &&
+               time(nullptr) >= prochainServiteur;
+    }
+
+    SpellInfo const* LeverUnServiteur()
+    {
+        if (!CoaIaServiteurVoulu(bot))
+            return nullptr;
+        prochainServiteur = time(nullptr) + CoaIaServiteurReessaiSecondes;
+        std::vector<Usable> familiers = KnownAbilities(botAI, bot, [](uint16) { return true; });
+        Player* const lanceur = bot;
+        familiers.erase(std::remove_if(familiers.begin(), familiers.end(), [lanceur](Usable const& s)
+            { return !CoaAreneEstFamilier(EffectiveSpell(lanceur, s.info)); }), familiers.end());
+        if (familiers.empty())
+            return nullptr;
+        std::stable_sort(familiers.begin(), familiers.end(), [lanceur](Usable const& a, Usable const& b)
+            {
+                SpellInfo const* ia = EffectiveSpell(lanceur, a.info);
+                SpellInfo const* ib = EffectiveSpell(lanceur, b.info);
+                return ia->CalcPowerCost(lanceur, ia->GetSchoolMask()) < ib->CalcPowerCost(lanceur, ib->GetSchoolMask());
+            });
+        return CastFirst(botAI, bot, familiers, bot);
+    }
+
     std::map<std::pair<ObjectGuid, uint32>, time_t> recent;
+    time_t prochainServiteur = 0;  // I7 : prochain essai de levee (une instance d'action par bot)
 };
 
 /*
