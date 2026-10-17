@@ -698,6 +698,16 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // le lancait. C'est un temps fort OFFENSIF : KIND_DAMAGE le met dans la rotation d'attaque (IsAttack), donc en combat,
     // contre la cible courante (sort sur soi : la cible n'y joue aucun role), une fois par recharge.
     { 712325, KIND_DAMAGE, KIND_DEFENSIVE, 0 },
+    // I1 du 17/10 (Tinker 51 ; coa-project/docs/DIAG-equilibrage-classes-20261017.md § 2). Deux soins de zone que Classify
+    // ne voyait pas : effet 0 DUMMY, effet 1 SUMMON (28) d'un PNJ qui soigne par script, les deux sur TargetA 87
+    // (TARGET_DEST_DEST : pose au sol, a la position de la cible -- PlayerbotAI::CastSpell la prend sur l'unite visee).
+    // Spell.dbc lu le 17/10 : My Greatest Invention! 560744 (« healing party and raid members in a $560746a1 yd radius »,
+    // recharge 180 s, 22 % de mana de base) ; Build: Restorative Beacon 801801 (« heals raid and party members in the
+    // area », 3 charges, 25 %). kind 0 : 0 ligne au journal du banc. Ni HoT (une recharge de 180 s ne doit pas partir a
+    // 85 % sur un seul membre, meme raison qu'Ignis 680369) ; KIND_HEAL pour 560744 seulement, comme le propose le
+    // diagnostic : il entre aussi dans « coa heal », au dernier rang (zone, CoaHealAction::Rang).
+    { 560744, KIND_HEAL | KIND_GROUP_HEAL, 0, 0 },
+    { 801801, KIND_GROUP_HEAL, 0, 0 },
 };
 
 CoaSurcharge const* CoaSurchargeDe(uint32 spellId)
