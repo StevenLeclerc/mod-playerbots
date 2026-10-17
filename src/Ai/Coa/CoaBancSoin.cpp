@@ -42,6 +42,24 @@
  *    meme appel, sur le meme fil.
  *
  * COUT HORS ESSAI (Banc = 0, le Live) : par crochet, une lecture atomique ; par seconde, un test de vecteur vide.
+ *
+ * CORRECTIONS DU BANC DU 17/10/2026 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, B-1 a B-7 ; conception
+ * § 10). Chacune a son option, et l'ancienne valeur rend le banc d'avant :
+ *  B-1  la creature PREND les degats (AiPlayerbot.CoaSoin.CreatureInvulnerable = 0) : le vol de vie periodique, calcule
+ *       sur le retour de DealDamage, n'est plus nul. Jamais tuee : un coup qui la tuerait est ramene a PV - 1, et elle
+ *       est remise a plein chaque seconde (Avancer). Consequence : la rage gagnee en INFLIGEANT des degats redevient
+ *       celle d'un vrai combat (le code de la rage n'est pas touche).
+ *  B-2  recharges remises a zero (Player::RemoveAllSpellCooldown, charges comprises) a la preparation et au retour ;
+ *       AUCUNE potion pendant l'essai (AiPlayerbot.CoaSoin.Potions = 0) : « healing potion », « mana potion » et
+ *       « healthstone » refusees aux membres (UseItemAction::isPossible), sans toucher aux sacs.
+ *  B-3  AiPlayerbot.CoaSoin.AttenteAvantCombat secondes hors combat dans l'enclos avant l'engagement (phase ATTENTE),
+ *       avec « coa buff » dans la composition des membres (AiFactory) : les auras de preparation sont posees.
+ *  B-4  traces : `coa soin action:` action=attack|aoe|taunt|dispel|interrupt (lancers hors soin, CastFirst),
+ *       `coa soin liste:` (CoaIaDefensifs / CoaIaSoinsSurSoi, une ligne quand la liste change), `coa soin degat:`
+ *       (degats subis d'une autre source que la creature), `coa soin aura:` (pose / levee des auras suivies, 572617 et
+ *       toute aura payee en vie par seconde ; presentes a l'engagement), `lanceur=` et `sources=` sur
+ *       `coa soin absorbe:`.
+ *  B-7  `coa soin arbre:` a la preparation : specialisation d'origine, natif ou force, entrees de talent tenues.
  */
 
 #include "CoaBancSoin.h"
@@ -73,6 +91,8 @@
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
+#include "SpellAuraEffects.h"
+#include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "TemporarySummon.h"
@@ -121,9 +141,15 @@ constexpr uint32 CRIT_PEREMPTION_MS = 10000;      // une note de coup critique n
 constexpr uint32 DUREE_MAX_PLAFOND_S = 1800;      // plafond absolu de AiPlayerbot.CoaSoin.DureeMax
 constexpr float MENACE_CIBLE = 1.0e7f;            // la creature ne lache jamais la cible de l'epreuve
 constexpr uint32 FACTION_HOSTILE = 14;            // hostile a tous
+constexpr uint32 ATTENTE_MAX_S = 60;              // B-3 : plafond de AiPlayerbot.CoaSoin.AttenteAvantCombat
+constexpr uint32 AURAS_SUIVIES_MAX = 16;          // B-4 : AiPlayerbot.CoaSoin.AurasSuivies, au plus
+// B-4 : debit des nouvelles lignes, par essai et par seconde (chaque canal a le sien : aucune ne prend la place des
+// lignes `coa soin action:` des actions de soin, bornees a ACTIONS_PAR_SECONDE).
+enum Canal : uint8 { CANAL_LANCER, CANAL_LISTE, CANAL_DEGAT, CANAL_AURA, CANAL_MAX };
+constexpr uint32 DEBIT_CANAL[CANAL_MAX] = { 20, 10, 20, 20 };
 
 enum class Epreuve : uint8 { A1, A2, A3, A4, A5, B1, B2 };
-enum class Phase : uint8 { ARRIVEE, COURS };
+enum class Phase : uint8 { ARRIVEE, ATTENTE, COURS };
 
 char const* NomEpreuve(Epreuve e)
 {
@@ -186,7 +212,36 @@ struct Parametres
     uint32 max = 4;
     bool setFixe = false;
     std::string enclos;
+    // Corrections du 17/10 (voir l'en-tete). Les valeurs par defaut sont les corrections ; l'ancienne valeur de chaque
+    // option rend le banc d'avant (comparaison avec les rapports ia-A / ia-B).
+    bool creatureInvulnerable = false;   // B-1 : 1 = degats a 0 comme avant
+    bool potions = false;                // B-2 : 1 = potions et pierres de soin permises comme avant
+    uint32 attenteS = 10;                // B-3 : 0 = engagement des l'arrivee comme avant
+    std::vector<uint32> aurasSuivies;    // B-4 : ids d'aura tracees (pose / levee), en plus des auras payees en vie
 };
+
+// « 572617 680388 » ou « 572617,680388 » : ids > 0, au plus AURAS_SUIVIES_MAX ; le reste est ignore.
+std::vector<uint32> LireIds(std::string const& texte)
+{
+    std::vector<uint32> ids;
+    std::string mot;
+    auto Pousser = [&]() {
+        if (!mot.empty() && mot.size() <= 9 && ids.size() < AURAS_SUIVIES_MAX)
+            if (uint32 const v = uint32(std::strtoul(mot.c_str(), nullptr, 10)))
+                if (std::find(ids.begin(), ids.end(), v) == ids.end())
+                    ids.push_back(v);
+        mot.clear();
+    };
+    for (char c : texte)
+    {
+        if (c >= '0' && c <= '9')
+            mot += c;
+        else
+            Pousser();
+    }
+    Pousser();
+    return ids;
+}
 
 Parametres LireParametres()
 {
@@ -207,6 +262,12 @@ Parametres LireParametres()
     // Option du banc d'equilibrage d'Armageddon (lot 2) : absente au Live, donc fausse.
     p.setFixe = sConfigMgr->GetOption<bool>("AiPlayerbot.Arene1v1.BancSetFixe", false, false);
     p.enclos = sConfigMgr->GetOption<std::string>("AiPlayerbot.CoaSoin.Enclos", "", false);
+    p.creatureInvulnerable = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaSoin.CreatureInvulnerable", false, false);
+    p.potions = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaSoin.Potions", false, false);
+    p.attenteS = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaSoin.AttenteAvantCombat", 10, false),
+                                  ATTENTE_MAX_S);
+    // Immolation Aura 572617 (Slayer, I4) et Fetid Ward 680388 (Rime, B-3) : DIAG du 17/10, § 4.
+    p.aurasSuivies = LireIds(sConfigMgr->GetOption<std::string>("AiPlayerbot.CoaSoin.AurasSuivies", "572617 680388", false));
     return p;
 }
 
@@ -214,7 +275,7 @@ Parametres LireParametres()
 
 std::mutex verrouRegistre;
 std::unordered_map<uint32, uint32> membresEssai;      // guid bas du bot -> id d'essai
-std::unordered_set<uint64> creaturesBanc;             // ObjectGuid brut des creatures de banc
+std::unordered_map<uint64, bool> creaturesBanc;       // ObjectGuid brut des creatures de banc -> invulnerable (B-1)
 struct BorneAction
 {
     std::string cle;
@@ -233,8 +294,34 @@ struct NoteCrit
     uint32 ms = 0;
 };
 std::map<std::pair<uint32, uint32>, NoteCrit> notesCrit;   // (guid bas de la cible, sort) -> coup critique
+// B-4 : debit des canaux nouveaux, (id d'essai, canal) -> lignes de la seconde.
+std::map<std::pair<uint32, uint8>, DebitEssai> debitsCanal;
+// B-4 : derniere liste tracee, (guid bas, action) -> texte ; une ligne `coa soin liste:` seulement quand elle change.
+std::map<std::pair<uint32, std::string>, std::string> dernieresListes;
 // membresEssai.size() + creaturesBanc.size() : a zero, crochets et gardes sortent sur ce seul chargement.
 std::atomic<uint32> nbInscrits{0};
+
+// Ecrits par la commande (fil monde), lus par les fils de carte sans verrou. Valent pour TOUS les essais en cours : la
+// conf du dernier `.coa soin banc` l'emporte (l'orchestrateur ne la change pas pendant un plan).
+std::atomic<bool> potionsPermises{false};    // B-2
+std::atomic<bool> buffsAvantCombat{false};   // B-3 : « coa buff » dans la composition des membres
+std::array<std::atomic<uint32>, AURAS_SUIVIES_MAX> aurasSuivies{};   // B-4 : 0 = case libre
+
+// Sous verrou. Vrai : une ligne de plus est permise sur ce canal pour cet essai, dans la seconde en cours.
+bool DebitPermis(uint32 essai, Canal canal, uint32 maintenant)
+{
+    DebitEssai& d = debitsCanal[{essai, uint8(canal)}];
+    uint32 const seconde = maintenant / 1000;
+    if (d.seconde != seconde)
+    {
+        d.seconde = seconde;
+        d.lignes = 0;
+    }
+    if (d.lignes >= DEBIT_CANAL[canal])
+        return false;
+    ++d.lignes;
+    return true;
+}
 
 // Revue du 13/10 : copie SANS VERROU de membresEssai, lue par les gardes des fils de carte. Pendant un essai,
 // MembreEngage est appele par PlayerbotAI::AllowActive pour CHAQUE bot du royaume a chaque mise a jour, depuis les
@@ -242,6 +329,13 @@ std::atomic<uint32> nbInscrits{0};
 // milliers de fois par seconde. Une case = (guid bas << 32) | id d'essai, 0 = libre ; ecrite sous verrouRegistre (fil
 // monde), lue librement. Capacite : MAX_PLAFOND essais de MEMBRES_MAX membres au plus.
 std::array<std::atomic<uint64>, MAX_PLAFOND * MEMBRES_MAX> places{};
+
+// Relecture du 17/10 (cout par seconde) : copie SANS VERROU de creaturesBanc. Le crochet DealDamage la lit pour CHAQUE
+// degat sur une creature invoquee du royaume (familiers, totems, gardiens) pendant un essai : sous le verrou unique, ces
+// degats se seraient disputes la meme ligne de cache. Une case = ObjectGuid brut, 0 = libre ; `invulnerable` est ecrit
+// AVANT la case (release) et lu apres elle (acquire). Ecrites sous verrouRegistre (fil monde). Une case par essai.
+std::array<std::atomic<uint64>, MAX_PLAFOND> creaturesPlaces{};
+std::array<std::atomic<bool>, MAX_PLAFOND> creaturesInvulnerables{};
 
 void MajCompteur() { nbInscrits.store(uint32(membresEssai.size() + creaturesBanc.size()), std::memory_order_release); }
 
@@ -298,12 +392,57 @@ uint32 EssaiDuJoueur(Unit const* u)
     return EssaiDuMembre(p->GetGUID().GetCounter());
 }
 
-bool EstCreatureDeBanc(Unit const* u)
+// Sous verrou : inscrit / retire une creature de banc dans la copie sans verrou.
+void PlacerCreatureVerrouille(uint64 brut, bool invulnerable)
+{
+    for (size_t i = 0; i < creaturesPlaces.size(); ++i)
+        if (!creaturesPlaces[i].load(std::memory_order_relaxed))
+        {
+            creaturesInvulnerables[i].store(invulnerable, std::memory_order_relaxed);
+            creaturesPlaces[i].store(brut, std::memory_order_release);
+            return;
+        }
+}
+
+void LibererCreatureVerrouille(uint64 brut)
+{
+    for (std::atomic<uint64>& place : creaturesPlaces)
+        if (place.load(std::memory_order_relaxed) == brut)
+            place.store(0, std::memory_order_release);
+}
+
+// TOUT FIL, sans verrou. -1 : pas une creature de banc ; 0 : creature de banc qui prend les degats (B-1) ;
+// 1 : invulnerable (banc d'avant).
+int ModeCreatureDeBanc(Unit const* u)
 {
     if (!u || !nbInscrits.load(std::memory_order_acquire) || !u->IsCreature() || !u->IsSummon())
+        return -1;
+    uint64 const brut = u->GetGUID().GetRawValue();
+    for (size_t i = 0; i < creaturesPlaces.size(); ++i)
+        if (creaturesPlaces[i].load(std::memory_order_acquire) == brut)
+            return creaturesInvulnerables[i].load(std::memory_order_relaxed) ? 1 : 0;
+    return -1;
+}
+
+bool EstCreatureDeBanc(Unit const* u) { return ModeCreatureDeBanc(u) >= 0; }
+
+// B-4 : une aura suivie -- dans AiPlayerbot.CoaSoin.AurasSuivies, ou payee en vie par seconde (PowerType POWER_HEALTH et
+// ManaPerSecond, comme CoaIaPayeEnVieParSeconde, mais pour toute classe : I4 du 17/10). Sans verrou.
+bool AuraSuivie(SpellInfo const* info)
+{
+    if (!info)
         return false;
-    std::lock_guard<std::mutex> garde(verrouRegistre);
-    return creaturesBanc.count(u->GetGUID().GetRawValue()) != 0;
+    if (info->PowerType == POWER_HEALTH && (info->ManaPerSecond > 0 || info->ManaPerSecondPerLevel > 0))
+        return true;
+    for (std::atomic<uint32> const& id : aurasSuivies)
+    {
+        uint32 const v = id.load(std::memory_order_relaxed);
+        if (!v)
+            break;
+        if (v == info->Id)
+            return true;
+    }
+    return false;
 }
 
 // ------------------------------------------------------------------ soin en attente (thread_local)
@@ -334,6 +473,19 @@ struct TickEnAttente
     bool valide = false;
 };
 thread_local TickEnAttente t_tick;
+
+// B-4 : le sort d'un degat de sort direct. Unit::CalculateSpellDamageTaken appelle ModifySpellDamageTaken (cible,
+// attaquant, sort) avant que Unit::DealSpellDamage n'appelle DealDamage (attaquant, cible) sur le meme fil ; la note est
+// consommee par le premier DealDamage de la MEME paire. Un sort calcule sans degat infliges (manque) laisse une note
+// perimee : elle n'est lue que pour la meme paire, et la suivante l'ecrase. Le sort est donc « au mieux » : 0 si inconnu.
+struct DegatEnAttente
+{
+    Unit const* cible = nullptr;
+    Unit const* source = nullptr;
+    uint32 sort = 0;
+    bool valide = false;
+};
+thread_local DegatEnAttente t_degat;
 
 // ------------------------------------------------------------------ essais (FIL MONDE seulement)
 
@@ -370,6 +522,7 @@ struct Essai
     WorldLocation centre;          // centre de la case
     Parametres p;
     uint32 creeMs = 0;
+    uint32 attenteMs = 0;          // B-3 : debut de la phase ATTENTE (tous arrives)
     uint32 debutMs = 0;
     uint32 dernierCoupMs = 0;
     uint32 prochaineUrgenceS = URGENCE_PERIODE_S;
@@ -422,6 +575,15 @@ void RemettreAPlein(Player* p)
         p->SetPower(type, p->GetMaxPower(type));
     if (type != POWER_MANA && p->GetMaxPower(POWER_MANA) > 0)
         p->SetPower(POWER_MANA, p->GetMaxPower(POWER_MANA));
+}
+
+// B-2 (17/10) : aucune recharge heritee du monde ouvert (Ranger 5113 : Horn 17 s en retard, recharge laissee par l'essai
+// precedent ; Runemaster 4862 : Granite Resolve absent). Player::RemoveAllSpellCooldown rend aussi les charges
+// (balises du Tinker). A la preparation et au retour, PAS a l'engagement : ce que le bot pose pendant l'attente (B-3)
+// garde sa recharge, comme un joueur qui se prepare.
+void RemettreRecharges(Player* p)
+{
+    p->RemoveAllSpellCooldown();
 }
 
 // `res=TYPE:PCT` de `coa soin etat:` (0-100) : la mana si le personnage en a (tous les soins actifs CoA coutent de la
@@ -548,10 +710,17 @@ void Desinscrire(Essai const& e)
         bornesAction.erase(m.guid);
         for (auto it = notesCrit.begin(); it != notesCrit.end();)
             it = it->first.first == m.guid ? notesCrit.erase(it) : std::next(it);
+        for (auto it = dernieresListes.begin(); it != dernieresListes.end();)
+            it = it->first.first == m.guid ? dernieresListes.erase(it) : std::next(it);
     }
     if (!e.creature.IsEmpty())
+    {
         creaturesBanc.erase(e.creature.GetRawValue());
+        LibererCreatureVerrouille(e.creature.GetRawValue());
+    }
     debitsAction.erase(e.id);
+    for (auto it = debitsCanal.begin(); it != debitsCanal.end();)
+        it = it->first.first == e.id ? debitsCanal.erase(it) : std::next(it);
     MajCompteur();
 }
 
@@ -595,6 +764,7 @@ void Rendre(Player* p, Membre const& m, bool arretServeur)
         ia->ResetStrategies(false);
     }
     RemettreAPlein(p);
+    RemettreRecharges(p);
     // Une teleportation PROCHE en cours est remplacee par celle-ci ; une LOINTAINE (hors du monde) ne peut pas l'etre :
     // retour differe (SuivreRetours).
     if (!p->IsInWorld() || !p->TeleportTo(m.origine))
@@ -638,7 +808,7 @@ void Terminer(Essai& e, char const* raison, char const* motif = nullptr, bool ar
 
     if (motif)
         LOG_INFO("playerbots.coa", "coa soin abandon: essai={} motif={} phase={}", e.id, motif,
-                 e.phase == Phase::COURS ? "cours" : "arrivee");
+                 e.phase == Phase::COURS ? "cours" : e.phase == Phase::ATTENTE ? "attente" : "arrivee");
     LOG_INFO("playerbots.coa", "coa soin fin: essai={} raison={} duree_s={} palier_max={} morts={}", e.id, raison, dureeS,
              FormatPalier(palierMax), e.morts);
 
@@ -730,6 +900,79 @@ void TracerCoup(Essai const& e, Player* p, uint32 montant, char const* type, flo
              p->GetGUID().GetCounter(), montant, type, FormatPalier(palier), PvPct(p));
 }
 
+// B-4 : le lanceur des absorptions. Les reserves d'absorption de la cible qui couvrent le physique (SCHOOL_ABSORB,
+// MANA_SHIELD), relevees PAR VALEUR avant Unit::CalcAbsorbResist ; apres, la baisse de chacune est sa part. Une reserve
+// videe est retiree de la liste (Remove AURA_REMOVE_BY_ENEMY_SPELL) : sa part est tout ce qu'elle avait. Les pointeurs
+// d'avant ne sont que COMPARES, jamais lus (l'aura retiree n'est detruite qu'a la mise a jour suivante de l'unite).
+// Une absorption ecrite par script (montant inchange, ou negatif) n'a pas de part mesurable : `lanceur` n'est alors
+// donne que si une seule reserve couvrait le coup.
+struct ReserveAbsorption
+{
+    AuraEffect const* effet = nullptr;
+    ObjectGuid lanceur;
+    uint32 sort = 0;
+    uint8 index = 0;
+    int32 montant = 0;
+};
+
+std::vector<ReserveAbsorption> ReservesAbsorption(Player const* p)
+{
+    std::vector<ReserveAbsorption> out;
+    for (AuraType const type : { SPELL_AURA_SCHOOL_ABSORB, SPELL_AURA_MANA_SHIELD })
+        for (AuraEffect const* eff : p->GetAuraEffectsByType(type))
+            if (eff && (eff->GetMiscValue() & SPELL_SCHOOL_MASK_NORMAL))
+                out.push_back(ReserveAbsorption{eff, eff->GetCasterGUID(), eff->GetId(), eff->GetEffIndex(), eff->GetAmount()});
+    return out;
+}
+
+// `lanceur` : guid bas du lanceur de l'absorption, 0 si indetermine ; `sort` : son sort, 0 si indetermine ; `sources` :
+// « guid:sort:part;... » des reserves qui ont baisse, « - » si aucune.
+void AttribuerAbsorption(Player const* p, std::vector<ReserveAbsorption> const& avant, uint32 absorbe, uint32& lanceur,
+                         uint32& sort, std::string& sources)
+{
+    lanceur = 0;
+    sort = 0;
+    sources.clear();
+    std::vector<ReserveAbsorption> const apres = ReservesAbsorption(p);
+    uint64 total = 0;
+    ObjectGuid seul;
+    uint32 seulSort = 0;
+    bool plusieurs = false;
+    for (ReserveAbsorption const& r : avant)
+    {
+        auto it = std::find_if(apres.begin(), apres.end(), [&r](ReserveAbsorption const& x)
+            { return x.effet == r.effet && x.sort == r.sort && x.index == r.index; });
+        int64 const part = it == apres.end() ? std::max<int64>(r.montant, 0) : std::max<int64>(int64(r.montant) - it->montant, 0);
+        if (part <= 0)
+            continue;
+        total += uint64(part);
+        if (!sources.empty())
+            sources += ";";
+        sources += std::to_string(r.lanceur.GetCounter()) + ":" + std::to_string(r.sort) + ":" + std::to_string(part);
+        if (seul.IsEmpty())
+        {
+            seul = r.lanceur;
+            seulSort = r.sort;
+        }
+        else if (seul != r.lanceur)
+            plusieurs = true;
+        else if (seulSort != r.sort)
+            seulSort = 0;
+    }
+    if (!seul.IsEmpty() && !plusieurs && total + 1 >= absorbe)
+    {
+        lanceur = seul.GetCounter();
+        sort = seulSort;
+    }
+    else if (seul.IsEmpty() && avant.size() == 1)
+    {
+        lanceur = avant[0].lanceur.GetCounter();
+        sort = avant[0].sort;
+    }
+    if (sources.empty())
+        sources = "-";
+}
+
 // Un coup blanc physique de `pct` % des PV max depuis la creature : reductions en %, absorptions, degats,
 // declenchements. Armure NON appliquee (voir l'en-tete). `montant` de la trace = degats INFLIGES (apres reductions
 // et absorptions) ; l'absorbe est sur sa ligne.
@@ -747,8 +990,14 @@ void Frapper(Essai const& e, Creature* c, Player* p, float pct, char const* type
     }
     uint32 const apresReduction = p->MeleeDamageBonusTaken(c, brut, BASE_ATTACK, nullptr, SPELL_SCHOOL_MASK_NORMAL);
     DamageInfo di(c, p, apresReduction, nullptr, SPELL_SCHOOL_MASK_NORMAL, DIRECT_DAMAGE);
+    std::vector<ReserveAbsorption> const reserves = ReservesAbsorption(p);
     Unit::CalcAbsorbResist(di);
     uint32 const absorbe = di.GetAbsorb();
+    // Lue tout de suite : un declenchement du coup (plus bas) pourrait reposer ou retirer une reserve.
+    uint32 lanceurAbsorbe = 0, sortAbsorbe = 0;
+    std::string sourcesAbsorbe;
+    if (absorbe)
+        AttribuerAbsorption(p, reserves, absorbe, lanceurAbsorbe, sortAbsorbe, sourcesAbsorbe);
     uint32 const resiste = di.GetResist();
     uint32 const inflige = di.GetDamage();
     uint32 infoCoup = HITINFO_AFFECTS_VICTIM;
@@ -763,8 +1012,12 @@ void Frapper(Essai const& e, Creature* c, Player* p, float pct, char const* type
                                  PROC_EX_NORMAL_HIT | (absorbe ? PROC_EX_ABSORB : 0), inflige, BASE_ATTACK, nullptr,
                                  nullptr, -1, nullptr, &di);
     if (absorbe)
-        LOG_INFO("playerbots.coa", "coa soin absorbe: essai={} cible={} montant={}", e.id, p->GetGUID().GetCounter(),
-                 absorbe);
+    {
+        // `lanceur`, `sort` et `sources` APRES `montant` (B-4) : un lecteur qui ne connait que les deux premiers champs
+        // lit la ligne comme avant.
+        LOG_INFO("playerbots.coa", "coa soin absorbe: essai={} cible={} montant={} lanceur={} sort={} sources={}", e.id,
+                 p->GetGUID().GetCounter(), absorbe, lanceurAbsorbe, sortAbsorbe, sourcesAbsorbe);
+    }
     TracerCoup(e, p, inflige, type, palier);
 }
 
@@ -823,7 +1076,8 @@ void Demarrer(Essai& e)
     e.creature = c->GetGUID();
     {
         std::lock_guard<std::mutex> garde(verrouRegistre);
-        creaturesBanc.insert(e.creature.GetRawValue());
+        creaturesBanc[e.creature.GetRawValue()] = e.p.creatureInvulnerable;
+        PlacerCreatureVerrouille(e.creature.GetRawValue(), e.p.creatureInvulnerable);
         MajCompteur();
     }
     c->SetFaction(FACTION_HOSTILE);
@@ -859,6 +1113,18 @@ void Demarrer(Essai& e)
     float const palier = Escalade(e.epreuve) ? e.p.depart : e.epreuve == Epreuve::A5 ? e.p.constant : e.p.fond;
     LOG_INFO("playerbots.coa", "coa soin debut: essai={} epreuve={} creature={} membres={} palier={}", e.id,
              NomEpreuve(e.epreuve), e.creature.GetCounter(), membres, FormatPalier(palier));
+
+    // B-3/B-4 : les auras suivies deja posees a l'engagement (Fetid Ward 680388 posee pendant l'attente ?). Apres la
+    // ligne `debut`, pour que le lecteur les rattache a l'essai a t=0. Une ligne par aura, `etat=present`.
+    for (Membre const& m : e.membres)
+        if (Player* p = Trouver(m.guid))
+            for (auto const& [id, app] : p->GetAppliedAuras())
+            {
+                Aura const* aura = app ? app->GetBase() : nullptr;
+                if (aura && AuraSuivie(aura->GetSpellInfo()))
+                    LOG_INFO("playerbots.coa", "coa soin aura: essai={} guid={} sort={} etat=present lanceur={} pile={} "
+                             "mode=0", e.id, m.guid, id, aura->GetCasterGUID().GetCounter(), uint32(aura->GetStackAmount()));
+            }
 }
 
 // Une seconde d'un essai en cours.
@@ -1082,6 +1348,51 @@ void Suivre()
             Avancer(e);
             continue;
         }
+        // ATTENTE (B-3) : tous arrives, hors combat dans l'enclos le temps que « coa buff » pose les auras de
+        // preparation. Un membre perdu (deconnecte, hors du monde au-dela de HORS_MONDE_MAX_S, trop loin, mort)
+        // abandonne l'essai ; un membre attaque (en combat) n'abrege pas l'attente : l'engagement le mettra de toute
+        // facon en combat avec la creature.
+        if (e.phase == Phase::ATTENTE)
+        {
+            for (Membre& m : e.membres)
+            {
+                Player* p = Trouver(m.guid);
+                if (!p)
+                {
+                    Terminer(e, "abandon", "membre_deconnecte");
+                    break;
+                }
+                if (!p->IsInWorld() || p->IsBeingTeleported())
+                {
+                    if (++m.horsMondeS > HORS_MONDE_MAX_S)
+                    {
+                        Terminer(e, "abandon", "membre_hors_monde");
+                        break;
+                    }
+                    continue;
+                }
+                m.horsMondeS = 0;
+                if (!p->IsAlive())
+                {
+                    Terminer(e, "abandon", "membre_mort_attente");
+                    break;
+                }
+                if (p->GetMapId() != e.centre.GetMapId() || p->GetExactDist2d(&e.centre) > ELOIGNE_YD)
+                {
+                    Terminer(e, "abandon", "membre_eloigne");
+                    break;
+                }
+            }
+            if (e.fini)
+                continue;
+            bool presents = true;
+            for (Membre const& m : e.membres)
+                if (Player* p = Trouver(m.guid))
+                    presents = presents && p->IsInWorld() && !p->IsBeingTeleported();
+            if (presents && Ecoule(e.attenteMs) >= e.p.attenteS * 1000)
+                Demarrer(e);
+            continue;
+        }
         // ARRIVEE : tous dans le monde, sur la carte de l'enclos, pres du centre de leur case.
         bool arrives = true;
         for (Membre const& m : e.membres)
@@ -1098,7 +1409,12 @@ void Suivre()
         }
         if (e.fini)
             continue;
-        if (arrives)
+        if (arrives && e.p.attenteS)
+        {
+            e.phase = Phase::ATTENTE;
+            e.attenteMs = getMSTime();
+        }
+        else if (arrives)
             Demarrer(e);
         else if (Ecoule(e.creeMs) > ARRIVEE_MAX_MS)
             Terminer(e, "abandon", "arrivee_expiree");
@@ -1257,6 +1573,13 @@ public:
             e->membres.push_back(m);
         }
 
+        // Corrections du 17/10, lues par les fils de carte : avant l'inscription (et donc avant la composition relue
+        // plus bas, qui lit buffsAvantCombat dans AiFactory).
+        potionsPermises.store(p.potions, std::memory_order_relaxed);
+        buffsAvantCombat.store(p.attenteS > 0, std::memory_order_relaxed);
+        for (size_t i = 0; i < aurasSuivies.size(); ++i)
+            aurasSuivies[i].store(i < p.aurasSuivies.size() ? p.aurasSuivies[i] : 0, std::memory_order_relaxed);
+
         // Inscription : les gardes (specialisation, composition, activite, gestionnaire des bots, arene) tiennent des
         // maintenant. RefusMembre a deja ecarte tout membre inscrit ailleurs.
         {
@@ -1313,10 +1636,22 @@ public:
             sRandomPlayerbotMgr.SetValue(b, "randomize", 1);
             Remettre(b);
             RemettreAPlein(b);
+            RemettreRecharges(b);
             LOG_INFO("playerbots.coa", "coa soin preparation: essai={} guid={} nom={} classe={} niveau_avant={}"
                      " niveau_apres={} spe_origine={} spe={} role={} set_fixe={} set_attendus={} set_poses={} pv_max={}",
                      id, m.guid, m.nom, uint32(m.classe), m.niveauAvant, uint32(b->GetLevel()), m.speOrigine, m.spe,
                      uint32(m.role), p.setFixe ? 1 : 0, attendus, poses, uint32(b->GetMaxHealth()));
+            // B-7 (17/10) : l'arbre PORTE pendant l'essai, lu ici et non apres le banc (le bot rendu reprend sa
+            // specialisation d'origine). `natif=0` : la specialisation a ete imposee a un bot d'une autre. `entrees`
+            // en dernier (la plus longue).
+            {
+                uint32 voulues = 0, manquantes = 0, enTrop = 0;
+                std::string const entrees = CoaArbrePorte(b, voulues, manquantes, enTrop);
+                LOG_INFO("playerbots.coa", "coa soin arbre: essai={} guid={} classe={} spe_origine={} spe={} natif={}"
+                         " table={} voulues={} manquantes={} en_trop={} entrees={}", id, m.guid, uint32(m.classe),
+                         m.speOrigine, m.spe, m.speOrigine == m.spe ? 1 : 0, GetCoaBuildTable(b), voulues, manquantes,
+                         enTrop, entrees.empty() ? "-" : entrees);
+            }
         }
 
         // Groupe sans humain (volet A) : le premier membre le mene. S'enregistre aupres du gestionnaire (sinon lignes
@@ -1463,18 +1798,148 @@ class CoaBancSoinUnitScript : public UnitScript
 public:
     CoaBancSoinUnitScript()
         : UnitScript("CoaBancSoinUnitScript", true,
-                     {UNITHOOK_ON_HEAL, UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK})
+                     {UNITHOOK_ON_HEAL, UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK,
+                      UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN, UNITHOOK_ON_AURA_APPLY, UNITHOOK_ON_AURA_REMOVE})
     {
     }
 
-    // Invulnerabilite de la creature de banc. Appele pour TOUT degat du serveur, sans liste de crochets
-    // (ScriptMgr::DealDamage) : hors essai, un chargement atomique.
-    uint32 DealDamage(Unit* /*attacker*/, Unit* victim, uint32 damage, DamageEffectType /*type*/) override
+    // Appele pour TOUT degat du serveur, sans liste de crochets (ScriptMgr::DealDamage) : hors essai, un chargement
+    // atomique.
+    //  - Creature de banc : invulnerable (banc d'avant, CreatureInvulnerable = 1), ou B-1 (17/10) : les degats passent,
+    //    sauf ce qui la tuerait (ramene a PV - 1) ; Avancer la remet a plein chaque seconde. Le vol de vie periodique
+    //    (HandlePeriodicHealthLeechAuraTick) soigne sur ce RETOUR : il n'est plus nul.
+    //  - Membre d'essai frappe par autre chose que la creature de banc (B-4) : ligne `coa soin degat:`.
+    uint32 DealDamage(Unit* attacker, Unit* victim, uint32 damage, DamageEffectType type) override
     {
-        if (damage && EstCreatureDeBanc(victim))
-            return 0;
+        if (!damage || !victim || !nbInscrits.load(std::memory_order_relaxed))
+            return damage;
+        if (victim->IsCreature())
+        {
+            int const mode = ModeCreatureDeBanc(victim);
+            if (mode == 1)
+                return 0;
+            if (mode == 0)
+            {
+                uint32 const pv = victim->GetHealth();
+                return damage < pv ? damage : (pv > 1 ? pv - 1 : 0);
+            }
+            return damage;
+        }
+        if (victim->IsPlayer())
+            TracerDegat(attacker, victim, damage, type);
         return damage;
     }
+
+    void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& /*damage*/, SpellInfo const* spellInfo) override
+    {
+        if (!nbInscrits.load(std::memory_order_relaxed) || !target || !target->IsPlayer())
+            return;
+        t_degat.cible = target;
+        t_degat.source = attacker;
+        t_degat.sort = spellInfo ? spellInfo->Id : 0;
+        t_degat.valide = true;
+    }
+
+    void OnAuraApply(Unit* unit, Aura* aura) override
+    {
+        if (!nbInscrits.load(std::memory_order_relaxed) || !unit || !aura || !unit->IsPlayer())
+            return;
+        TracerAura(unit, aura->GetSpellInfo(), aura->GetCasterGUID(), aura->GetStackAmount(), "pose", 0);
+    }
+
+    void OnAuraRemove(Unit* unit, AuraApplication* app, AuraRemoveMode mode) override
+    {
+        if (!nbInscrits.load(std::memory_order_relaxed) || !unit || !app || !unit->IsPlayer())
+            return;
+        Aura const* aura = app->GetBase();
+        if (aura)
+            TracerAura(unit, aura->GetSpellInfo(), aura->GetCasterGUID(), aura->GetStackAmount(), "levee", uint32(mode));
+    }
+
+private:
+    static char const* NomDegat(DamageEffectType type)
+    {
+        switch (type)
+        {
+            case DIRECT_DAMAGE: return "melee";
+            case SPELL_DIRECT_DAMAGE: return "sort";
+            case DOT: return "periodique";
+            case HEAL: return "soin";
+            case NODAMAGE: return "sans";
+            case SELF_DAMAGE: return "soi";
+        }
+        return "autre";
+    }
+
+    // Fil de carte. Une ligne par degat subi par un membre, sauf de la creature de banc (sa charge a ses lignes
+    // `coup`), bornee a DEBIT_CANAL[CANAL_DEGAT] par essai et par seconde.
+    static void TracerDegat(Unit* attacker, Unit* victim, uint32 damage, DamageEffectType type)
+    {
+        uint32 const essai = EssaiDuJoueur(victim);
+        if (!essai)
+            return;
+        // Le sort : note periodique (ModifyPeriodicDamageAurasTick, meme paire) ou de sort direct (ModifySpellDamageTaken).
+        uint32 sort = 0;
+        if (t_tick.valide && t_tick.cible == victim && t_tick.lanceur == attacker)
+        {
+            sort = t_tick.sort;
+            t_tick.valide = false;
+        }
+        else if (t_degat.valide && t_degat.cible == victim && t_degat.source == attacker)
+            sort = t_degat.sort;
+        t_degat.valide = false;
+        if (attacker && attacker->IsCreature() && EstCreatureDeBanc(attacker))
+            return;
+        char const* origine = "aucune";
+        uint32 source = 0;
+        if (attacker)
+        {
+            Player* proprio = attacker->GetCharmerOrOwnerPlayerOrPlayerItself();
+            source = attacker->GetGUID().GetCounter();
+            if (attacker == victim)
+                origine = "soi";
+            else if (proprio == victim)
+                origine = "serviteur";
+            else if (proprio && EssaiDuJoueur(proprio) == essai)
+                origine = proprio == attacker ? "membre" : "serviteur_membre";
+            else if (proprio)
+                origine = "joueur";
+            else if (attacker->IsCreature())
+                origine = "creature";
+            else
+                origine = "autre";
+        }
+        uint32 const cible = victim->GetGUID().GetCounter();
+        {
+            std::lock_guard<std::mutex> garde(verrouRegistre);
+            if (!EssaiDuMembreVerrouille(cible) || !DebitPermis(essai, CANAL_DEGAT, getMSTime()))
+                return;
+        }
+        LOG_INFO("playerbots.coa", "coa soin degat: essai={} cible={} source={} origine={} sort={} montant={} type={}"
+                 " pv_pct_avant={}", essai, cible, source, origine, sort, damage, NomDegat(type),
+                 std::min<uint32>(100, uint32(std::lround(victim->GetHealthPct()))));
+    }
+
+    // Fil de carte. Pose et levee d'une aura suivie (AuraSuivie) sur un membre.
+    static void TracerAura(Unit* unit, SpellInfo const* info, ObjectGuid lanceur, uint8 pile, char const* etat,
+                           uint32 mode)
+    {
+        if (!AuraSuivie(info))
+            return;
+        uint32 const essai = EssaiDuJoueur(unit);
+        if (!essai)
+            return;
+        uint32 const guid = unit->GetGUID().GetCounter();
+        {
+            std::lock_guard<std::mutex> garde(verrouRegistre);
+            if (!EssaiDuMembreVerrouille(guid) || !DebitPermis(essai, CANAL_AURA, getMSTime()))
+                return;
+        }
+        LOG_INFO("playerbots.coa", "coa soin aura: essai={} guid={} sort={} etat={} lanceur={} pile={} mode={}", essai, guid,
+                 info->Id, etat, lanceur.GetCounter(), uint32(pile), mode);
+    }
+
+public:
 
     void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& /*damage*/, SpellInfo const* spellInfo) override
     {
@@ -1615,6 +2080,55 @@ void CoaBancSoin::TracerAction(Player* bot, char const* action, char const* resu
     }
     LOG_INFO("playerbots.coa", "coa soin action: essai={} guid={} action={} resultat={} sort={} code={}", essai, guid,
              action, resultat, sort, code);
+}
+
+bool CoaBancSoin::PotionsInterdites(uint32 guidLow)
+{
+    return EssaiDuMembre(guidLow) != 0 && !potionsPermises.load(std::memory_order_relaxed);
+}
+
+bool CoaBancSoin::BuffsAvantCombat()
+{
+    return buffsAvantCombat.load(std::memory_order_relaxed);
+}
+
+void CoaBancSoin::TracerLancer(Player* bot, char const* action, uint32 sort)
+{
+    if (!bot || !sort || !nbInscrits.load(std::memory_order_acquire))
+        return;
+    uint32 const guid = bot->GetGUID().GetCounter();
+    uint32 essai = 0;
+    {
+        std::lock_guard<std::mutex> garde(verrouRegistre);
+        essai = EssaiDuMembreVerrouille(guid);
+        if (!essai || !DebitPermis(essai, CANAL_LANCER, getMSTime()))
+            return;
+    }
+    // Meme format que les lignes des actions de soin (TracerAction) : le lecteur les distingue par `action`.
+    LOG_INFO("playerbots.coa", "coa soin action: essai={} guid={} action={} resultat=lance sort={} code=0", essai, guid,
+             action, sort);
+}
+
+void CoaBancSoin::TracerListe(Player* bot, char const* action, std::string const& defensifs, std::string const& soins)
+{
+    if (!bot || !nbInscrits.load(std::memory_order_acquire))
+        return;
+    uint32 const guid = bot->GetGUID().GetCounter();
+    uint32 essai = 0;
+    std::string const contenu = defensifs + "|" + soins;
+    {
+        std::lock_guard<std::mutex> garde(verrouRegistre);
+        essai = EssaiDuMembreVerrouille(guid);
+        if (!essai)
+            return;
+        std::string& derniere = dernieresListes[{guid, std::string(action)}];
+        if (derniere == contenu || !DebitPermis(essai, CANAL_LISTE, getMSTime()))
+            return;
+        derniere = contenu;
+    }
+    LOG_INFO("playerbots.coa", "coa soin liste: essai={} guid={} action={} pv_pct={} defensifs={} soins={}", essai, guid,
+             action, std::min<uint32>(100, uint32(std::lround(bot->GetHealthPct()))), defensifs.empty() ? "-" : defensifs,
+             soins.empty() ? "-" : soins);
 }
 
 void AddSC_coa_banc_soin()

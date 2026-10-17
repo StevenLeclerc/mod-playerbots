@@ -911,6 +911,13 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     {
         nonCombatEngine->removeAllStrategies();
         nonCombatEngine->addStrategiesNoInit("dps assist", "stay", "chat", "default", nullptr);
+        // B-3 du banc des soins (17/10) : pendant l'attente hors combat avant l'engagement
+        // (AiPlayerbot.CoaSoin.AttenteAvantCombat > 0), un membre d'essai de classe CoA garde « coa buff », comme dans
+        // sa composition ordinaire (plus haut) : auras de preparation (Fetid Ward...) et serviteur leve. Sans elle, les
+        // essais ia-A / ia-B n'en posaient aucune. Banc d'avant (attente 0) : rien de change.
+        if (CoaBancSoin::MembreEngage(player->GetGUID().GetCounter()) && CoaBancSoin::BuffsAvantCombat() &&
+            IsAscensionCustomClassId(player->getClass()))
+            nonCombatEngine->addStrategy("coa buff", false);
     }
 }
 

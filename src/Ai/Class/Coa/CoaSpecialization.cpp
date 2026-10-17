@@ -31,6 +31,7 @@
 #include <array>
 #include <mutex>
 #include <set>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -847,6 +848,55 @@ uint32 GetCoaBuildTable(Player const* bot)
         h *= 16777619u;
     }
     return (h >> 31) ? 1 : 2;     // bit FORT : le bit faible d un FNV n est que la parite des octets
+}
+
+std::string CoaArbrePorte(Player const* bot, uint32& voulues, uint32& manquantes, uint32& enTrop)
+{
+    voulues = manquantes = enTrop = 0;
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()))
+        return std::string();
+    uint8 const classId = bot->getClass();
+    uint32 const specializationId = GetAscensionActiveSpecialization(bot);
+    // Les rangs voulus : ceux qu'ApplyCoaTalents vise (meme table, meme niveau).
+    std::vector<std::pair<uint32, uint8>> wanted;
+    uint8 buildTop = 0;
+    if (specializationId)
+    {
+        if (GetCoaBuildTable(bot) == 1)
+            CollectWantedRanks(CoaLevelBuildDataKami::Picks, classId, specializationId, bot->GetLevel(), wanted, buildTop);
+        else
+            CollectWantedRanks(CoaLevelBuildData::Picks, classId, specializationId, bot->GetLevel(), wanted, buildTop);
+    }
+    // Toutes les entrees que l'une ou l'autre table donne a la classe, toutes specialisations : ce que le bot tient
+    // d'une autre specialisation se voit aussi (`en_trop`).
+    std::set<uint32> entrees;
+    for (CoaLevelBuildData::Pick const& pick : CoaLevelBuildDataKami::Picks)
+        if (pick.ClassId == classId)
+            entrees.insert(pick.EntryId);
+    for (CoaLevelBuildData::Pick const& pick : CoaLevelBuildData::Picks)
+        if (pick.ClassId == classId)
+            entrees.insert(pick.EntryId);
+    for (auto const& [entryId, rank] : wanted)
+        entrees.insert(entryId);
+    std::string texte;
+    for (uint32 const entryId : entrees)
+    {
+        uint32 const tenu = GetAscensionTalentRank(bot, entryId);
+        auto itr = std::find_if(wanted.begin(), wanted.end(),
+            [entryId](std::pair<uint32, uint8> const& w) { return w.first == entryId; });
+        uint32 const voulu = itr == wanted.end() ? 0 : itr->second;
+        if (voulu)
+        {
+            ++voulues;
+            if (tenu < voulu)
+                ++manquantes;
+        }
+        if (tenu > voulu)
+            ++enTrop;
+        if (tenu)
+            texte += (texte.empty() ? "" : ",") + std::to_string(entryId) + ":" + std::to_string(tenu);
+    }
+    return texte;
 }
 
 uint32 ApplyCoaTalents(Player* bot)

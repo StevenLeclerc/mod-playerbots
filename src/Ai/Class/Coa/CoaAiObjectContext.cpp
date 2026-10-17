@@ -1726,6 +1726,8 @@ bool IsLastingFailure(SpellCastResult result)
     }
 }
 void RecordFailure(uint8 kind, uint32 spellId, uint16 reason);
+// Banc des soins, B-4 (17/10) : trace d'un lancer hors soin d'un membre d'essai (definie apres UsageKind).
+void BancSoinLancer(Player* bot, uint8 usage, uint32 sort);
 
 // CoaArene IA, lot L0 (CoaAreneIa.inc, inclus plus bas) : sous controle en arene ou en duel, ne pas tenter ce que
 // le coeur refusera a cause de l'etat du lanceur. Faux sans AiPlayerbot.CoaArene.IaCommune.
@@ -2115,6 +2117,8 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             {
                 if (trace)
                     CoaAreneTracerSort(botAI, bot, info, target, SPELL_CAST_OK, nullptr);
+                // Banc des soins, B-4 : un chargement atomique hors essai.
+                BancSoinLancer(bot, usage, spell.info->Id);
                 // Revue de I1/I2 : une balise posee (MARQUE_BALISE) n'est pas relancee avant la fin de sa duree.
                 if (spell.marques & MARQUE_BALISE)
                 {
@@ -2433,6 +2437,57 @@ void BancSoinTracer(Player* bot, char const* action, SpellInfo const* cast, bool
         CoaBancSoin::TracerAction(bot, action, "refus", t_bancSoinEchec.sort, t_bancSoinEchec.code);
     else
         CoaBancSoin::TracerAction(bot, action, "rien", 0, 0);
+}
+
+// Banc des soins, B-4 (17/10, DIAG du 17/10 : « l'action qui lance 572617 pendant le banc n'est pas tracee ») : un sort
+// lance par CastFirst pour une action HORS soin -- attaque, zone, provocation, dissipation, interruption -- d'un membre
+// d'essai. Les actions de soin (heal, hot, group_heal, defensive, soin_soi, regen_mana) ont deja leur ligne
+// (BancSoinTracer) : non repetees ici. CastFirst sans usage (255 : formes, familiers, balises) : non trace.
+void BancSoinLancer(Player* bot, uint8 usage, uint32 sort)
+{
+    if (!bot || !CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return;
+    char const* action = nullptr;
+    switch (usage)
+    {
+        case USAGE_ATTACK: action = "attack"; break;
+        case USAGE_AOE: action = "aoe"; break;
+        case USAGE_TAUNT: action = "taunt"; break;
+        case USAGE_DISPEL: action = "dispel"; break;
+        case USAGE_INTERRUPT: action = "interrupt"; break;
+        default: return;
+    }
+    CoaBancSoin::TracerLancer(bot, action, sort);
+}
+
+// Banc des soins, B-4 : « 805027,807941r » -- ids de la liste dans son ordre, suffixe « r » si le sort (celui que le bot
+// lancerait, EffectiveSpell) est en recharge.
+std::string BancSoinTexteListe(Player* bot, std::vector<Usable> const& liste)
+{
+    std::string texte;
+    for (Usable const& u : liste)
+    {
+        if (!u.info)
+            continue;
+        SpellInfo const* const lance = EffectiveSpell(bot, u.info);
+        texte += (texte.empty() ? "" : ",") + std::to_string(u.info->Id) +
+                 (lance && bot->HasSpellCooldown(lance->Id) ? "r" : "");
+    }
+    return texte;
+}
+
+std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot);
+
+// Banc des soins, B-4 (DIAG du 17/10 : Sacrifice non lance avec serviteurs) : ce que CoaIaDefensifs / CoaIaSoinsSurSoi
+// ont rendu a une action de survie d'un membre d'essai. `soins` nul : non calcule par l'action, calcule ici pour la
+// trace. Une ligne quand le texte change (CoaBancSoin::TracerListe). Hors essai : un chargement atomique.
+void BancSoinListe(PlayerbotAI* botAI, Player* bot, char const* action, std::vector<Usable> const& defensifs,
+                   std::vector<Usable> const* soins)
+{
+    if (!bot || !CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return;
+    std::string const s = soins ? BancSoinTexteListe(bot, *soins) : BancSoinTexteListe(bot, CoaIaSoinsSurSoi(botAI, bot));
+    CoaBancSoin::TracerListe(bot, action, BancSoinTexteListe(bot, defensifs), s);
 }
 
 // The bot and the living group members near it, the bot first.
@@ -3738,6 +3793,8 @@ public:
             bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
             std::vector<Usable> const defensifs = CoaIaDefensifs(botAI, bot, pv, perte, true);
             vide = defensifs.empty();
+            // Banc des soins, B-4 : les listes AVANT le lancer (un lancer met le sort en recharge).
+            BancSoinListe(botAI, bot, critique ? "defensive_critique" : "defensive", defensifs, nullptr);
             SpellInfo const* cast = CastFirst(botAI, bot, defensifs, bot, USAGE_DEFENSIVE);
             if (!cast && !critique && pv < float(sPlayerbotAIConfig.mediumHealth))
             {
@@ -3779,7 +3836,11 @@ public:
                 return false;
             float const pv = bot->GetHealthPct();
             bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
-            return CoaIaUnPret(botAI, bot, CoaIaDefensifs(botAI, bot, pv, perte, false), bot) ||
+            std::vector<Usable> const defensifs = CoaIaDefensifs(botAI, bot, pv, perte, false);
+            // Banc des soins, B-4 : la liste que le test d'utilite a vue (une action jamais executee faute de sort pret
+            // ne laisse sinon aucune trace). Ordre non trie (`trier` faux) : action a part, « _test ».
+            BancSoinListe(botAI, bot, critique ? "defensive_critique_test" : "defensive_test", defensifs, nullptr);
+            return CoaIaUnPret(botAI, bot, defensifs, bot) ||
                    (!critique && pv < float(sPlayerbotAIConfig.mediumHealth) &&
                     CoaIaUnPret(botAI, bot, CoaIaSoinsSurSoi(botAI, bot), bot));
         }
@@ -3805,6 +3866,7 @@ public:
     {
         t_bancSoinEchec = BancSoinEchec();
         std::vector<Usable> const soins = CoaIaSoinsSurSoi(botAI, bot);
+        BancSoinListe(botAI, bot, "soin_soi", std::vector<Usable>(), &soins);   // banc des soins, B-4
         SpellInfo const* cast = RecordUsage(USAGE_SOIN_SOI, CastFirst(botAI, bot, soins, bot, USAGE_SOIN_SOI));
         BancSoinTracer(bot, "soin_soi", cast, soins.empty());
         return cast;

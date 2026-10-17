@@ -86,6 +86,13 @@ uint32 ApplyCoaTalents(Player* bot);
 // 1 or 2 drawn once and for all from the bot's guid.
 uint32 GetCoaBuildTable(Player const* bot);
 
+// CoA banc des soins, B-7 (17/10/2026) : l'arbre PORTE, « entree:rang,... » (rangs > 0, entrees triees) sur toutes les
+// entrees que les deux tables (kami et d'origine) donnent a la classe. `voulues` : entrees que la table du bot
+// (GetCoaBuildTable) veut a son niveau pour sa specialisation active ; `manquantes` : celles tenues sous le rang voulu ;
+// `enTrop` : entrees tenues au-dessus du rang voulu (0 si non voulues). Deux entrees partageant un sort (IsAliasedEntry)
+// peuvent compter en trop : indicatif. Lecture seule, FIL MONDE.
+std::string CoaArbrePorte(Player const* bot, uint32& voulues, uint32& manquantes, uint32& enTrop);
+
 // Palier d'equipement demande a la selection.
 //
 // POURQUOI RELATIF AU VIVIER, ET JAMAIS ABSOLU. Mesure du 2026-09-23 sur les 500 bots

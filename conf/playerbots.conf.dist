@@ -2143,7 +2143,7 @@ AiPlayerbot.Arene1v1.Banc = 0
 # Le premier nom est le soigneur (volet A) ou le bot seul (volet B) ; en A, le deuxieme est le tank (2 a 5 membres).
 # Des bots aleatoires CoA EN LIGNE, libres (ni groupe, ni combat, ni arene, ni Directeur). Prepares (niveau, spe
 # declaree de tout role, set fixe si AiPlayerbot.Arene1v1.BancSetFixe), groupes, teleportes dans l'enclos ; une
-# creature invulnerable et pacifiee les met en combat ; la charge (% des PV max par seconde) est appliquee par le
+# creature pacifiee et immortelle les met en combat ; la charge (% des PV max par seconde) est appliquee par le
 # serveur, absorptions et reductions comprises (armure non). Traces `coa soin ...:` dans CoaBots.log.
 # Les options sont relues a chaque commande (`.reload config` suffit).
 # Default: 0 (la commande refuse ; aucun essai, aucune trace)
@@ -2173,6 +2173,20 @@ AiPlayerbot.CoaSoin.Palier.DureePalier = 30
 AiPlayerbot.CoaSoin.Palier.Fond = 1.0
 AiPlayerbot.CoaSoin.Palier.Constant = 3.0
 AiPlayerbot.CoaSoin.DureeMax = 300
+
+# Corrections du banc du 17/10/2026 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, B-1 a B-4 ;
+# conception § 10). Les valeurs par defaut SONT les corrections ; l'autre valeur rend le banc d'avant.
+# B-1 : 0 = la creature prend les degats (jamais tuee, remise a plein chaque seconde) : le vol de vie periodique
+#       n'est plus nul. 1 = degats a 0 (banc d'avant). Default: 0
+AiPlayerbot.CoaSoin.CreatureInvulnerable = 0
+# B-2 : 0 = aucune potion ni pierre de soin pendant l'essai (sacs non touches). 1 = permises (banc d'avant).
+#       Les recharges sont TOUJOURS remises a zero a la preparation et au retour. Default: 0
+AiPlayerbot.CoaSoin.Potions = 0
+# B-3 : secondes hors combat dans l'enclos avant l'engagement, avec « coa buff » (0-60). 0 = banc d'avant. Default: 10
+AiPlayerbot.CoaSoin.AttenteAvantCombat = 10
+# B-4 : auras dont la pose et la levee sont tracees (`coa soin aura:`), en plus de toute aura payee en vie par
+#       seconde ; 16 ids au plus. Default: "572617 680388" (Immolation Aura, Fetid Ward)
+AiPlayerbot.CoaSoin.AurasSuivies = "572617 680388"
 
 # PvP Restricted Zones (bots will not initiate PvP or defend themselves if attacked)
 AiPlayerbot.PvpProhibitedZoneIds = "2255,656,2361,2362,2363,976,35,2268,3425,392,541,1446,3828,3712,3738,3565,3539,3623,4152,3988,4658,4284,4418,4436,4275,4323,4395,3703,4298,3951"
