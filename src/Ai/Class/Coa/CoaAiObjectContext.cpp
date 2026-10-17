@@ -91,6 +91,9 @@ enum CoaMarque : uint16
     MARQUE_IMMOBILISE      = 0x0010,  // enracine son propre lanceur (aura MOD_ROOT sur soi)
     // I2 du 17/10 (CoaSurcharge::marques seulement, jamais par Classify) : rend de la mana au groupe (balise du Tinker).
     MARQUE_REGEN_MANA      = 0x0020,
+    // Revue de I1/I2 (CoaSurcharge::marques seulement) : balise au sol (invocation, ni aura ni recharge propre). CastFirst
+    // la met au banc pour sa duree apres un lancer reussi : rien d'autre ne dit qu'elle est deja posee.
+    MARQUE_BALISE          = 0x0040,
     // Internes a Classify (relevees en descendant dans les sorts declenches), effacees avant la fin :
     MARQUE_I_SOIN_ALLIE    = 0x0100,  // un effet de soin vise un allie
     MARQUE_I_DEF_FORT      = 0x0200,  // KIND_DEFENSIVE pose par un effet qui n'est pas une reduction de moins de 10 %
@@ -711,11 +714,15 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // 85 % sur un seul membre, meme raison qu'Ignis 680369) ; KIND_HEAL pour 560744 seulement, comme le propose le
     // diagnostic : il entre aussi dans « coa heal », au dernier rang (zone, CoaHealAction::Rang).
     { 560744, KIND_HEAL | KIND_GROUP_HEAL, 0, 0 },
-    { 801801, KIND_GROUP_HEAL, 0, 0 },
+    // Revue : 801801 n'a ni recharge ni aura (Spell.dbc lu : RecoveryTime 0, Category 571 comme 560750 et 560744 ; la
+    // description dit « Shares a cooldown with other Beacons », partage des charges non lu dans le code du module) : sans
+    // MARQUE_BALISE, « coa group heal » pouvait en poser 3 d'affilee (25 % de mana de base chacune) et entamer les charges
+    // de la balise de mana. Duree 15 s (DurationIndex 8).
+    { 801801, KIND_GROUP_HEAL, 0, 0, false, MARQUE_BALISE },
     // I2 du 17/10 (Tinker 51) : Build: Replenishment Beacon 560750 (« restoring [...] $560819s1% base mana every $560751T1
     // sec to allies », 3 charges, 5 % de mana de base ; DUMMY + SUMMON, kind 0) ; limite par la mana au volet A (0-2 % a la
     // fin de chaque essai A1/A2). Marque MARQUE_REGEN_MANA, lue par « coa regen mana » (CoaRegenManaTrigger).
-    { 560750, 0, 0, 0, false, MARQUE_REGEN_MANA },
+    { 560750, 0, 0, 0, false, MARQUE_REGEN_MANA | MARQUE_BALISE },
     // I11 du 17/10 (Reaper 55-57) : Jailer's Bargain 805718 absorbe 30 % de la vie maximale par script (effet 0
     // SCHOOL_ABSORB, BasePoints 0 : force lue 1 point, environ 0,02 %, classe dernier). Force 30.
     { 805718, 0, 0, 30 },
@@ -2108,6 +2115,12 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             {
                 if (trace)
                     CoaAreneTracerSort(botAI, bot, info, target, SPELL_CAST_OK, nullptr);
+                // Revue de I1/I2 : une balise posee (MARQUE_BALISE) n'est pas relancee avant la fin de sa duree.
+                if (spell.marques & MARQUE_BALISE)
+                {
+                    int32 const duree = info->GetMaxDuration();
+                    benched[spell.info->Id] = now + time_t(duree > 0 ? (duree + 999) / 1000 : 15);
+                }
                 return spell.info;
             }
             if (trace)
@@ -3812,7 +3825,8 @@ public:
  * lot 4) ET AiPlayerbot.CoaIa.Classement (la marque vient d'une surcharge du lot 1) : pas d'option propre, le seuil de
  * 60 % est celui du diagnostic. Hors arene 1v1 et duel (CoaIaDecisionActive) comme les autres decisions de combat.
  * Une balise posee n'est pas relancee avant la fin de sa duree (Spell.dbc, DurationIndex) : le sort a 3 charges, et
- * rien d'autre ne dirait qu'une balise est deja au sol (c'est une invocation, pas une aura).
+ * rien d'autre ne dirait qu'une balise est deja au sol (c'est une invocation, pas une aura). Revue : ce delai est le banc
+ * de MARQUE_BALISE, pose par CastFirst, que le declencheur voit aussi.
  */
 constexpr float CoaRegenManaPct = 60.0f;
 
@@ -3852,24 +3866,12 @@ public:
         t_bancSoinEchec = BancSoinEchec();
         SpellInfo const* cast = CastFirst(botAI, bot, sorts, bot);
         BancSoinTracer(bot, "regen_mana", cast, sorts.empty());
-        if (cast)
-        {
-            int32 const duree = cast->GetMaxDuration();
-            prochainMs = getMSTime() + uint32(duree > 0 ? duree : 15 * IN_MILLISECONDS);
-            if (!prochainMs)
-                prochainMs = 1;
-        }
         return cast != nullptr;
     }
 
-    // Le delai est teste ici, comme le repli de CoaStealthAction : une action inutile laisse le tour aux autres.
-    bool isUseful() override
-    {
-        return (!prochainMs || getMSTimeDiff(prochainMs, getMSTime()) < 0x80000000u) && CoaRegenManaArmee(bot);
-    }
-
-private:
-    uint32 prochainMs = 0;  // getMSTime ; 0 : aucune balise posee par cette instance (une instance d'action par bot)
+    // Revue : le delai d'une balise posee est le banc pose par CastFirst (MARQUE_BALISE), que le declencheur lit aussi
+    // (CoaIaUnPret) : il ne reste plus actif a chaque tick pendant la duree de la balise.
+    bool isUseful() override { return CoaRegenManaArmee(bot); }
 };
 
 // Removes a harmful magic, curse, disease or poison effect from the bot or a group member.
@@ -4989,9 +4991,11 @@ public:
                                              NextAction("coa heal", ACTION_CRITICAL_HEAL) }));
         triggers.push_back(new TriggerNode("party member almost full health",
                                            { NextAction("coa hot", ACTION_MEDIUM_HEAL) }));
-        // I2 du 17/10 (CoaRegenManaTrigger) : 25, sous les soins (30+), « coa defensive » (28), l'interruption (27) et la
-        // dissipation (26) du soigneur ; devant « coa aoe » (22) et la rotation (10). Inerte hors soigneur a balise.
-        triggers.push_back(new TriggerNode("coa regen mana", { NextAction("coa regen mana", ACTION_MEDIUM_HEAL + 5) }));
+        // I2 du 17/10 (CoaRegenManaTrigger). Revue : 31,5, au-dessus des soins des membres a vie moyenne (30, 31 : sous
+        // dommages continus, ils sont actifs a chaque tick et une balise a 25 ne partait qu'a mana sec), sous ceux a vie
+        // basse ou critique et le soin de zone (32+). Un GCD toutes les 15 s au plus (banc MARQUE_BALISE). Inerte hors
+        // soigneur a balise.
+        triggers.push_back(new TriggerNode("coa regen mana", { NextAction("coa regen mana", ACTION_CRITICAL_HEAL + 1.5f) }));
     }
 
 protected:
