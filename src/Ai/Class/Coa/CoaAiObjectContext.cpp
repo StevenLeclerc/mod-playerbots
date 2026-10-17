@@ -2906,6 +2906,23 @@ void CoaIaRetirerUniquesTenus(Player* bot, std::vector<Usable>& spells)
         { return CoaIaUniqueTenuAilleurs(bot, EffectiveSpell(bot, spell.info), spell.info->Id); }), spells.end());
 }
 
+/*
+ * I6 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Necromancer 34-36) : Sacrifice Undead 807941, soin
+ * « for each Undead minion destroyed », lance par le repli de soin de « coa defensive » sans aucun serviteur (14 lancers a
+ * vide sur 16, 9/9 en Rime) : soin nul et 30 s de recharge perdues. Le module ne le refuse pas (seuls 802121 et 801530
+ * rendent NO_PET). Meme regle que la survie d'arene (CoaAreneSurvieSorts) : un sort « par serviteur »
+ * (CoaAreneSortParServiteur, rangs compris) est retire tant que le bot n'a aucune unite controlee vivante issue d'une
+ * invocation (CoaAreneAServiteur). Listes de la survie du lot 3 seulement (AiPlayerbot.CoaIa.Survie).
+ */
+void CoaIaRetirerParServiteurSansServiteur(Player* bot, std::vector<Usable>& spells)
+{
+    if (spells.empty() || CoaAreneAServiteur(bot))
+        return;
+    spells.erase(std::remove_if(spells.begin(), spells.end(), [bot](Usable const& spell)
+        { return CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(EffectiveSpell(bot, spell.info)->Id); }),
+        spells.end());
+}
+
 // Les defensifs que le palier admet, du plus fort au plus faible (ordre du niveau requis a force egale). `trier` faux :
 // la liste seule (isUseful, declencheurs).
 std::vector<Usable> CoaIaDefensifs(PlayerbotAI* botAI, Player* bot, float pv, bool perteRapide, bool trier)
@@ -2916,6 +2933,7 @@ std::vector<Usable> CoaIaDefensifs(PlayerbotAI* botAI, Player* bot, float pv, bo
         { return !CoaIaDefensifAdmis(EffectiveSpell(bot, spell.info), pv, perteRapide) ||
                  CoaIaPayeEnVieTropCher(bot, EffectiveSpell(bot, spell.info)); }), defensifs.end());
     CoaIaRetirerUniquesTenus(bot, defensifs);
+    CoaIaRetirerParServiteurSansServiteur(bot, defensifs);
     if (trier && defensifs.size() > 1)
     {
         // Relevee une fois par sort, puis triee : jamais de calcul dans le comparateur.
@@ -3154,6 +3172,8 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
             soins.push_back(spell);
     // Revue du 16/10 : un HoT ou un soin a cible unique tenu sur un autre membre n'est pas retire pour le bot.
     CoaIaRetirerUniquesTenus(bot, soins);
+    // I6 du 17/10 : ni Sacrifice Undead ni autre sort « par serviteur » sans serviteur.
+    CoaIaRetirerParServiteurSansServiteur(bot, soins);
     // Revue du lot 5 : plancher de vie apres paiement (CoaIaPayeEnVieTropCher).
     soins.erase(std::remove_if(soins.begin(), soins.end(), [bot](Usable const& spell)
         { return CoaIaPayeEnVieTropCher(bot, EffectiveSpell(bot, spell.info)); }), soins.end());

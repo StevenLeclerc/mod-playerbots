@@ -3414,15 +3414,21 @@ bool CoaAreneGenereRessource(SpellInfo const* info, Powers pouvoir, uint8 profon
 // NO_PET pour 802121 et 801530, CANT_DO_THAT pour les « Command ») ou pas du tout (807939). Liste explicite, raison
 // lue dans leur description : « for each Undead minion destroyed », « Siphon life from your undead minions »,
 // « Command your Undead minions », « only ever targets Raised minions ».
+// I6 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md) : la liste nommait deux rangs de Sacrifice Undead
+// (805027 rang 1, 807939 rang 3) ; Usable.info porte le rang le plus haut connu, et le rang 5 807941 (38 personnages au
+// 17/10) lui echappait -- 14 lancers a vide sur 16 au banc ia-B. Le premier rang de la chaine (spell_ranks : 805027 ->
+// 807938, 807939, 807940, 807941) est teste en plus de l'id : tous les rangs sont couverts, et ceux a venir.
 bool CoaAreneSortParServiteur(uint32 id)
 {
-    switch (id)
-    {
-        case 807939: case 805027: case 802121: case 504868: case 801530:
-            return true;
-        default:
-            return false;
-    }
+    for (uint32 const candidat : { id, sSpellMgr->GetFirstSpellInChain(id) })
+        switch (candidat)
+        {
+            case 807939: case 805027: case 802121: case 504868: case 801530:
+                return true;
+            default:
+                break;
+        }
+    return false;
 }
 
 // Le bot a au moins une unite controlee vivante issue d'une invocation (familier, serviteurs, gardiens).
