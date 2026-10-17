@@ -2954,6 +2954,23 @@ float CoaIaSoinEstime(Player* bot, SpellInfo const* info, Unit* cible, uint8 pro
             if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
                 total += CoaIaSoinEstime(bot, declenche, cible, 1);
         }
+        // I3 du 17/10 (Cultist 40, Dark Infusion 570249 et ses rangs 500721, 570248, 570250-570252) : aura DUMMY dont le
+        // declencheur est un soin a valeur vide (570263 : HEAL, base 0 + 1) que le module lance avec la valeur de l'aura
+        // (AscensionCultistEvents.cpp, Copy(player, recipient, 570263, amount) : SPELLVALUE_BASE_POINT0 = montant de
+        // l'effet 0). Estimee a un soin du declenche portant la valeur de l'aura (bonus du declenche, comme au lancer
+        // reel) ; avant : 0, donc « illisible », et le tri C3 lui laissait sa place (36 % de la mana de soin du Heretic
+        // pour 5 % du soin au volet A1). Un seul soin par lancer : l'expansion aux allies voisins n'est pas comptee.
+        else if (IsAuraEffect(effect) && effect.ApplyAuraName == SPELL_AURA_DUMMY && effect.TriggerSpell &&
+                 effect.TriggerSpell != info->Id && !profondeur && valeur > 1)
+        {
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                for (uint8 j = 0; j < MAX_SPELL_EFFECTS; ++j)
+                    if (declenche->Effects[j].Effect == SPELL_EFFECT_HEAL && CoaValeurDeBase(declenche->Effects[j]) <= 1)
+                    {
+                        total += float(bot->SpellHealingBonusDone(cible, declenche, valeur, HEAL, j));
+                        break;
+                    }
+        }
         else if (IsAuraEffect(effect) && effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL)
             total += float(bot->SpellHealingBonusDone(cible, info, valeur, DOT, i)) * float(ticks);
         else if (IsAuraEffect(effect) && effect.ApplyAuraName == SPELL_AURA_PERIODIC_TRIGGER_SPELL && effect.TriggerSpell &&
