@@ -3243,7 +3243,7 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
  * 582591 (30 % de la mana de base) jamais lance ; Runemaster : Granite Resolve absent avec la mana a sec. La reserve de
  * mana existante (SavingManaForHeals, CoaCasterManaReserve) n'agit que sous 15 % et pour un bot qui connait un soin ; celle
  * de l'arene (CoaAreneReserveMana) ne vaut qu'en arene 1v1 et en duel.
- * Un bot NON soigneur paye en mana, sous mediumHealth (65 %), ne lance plus de sort d'attaque paye en mana qui laisserait
+ * Un bot NON soigneur et NON tank (revue) paye en mana, sous mediumHealth (65 %), ne lance plus de sort d'attaque paye en mana qui laisserait
  * moins que : le cout du plus cher de ses defensifs payes en mana prets ou prets dans CoaIaReservePretDansMs, plus le cout
  * du moins cher de ses soins sur soi payes en mana dans la meme fenetre. Tous les defensifs comptent, quel que soit leur
  * palier (Embrace, recharge 300 s, n'est admis que sous 30 % : c'est pour lui que la mana se garde). Ni « par serviteur »
@@ -3254,7 +3254,10 @@ constexpr uint32 CoaIaReservePretDansMs = 10 * IN_MILLISECONDS;
 
 void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
 {
-    if (usable.empty() || !CoaIaSurvieActive(bot) || GetCoaRole(bot) == CoaRole::Heal || !bot->GetMaxPower(POWER_MANA) ||
+    // Revue de I8 : ni soigneur ni tank. Un tank paye en mana vit sous 65 % en donjon ; la reserve lui retirait les
+    // attaques payantes, donc la menace, y compris dans un groupe de joueurs.
+    CoaRole const role = GetCoaRole(bot);
+    if (usable.empty() || !CoaIaSurvieActive(bot) || role == CoaRole::Heal || role == CoaRole::Tank || !bot->GetMaxPower(POWER_MANA) ||
         bot->GetHealthPct() >= float(sPlayerbotAIConfig.mediumHealth))
         return;
     bool const sansServiteur = !CoaAreneAServiteur(bot);
