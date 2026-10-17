@@ -3261,7 +3261,7 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
  * du moins cher de ses soins sur soi payes en mana dans la meme fenetre. Tous les defensifs comptent, quel que soit leur
  * palier (Embrace, recharge 300 s, n'est admis que sous 30 % : c'est pour lui que la mana se garde). Ni « par serviteur »
  * sans serviteur, ni sort qui exclut son lanceur ou l'enracine. Rien a garder (aucun sort de survie paye en mana) : rien
- * n'est retire. Sous AiPlayerbot.CoaIa.Survie (CoaIaSurvieActive : hors arene 1v1 et duel) ; pas d'option propre.
+ * n'est retire. Sous AiPlayerbot.CoaIa.Survie (CoaIaSurvieActive : hors arene 1v1 et duel) ET AiPlayerbot.CoaIa.ReserveDefensif.
  */
 constexpr uint32 CoaIaReservePretDansMs = 10 * IN_MILLISECONDS;
 
@@ -3270,7 +3270,8 @@ void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& us
     // Revue de I8 : ni soigneur ni tank. Un tank paye en mana vit sous 65 % en donjon ; la reserve lui retirait les
     // attaques payantes, donc la menace, y compris dans un groupe de joueurs.
     CoaRole const role = GetCoaRole(bot);
-    if (usable.empty() || !CoaIaSurvieActive(bot) || role == CoaRole::Heal || role == CoaRole::Tank || !bot->GetMaxPower(POWER_MANA) ||
+    if (usable.empty() || !sPlayerbotAIConfig.coaIaReserveDefensif || !CoaIaSurvieActive(bot) || role == CoaRole::Heal ||
+        role == CoaRole::Tank || !bot->GetMaxPower(POWER_MANA) ||
         bot->GetHealthPct() >= float(sPlayerbotAIConfig.mediumHealth))
         return;
     bool const sansServiteur = !CoaAreneAServiteur(bot);
@@ -4124,15 +4125,15 @@ private:
      * (CoaAreneAFamilier) leve UN serviteur : le moins cher de ses invocations permanentes (CoaAreneEstFamilier), comme la
      * preparation d'arene. Plafond : un seul, puisqu'il n'est tente que sans serviteur. Jamais en arene (InArena, la
      * preparation a sa propre regle) ni en duel. Un essai toutes les CoaIaServiteurReessaiSecondes au plus, reussi ou non.
-     * Sous AiPlayerbot.CoaIa.Survie : pas d'option propre (le diagnostic en proposait une, eteinte par defaut).
+     * Sous AiPlayerbot.CoaIa.Survie ET AiPlayerbot.CoaIa.LeverServiteur (a 0 l'une ou l'autre : comportement d'avant I7).
      */
     static constexpr time_t CoaIaServiteurReessaiSecondes = 30;
 
     bool CoaIaServiteurVoulu(Player* lanceur) const
     {
-        return sPlayerbotAIConfig.coaIaSurvie && lanceur->IsAlive() && !lanceur->IsInCombat() && !lanceur->InArena() &&
-               !lanceur->duel && CoaAreneKitLifeForce(lanceur) && !CoaAreneAFamilier(lanceur) &&
-               time(nullptr) >= prochainServiteur;
+        return sPlayerbotAIConfig.coaIaSurvie && sPlayerbotAIConfig.coaIaLeverServiteur && lanceur->IsAlive() &&
+               !lanceur->IsInCombat() && !lanceur->InArena() && !lanceur->duel && CoaAreneKitLifeForce(lanceur) &&
+               !CoaAreneAFamilier(lanceur) && time(nullptr) >= prochainServiteur;
     }
 
     SpellInfo const* LeverUnServiteur()

@@ -793,6 +793,8 @@ public:
     bool coaIaFormeMaudite;      // lot 5 : Bloodmage sous lowHealth en combat -> forme maudite, puis ses defensifs de forme
     bool coaIaVenomancerSoin;    // lot 5 : Venomancer sous 35 % en combat -> quitte sa forme, se soigne, la reprend
     bool coaIaSoigneurResteEnCombat; // C1 (16/10) : soigneur en combat, cible invalide effacee sans quitter le moteur de combat
+    bool coaIaLeverServiteur;    // I7 (17/10) : Necromancer a Life Force sans serviteur en leve un hors combat (en plus de Survie)
+    bool coaIaReserveDefensif;   // I8 (17/10) : sous MediumHealth, mana du defensif et d'un soin gardee (en plus de Survie)
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;

@@ -1703,6 +1703,20 @@ AiPlayerbot.CoaIa.VenomancerSoin = 1
 # Default: 1
 AiPlayerbot.CoaIa.SoigneurResteEnCombat = 1
 
+# I7, 17/10 (Necromancer) : hors combat, hors arene et hors duel, un bot qui porte le kit Life Force
+# et n'a aucun serviteur en leve un (« coa buff »), le moins cher d'abord, un essai toutes les 30 s
+# au plus. Agit seulement si AiPlayerbot.CoaIa.Survie vaut aussi 1. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.LeverServiteur = 1
+
+# I8, 17/10 : reserve de survie hors arene 1v1 et duel. Sous AiPlayerbot.MediumHealth, un bot ni
+# soigneur ni tank qui paie en mana ne lance pas une attaque (« coa attack », « coa aoe ») qui ferait
+# tomber sa mana sous le cout du plus cher de ses defensifs payes en mana prets dans 10 s, plus celui
+# du moins cher de ses soins sur soi (Godblade, Runemaster). Agit seulement si
+# AiPlayerbot.CoaIa.Survie vaut aussi 1. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.ReserveDefensif = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
