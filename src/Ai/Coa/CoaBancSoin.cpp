@@ -58,7 +58,9 @@
  *       `coa soin liste:` (CoaIaDefensifs / CoaIaSoinsSurSoi, une ligne quand la liste change), `coa soin degat:`
  *       (degats subis d'une autre source que la creature), `coa soin aura:` (pose / levee des auras suivies, 572617 et
  *       toute aura payee en vie par seconde ; presentes a l'engagement), `lanceur=` et `sources=` sur
- *       `coa soin absorbe:`.
+ *       `coa soin absorbe:` (le JOUEUR proprietaire : maitre d'un familier, d'un totem, d'une balise -- revue du 17/10).
+ *  Revue du 17/10 : la ligne `coa soin debut:` porte le reglage de l'essai en fin de ligne (`invulnerable=`,
+ *       `potions=`, `attente=`), la ligne `coa soin banc: lance` aussi ; table des creatures pleine : abandon nomme.
  *  B-7  `coa soin arbre:` a la preparation : specialisation d'origine, natif ou force, entrees de talent tenues.
  */
 
@@ -393,15 +395,18 @@ uint32 EssaiDuJoueur(Unit const* u)
 }
 
 // Sous verrou : inscrit / retire une creature de banc dans la copie sans verrou.
-void PlacerCreatureVerrouille(uint64 brut, bool invulnerable)
+// Faux si la table est pleine (inatteignable : une case par essai, MAX_PLAFOND essais au plus) ; l'appelant abandonne
+// alors l'essai plutot que de laisser une creature hors table (ni protegee ni reconnue par les crochets).
+bool PlacerCreatureVerrouille(uint64 brut, bool invulnerable)
 {
     for (size_t i = 0; i < creaturesPlaces.size(); ++i)
         if (!creaturesPlaces[i].load(std::memory_order_relaxed))
         {
             creaturesInvulnerables[i].store(invulnerable, std::memory_order_relaxed);
             creaturesPlaces[i].store(brut, std::memory_order_release);
-            return;
+            return true;
         }
+    return false;
 }
 
 void LibererCreatureVerrouille(uint64 brut)
@@ -915,17 +920,32 @@ struct ReserveAbsorption
     int32 montant = 0;
 };
 
+// Revue du 17/10 : le lanceur ATTRIBUE est le JOUEUR proprietaire (familier, totem, balise du Tinker : leur maitre),
+// comme la ligne `coa soin:` (OnHeal). Le guid bas d'une creature n'est jamais ecrit : il pourrait egaler celui d'un
+// joueur. Proprietaire introuvable (lanceur disparu, creature sans maitre joueur) : guid vide, donc 0 = indetermine.
+ObjectGuid ProprietaireDeLaReserve(AuraEffect const* eff)
+{
+    ObjectGuid const g = eff->GetCasterGUID();
+    if (g.IsPlayer())
+        return g;
+    if (Unit* lanceur = eff->GetCaster())
+        if (Player* maitre = lanceur->GetCharmerOrOwnerPlayerOrPlayerItself())
+            return maitre->GetGUID();
+    return ObjectGuid::Empty;
+}
+
 std::vector<ReserveAbsorption> ReservesAbsorption(Player const* p)
 {
     std::vector<ReserveAbsorption> out;
     for (AuraType const type : { SPELL_AURA_SCHOOL_ABSORB, SPELL_AURA_MANA_SHIELD })
         for (AuraEffect const* eff : p->GetAuraEffectsByType(type))
             if (eff && (eff->GetMiscValue() & SPELL_SCHOOL_MASK_NORMAL))
-                out.push_back(ReserveAbsorption{eff, eff->GetCasterGUID(), eff->GetId(), eff->GetEffIndex(), eff->GetAmount()});
+                out.push_back(ReserveAbsorption{eff, ProprietaireDeLaReserve(eff), eff->GetId(), eff->GetEffIndex(),
+                                                eff->GetAmount()});
     return out;
 }
 
-// `lanceur` : guid bas du lanceur de l'absorption, 0 si indetermine ; `sort` : son sort, 0 si indetermine ; `sources` :
+// `lanceur` : guid bas du JOUEUR qui a pose l'absorption (le maitre d'un serviteur), 0 si indetermine ; `sort` : son sort, 0 si indetermine ; `sources` :
 // « guid:sort:part;... » des reserves qui ont baisse, « - » si aucune.
 void AttribuerAbsorption(Player const* p, std::vector<ReserveAbsorption> const& avant, uint32 absorbe, uint32& lanceur,
                          uint32& sort, std::string& sources)
@@ -935,8 +955,9 @@ void AttribuerAbsorption(Player const* p, std::vector<ReserveAbsorption> const& 
     sources.clear();
     std::vector<ReserveAbsorption> const apres = ReservesAbsorption(p);
     uint64 total = 0;
-    ObjectGuid seul;
+    ObjectGuid seul;                 // vide aussi quand le proprietaire est introuvable : `aucune` dit si on a vu une part
     uint32 seulSort = 0;
+    bool aucune = true;
     bool plusieurs = false;
     for (ReserveAbsorption const& r : avant)
     {
@@ -949,8 +970,9 @@ void AttribuerAbsorption(Player const* p, std::vector<ReserveAbsorption> const& 
         if (!sources.empty())
             sources += ";";
         sources += std::to_string(r.lanceur.GetCounter()) + ":" + std::to_string(r.sort) + ":" + std::to_string(part);
-        if (seul.IsEmpty())
+        if (aucune)
         {
+            aucune = false;
             seul = r.lanceur;
             seulSort = r.sort;
         }
@@ -959,12 +981,12 @@ void AttribuerAbsorption(Player const* p, std::vector<ReserveAbsorption> const& 
         else if (seulSort != r.sort)
             seulSort = 0;
     }
-    if (!seul.IsEmpty() && !plusieurs && total + 1 >= absorbe)
+    if (!aucune && !plusieurs && !seul.IsEmpty() && total + 1 >= absorbe)
     {
         lanceur = seul.GetCounter();
         sort = seulSort;
     }
-    else if (seul.IsEmpty() && avant.size() == 1)
+    else if (aucune && avant.size() == 1)
     {
         lanceur = avant[0].lanceur.GetCounter();
         sort = avant[0].sort;
@@ -1074,11 +1096,20 @@ void Demarrer(Essai& e)
         return;
     }
     e.creature = c->GetGUID();
+    bool place = false;
     {
         std::lock_guard<std::mutex> garde(verrouRegistre);
         creaturesBanc[e.creature.GetRawValue()] = e.p.creatureInvulnerable;
-        PlacerCreatureVerrouille(e.creature.GetRawValue(), e.p.creatureInvulnerable);
+        place = PlacerCreatureVerrouille(e.creature.GetRawValue(), e.p.creatureInvulnerable);
         MajCompteur();
+    }
+    if (!place)
+    {
+        // Revue du 17/10 : jamais en silence. Terminer retire la creature du registre et la renvoie.
+        LOG_ERROR("playerbots.coa", "coa soin: essai={} table des creatures de banc pleine ({} cases)", e.id,
+                  uint32(MAX_PLAFOND));
+        Terminer(e, "abandon", "table_creatures_pleine");
+        return;
     }
     c->SetFaction(FACTION_HOSTILE);
     // PACIFIED : elle attaque (victime, poursuite, combat) mais ne frappe jamais (Unit::AttackerStateUpdate,
@@ -1111,8 +1142,11 @@ void Demarrer(Essai& e)
         membres += (membres.empty() ? "" : ",") + std::to_string(m.guid) + ":" + std::to_string(m.classe) + ":" +
                    std::to_string(m.spe) + ":" + std::to_string(m.role);
     float const palier = Escalade(e.epreuve) ? e.p.depart : e.epreuve == Epreuve::A5 ? e.p.constant : e.p.fond;
-    LOG_INFO("playerbots.coa", "coa soin debut: essai={} epreuve={} creature={} membres={} palier={}", e.id,
-             NomEpreuve(e.epreuve), e.creature.GetCounter(), membres, FormatPalier(palier));
+    // Revue du 17/10 : le REGLAGE de l'essai (B-1, B-2, B-3) en fin de ligne, apres `palier` (dernier champ du format
+    // § 9, que le lecteur exige) : un lecteur d'avant les ignore, le rapport refuse de meler deux reglages.
+    LOG_INFO("playerbots.coa", "coa soin debut: essai={} epreuve={} creature={} membres={} palier={} invulnerable={} "
+             "potions={} attente={}", e.id, NomEpreuve(e.epreuve), e.creature.GetCounter(), membres,
+             FormatPalier(palier), e.p.creatureInvulnerable ? 1 : 0, e.p.potions ? 1 : 0, e.p.attenteS);
 
     // B-3/B-4 : les auras suivies deja posees a l'engagement (Fetid Ward 680388 posee pendant l'attente ?). Apres la
     // ligne `debut`, pour que le lecteur les rattache a l'essai a t=0. Une ligne par aura, `etat=present`.
@@ -1720,8 +1754,9 @@ public:
             noms += (noms.empty() ? "" : ",") + m.nom;
         handler->PSendSysMessage("coa soin banc: lance essai={} epreuve={} case={} membres={}", id, NomEpreuve(epreuve),
                                  uint32(caseLibre), noms);
-        LOG_INFO("playerbots.coa", "coa soin banc: lance essai={} epreuve={} case={} membres={} enclos={}", id,
-                 NomEpreuve(epreuve), uint32(caseLibre), noms, p.enclos);
+        LOG_INFO("playerbots.coa", "coa soin banc: lance essai={} epreuve={} case={} membres={} enclos={} "
+                 "invulnerable={} potions={} attente={}", id, NomEpreuve(epreuve), uint32(caseLibre), noms, p.enclos,
+                 p.creatureInvulnerable ? 1 : 0, p.potions ? 1 : 0, p.attenteS);
         essais.push_back(std::move(e));
         return true;
     }
