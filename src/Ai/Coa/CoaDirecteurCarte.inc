@@ -76,8 +76,8 @@ constexpr float CARTE_PRIME_RAYON_YD = 300.0f;
 constexpr float CARTE_DECALAGE_MIN = 0.0f;          // decalage du centre, en part du rayon (revue M3 : 0 a 0,7)
 constexpr float CARTE_DECALAGE_MAX = 0.7f;
 constexpr uint32 CARTE_CERCLE_MIN_S = 120;          // un cercle vit au moins 2 min, meme si la cible en sort
-constexpr uint32 CARTE_RARE_MIN = 9100400;          // rares.py : PLAGE 9100400-9100499, puis R7 9100490-9100599
-constexpr uint32 CARTE_RARE_MAX = 9100599;
+constexpr uint32 CARTE_RARE_MIN = 9100400;          // rares.py : PLAGE 9100400-9100499, R7 9100490-9100599, R8 9100600-9100673 (reserve jusqu a 9100699)
+constexpr uint32 CARTE_RARE_MAX = 9100699;
 constexpr size_t CARTE_SUIVIS_MAX = 128;
 constexpr uint32 CARTE_CACHE_MS = 1000;             // l'etat du monde est relu au plus une fois par seconde, tous joueurs
 
@@ -446,7 +446,7 @@ constexpr uint32 CARTE_FAILLE_MIN = 9100001, CARTE_FAILLE_MAX = 9100009;
 constexpr uint32 CARTE_FAILLE2_MIN = 9100200, CARTE_FAILLE2_MAX = 9100239;
 constexpr uint32 CARTE_NUIT_MIN = 9100300, CARTE_NUIT_MAX = 9100349;
 constexpr uint32 CARTE_CONVOI_MIN = 9100010, CARTE_CONVOI_MAX = 9100059;
-constexpr uint32 CARTE_EVENEMENT_MAX = 9100399;      // au-dela (rares 9100400-9100599, Sourcier 9105000...) : ignore
+constexpr uint32 CARTE_EVENEMENT_MAX = 9100399;      // au-dela (rares 9100400-9100699, Sourcier 9105000...) : ignore
 constexpr size_t CARTE_SANS_OBJ_MAX = 128;
 
 // Titre (index de CARTE_VARIANTES) d'un gabarit de faille ou de nuit ; 0 : ni l'un ni l'autre.
