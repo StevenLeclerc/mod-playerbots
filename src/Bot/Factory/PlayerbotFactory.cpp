@@ -2342,15 +2342,23 @@ void PlayerbotFactory::InitEquipment(bool incremental, bool second_chance)
 {
     if (level < 5)
     {
-        // original items
+        // CoA (17/10/2026) : CharStartOutfit.dbc n'a AUCUN objet pour les 21 classes CoA (12-32) ; les joueurs
+        // recoivent leur tenue par `playercreateinfo_item`. Sans repli, un bot CoA refait sous le niveau 5 restait nu.
+        std::vector<uint32> outfit;
         if (CharStartOutfitEntry const* oEntry = GetCharStartOutfitEntry(bot->getRace(), bot->getClass(), bot->getGender()))
-        {
             for (int j = 0; j < MAX_OUTFIT_ITEMS; ++j)
-            {
-                if (oEntry->ItemId[j] <= 0)
-                    continue;
+                if (oEntry->ItemId[j] > 0)
+                    outfit.push_back(uint32(oEntry->ItemId[j]));
 
-                uint32 itemId = oEntry->ItemId[j];
+        if (outfit.empty())
+            if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(bot->getRace(), bot->getClass()))
+                for (PlayerCreateInfoItem const& createItem : info->item)
+                    outfit.push_back(createItem.item_id);
+
+        // original items
+        {
+            for (uint32 itemId : outfit)
+            {
 
                 // skip hearthstone
                 if (itemId == 6948)
