@@ -895,7 +895,7 @@ void RandomPlayerbotFactory::AssignBotToArenaTeam(Player* bot)
     if (sPlayerbotAIConfig.deleteRandomBotArenaTeams)
         return;
 
-    if (bot->GetLevel() < 70)
+    if (bot->GetLevel() < sPlayerbotAIConfig.randomBotArenaTeamMinLevel)  // CoA : etait 70 en dur
         return;
 
     for (uint32 arena_slot = 0; arena_slot < MAX_ARENA_SLOT; ++arena_slot)

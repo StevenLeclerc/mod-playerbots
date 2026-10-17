@@ -2048,6 +2048,11 @@ AiPlayerbot.RandomBotArenaTeam5v5Count = 5
 AiPlayerbot.RandomBotArenaTeamMaxRating = 2000
 AiPlayerbot.RandomBotArenaTeamMinRating = 1000
 
+# CoA : minimum level for a randombot to be put in an arena team (team creation, and gathering
+# the team for a rated queue). 70 keeps the original behaviour; a level 60 realm sets 60.
+# Default: 70
+AiPlayerbot.RandomBotArenaTeamMinLevel = 70
+
 # Delete all randombot (and any addclass bot) arena teams on startup. While enabled,
 # no new randombot arena teams are created or joined. Set back to 0 and restart the
 # server to resume normal randombot arena team assignment.

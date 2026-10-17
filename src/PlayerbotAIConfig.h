@@ -808,6 +808,7 @@ public:
 
     uint32 randomBotArenaTeamMaxRating;
     uint32 randomBotArenaTeamMinRating;
+    uint32 randomBotArenaTeamMinLevel;  // CoA (17/10/2026, porte d'Armageddon) : niveau minimal d'un bot en equipe d'arene (70 avant)
     uint32 randomBotArenaTeam2v2Count;
     uint32 randomBotArenaTeam3v3Count;
     uint32 randomBotArenaTeam5v5Count;

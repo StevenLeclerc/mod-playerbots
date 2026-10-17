@@ -159,7 +159,7 @@ bool BGJoinAction::gatherArenaTeam(ArenaType type)
         if (!member)
             continue;
 
-        if (member->GetLevel() < 70)
+        if (member->GetLevel() < sPlayerbotAIConfig.randomBotArenaTeamMinLevel)  // CoA : etait 70 en dur
             continue;
 
         if (!group->AddMember(member))

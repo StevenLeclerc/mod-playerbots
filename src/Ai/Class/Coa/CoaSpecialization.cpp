@@ -985,7 +985,8 @@ uint32 ApplyCoaTalents(Player* bot)
 
     // Past the last level the table covers there is nothing left to spend, for ever. Said once
     // per (class, spec): keyed on the level it would be said again at every level up to
-    // MaxPlayerLevel, which is 80 while the builds stop at 60.
+    // MaxPlayerLevel (CONFIG_MAX_PLAYER_LEVEL: 80 before the level 60 cap, 60 after), whenever it
+    // sits above the last level the table covers for this (class, spec).
     else if (bot->GetLevel() > buildTop && FirstBuildComplaint(bot->getClass(), specializationId, 0))
         LOG_WARN("playerbots", "coa build: class {}, specialization {}: the build table stops at level {}, "
                  "bots are levelling past it (this one is {}); nothing more will be spent",

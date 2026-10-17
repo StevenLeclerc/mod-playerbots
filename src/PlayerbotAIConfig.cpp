@@ -1108,6 +1108,10 @@ bool PlayerbotAIConfig::Initialize()
     deleteRandomBotArenaTeams = sConfigMgr->GetOption<bool>("AiPlayerbot.DeleteRandomBotArenaTeams", false);
     randomBotArenaTeamMaxRating = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeamMaxRating", 2000);
     randomBotArenaTeamMinRating = sConfigMgr->GetOption<int32>("AiPlayerbot.RandomBotArenaTeamMinRating", 1000);
+    // CoA (17/10/2026, porte de core-armageddon 1125f89) : niveau minimal pour entrer dans une equipe
+    // d'arene de bots (creation et rassemblement pour une file cotee). 70 = le seuil code en dur
+    // jusque-la ; un royaume plafonne au 60 pose 60 (docs/PLAN-plafond-60.md, lot 2).
+    randomBotArenaTeamMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.RandomBotArenaTeamMinLevel", 70);
 
     // ------------------------------------------------------------ Arene1v1
     // CoA (10/10/2026, Ai/Coa/CoaArene1v1.cpp) : inerte par defaut (Enabled = 0).
