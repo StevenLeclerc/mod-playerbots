@@ -60,7 +60,8 @@
 // reste est consomme sans reponse. Les registres sont bornes (64 objectifs, 64 invoques par lot...) : quelques
 // centaines d'iterations par reponse. Option AiPlayerbot.Directeur.CarteEvenements (lue a chaud, sConfigMgr ; 0 par
 // defaut) : 0 -> la demande est consommee, rien n'est envoye, l'addon reste muet (bouton cache).
-// Journal : aucune ligne par demande ; `coa directeur carte:` a chaque cercle de prime (re)pose.
+// Journal : aucune ligne par demande ; `coa directeur carte:` a chaque cercle de prime (re)pose, et
+// `coa directeur carte: sans_objectif` a chaque evenement sans objectif vu pour la premiere fois.
 
 constexpr char CARTE_PREFIXE[] = "COAEV\t";
 constexpr char CARTE_OPTION[] = "AiPlayerbot.Directeur.CarteEvenements";
@@ -626,6 +627,9 @@ void DecrireSansObjectif(std::vector<CarteEv>& sortie)
             if (!e.zone)
                 e.zone = g.premier->GetZoneId();
         }
+        if (neuf)   // une ligne par evenement neuf vu par la carte (preuve d'installation : `strings`)
+            LOG_INFO("playerbots", "coa directeur carte: sans_objectif id={} type={} carte={} zone={} position={}", e.id,
+                     e.type, e.carte, e.zone, e.aPos ? 1 : 0);
         if (e.carte && e.zone)
             sortie.push_back(std::move(e));
     }
