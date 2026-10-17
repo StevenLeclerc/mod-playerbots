@@ -716,6 +716,9 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // sec to allies », 3 charges, 5 % de mana de base ; DUMMY + SUMMON, kind 0) ; limite par la mana au volet A (0-2 % a la
     // fin de chaque essai A1/A2). Marque MARQUE_REGEN_MANA, lue par « coa regen mana » (CoaRegenManaTrigger).
     { 560750, 0, 0, 0, false, MARQUE_REGEN_MANA },
+    // I11 du 17/10 (Reaper 55-57) : Jailer's Bargain 805718 absorbe 30 % de la vie maximale par script (effet 0
+    // SCHOOL_ABSORB, BasePoints 0 : force lue 1 point, environ 0,02 %, classe dernier). Force 30.
+    { 805718, 0, 0, 30 },
 };
 
 /*
@@ -2701,8 +2704,8 @@ bool OrdonnerParLaya(PlayerbotAI* botAI, Player* bot, Unit* target, std::vector<
  * Paliers, recopies de la survie d'arene (CoaAreneIa.inc, IaSurvie : pression 70 / danger 50 / critique 30, pente de 15
  * points en 2 a 4 s, recharge legere <= 60 s) sans l'arene :
  *   - defensif LEGER (recharge <= 60 s) sous mediumHealth (65 %) ou sur une perte rapide (>= 15 points en 4 s au plus) ;
- *   - defensif MOYEN (60 a 120 s) sous lowHealth (45 %), le filet d'avant ;
- *   - GROS defensif (recharge >= 120 s) sous 30 % ;
+ *   - defensif MOYEN (60 a 120 s, 120 compris depuis I11 du 17/10) sous lowHealth (45 %), le filet d'avant ;
+ *   - GROS defensif (recharge > 120 s) sous 30 % ;
  *   - candidats tries par force (reduction ou absorption equivalente), puis par niveau requis ;
  *   - soin sur soi sous 65 % (« coa soin soi », tanks et degats ; le soigneur se soigne par « coa heal »), soins de zone
  *     qui incluent le lanceur admis en dernier recours ; jamais un sort qui enracine son lanceur (MARQUE_IMMOBILISE) ;
@@ -2824,7 +2827,11 @@ bool CoaIaDefensifAdmis(SpellInfo const* info, float pv, bool perteRapide)
     uint32 const recharge = CoaIaRechargeMs(info);
     if (pv < CoaIaCritiquePv)
         return true;
-    if (recharge >= CoaIaRechargeLourdeMs)
+    // I11 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Reaper 55 et Witch Hunter 10-11, avec I10) :
+    // une recharge de 120 s PILE est un defensif moyen (sous 45 %), plus un gros (sous 30 %). Jailer's Bargain 805718
+    // (RecoveryTime 120000) et Dark Tonic 572298 (CategoryRecoveryTime 120000) passent ainsi sous 45 % ; aussi, parmi les
+    // sorts connus au 17/10, Knight's Calling 504151, Juggernaut 520294 et Briar Veil 800084 (Spell.dbc, 120000 ms).
+    if (recharge > CoaIaRechargeLourdeMs)
         return false;
     if (pv < float(sPlayerbotAIConfig.lowHealth))
         return true;
@@ -2850,11 +2857,18 @@ float CoaIaForceDefensive(Player* bot, SpellInfo const* info, uint8 profondeur =
         if (IsAuraEffect(effect))
         {
             float const valeur = float(CoaValeurDeBase(effect));
+            // I12 du 17/10 (Reaper, Witch Hunter) : une reduction, une immunite ou une absorption limitee a des ecoles
+            // magiques (masque MiscValue sans le bit physique SPELL_SCHOOL_MASK_NORMAL) ne compte que pour moitie : Limbo
+            // 800845 (SCHOOL_IMMUNITY, MiscValue 126) et Witchblood Tonic 802278 (MOD_DAMAGE_PERCENT_TAKEN -60 %, 126)
+            // passaient devant tout defensif contre des coups physiques. Masque nul (aucune ecole lue) : force pleine,
+            // comme avant. La moitie est un choix de ce correctif (le diagnostic ne chiffre pas la ponderation).
+            uint32 const ecoles = uint32(effect.MiscValue);
+            float const part = (ecoles && !(ecoles & SPELL_SCHOOL_MASK_NORMAL)) ? 0.5f : 1.0f;
             switch (effect.ApplyAuraName)
             {
-                case SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN: force = std::max(force, -valeur); break;
-                case SPELL_AURA_SCHOOL_IMMUNITY: force = std::max(force, 100.0f); break;
-                case SPELL_AURA_SCHOOL_ABSORB: force = std::max(force, std::min(100.0f, valeur * 100.0f / vieMax)); break;
+                case SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN: force = std::max(force, -valeur * part); break;
+                case SPELL_AURA_SCHOOL_IMMUNITY: force = std::max(force, 100.0f * part); break;
+                case SPELL_AURA_SCHOOL_ABSORB: force = std::max(force, std::min(100.0f, valeur * 100.0f / vieMax) * part); break;
                 case SPELL_AURA_MOD_INCREASE_HEALTH_PERCENT: force = std::max(force, valeur); break;
                 case SPELL_AURA_MOD_INCREASE_HEALTH: force = std::max(force, std::min(100.0f, valeur * 100.0f / vieMax)); break;
                 case SPELL_AURA_MOD_PARRY_PERCENT: case SPELL_AURA_MOD_DODGE_PERCENT: case SPELL_AURA_MOD_BLOCK_PERCENT:
@@ -3174,6 +3188,24 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
     CoaIaRetirerUniquesTenus(bot, soins);
     // I6 du 17/10 : ni Sacrifice Undead ni autre sort « par serviteur » sans serviteur.
     CoaIaRetirerParServiteurSansServiteur(bot, soins);
+    /*
+     * I10 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Witch Hunter 10-11 ; avec I11) : un soin sur soi
+     * de recharge >= 60 s (CoaIaRechargeLegereMs) ne part que sous lowHealth (45 %) ou sur une perte rapide. Dark Tonic
+     * 572298 (seul soin du Houndmaster, recharge 120 s) partait a 65 % avec 22-43 % de surplus. Releve du 17/10 des soins
+     * sur soi a recharge >= 60 s connus d'un personnage (Spell.dbc) : Mirage 501136, Knight's Calling 504151, Juggernaut
+     * 520294, Dark Tonic (5 rangs), Blood Craving 800780, Libram of Tenacity 801461, Sacrificial Circle 805677, Dreamslip
+     * 805867, Solar Prayer 806479 ; et depuis I1 et I5, My Greatest Invention! 560744 (zone, 180 s) et Survival Potion
+     * 802839 (60 s). La troisieme porte du diagnostic (« ou si l'estimation <= deficit ») n'est PAS ecrite : le soin de
+     * Dark Tonic ajoute 6 x Endurance par script (AscensionWitchHunterTonics.cpp, ScaleHealing), que CoaIaSoinEstime ne
+     * lit pas -- l'estimation sous-evaluee l'aurait laisse partir a 65 %, comme avant.
+     * Sous AiPlayerbot.CoaIa.Survie, comme toute la liste.
+     */
+    if (sPlayerbotAIConfig.coaIaSurvie && bot->GetHealthPct() >= float(sPlayerbotAIConfig.lowHealth) &&
+        std::any_of(soins.begin(), soins.end(), [bot](Usable const& spell)
+            { return CoaIaRechargeMs(EffectiveSpell(bot, spell.info)) >= CoaIaRechargeLegereMs; }) &&
+        CoaIaPerteRecente(botAI, bot) < CoaIaPerteRapidePv)
+        soins.erase(std::remove_if(soins.begin(), soins.end(), [bot](Usable const& spell)
+            { return CoaIaRechargeMs(EffectiveSpell(bot, spell.info)) >= CoaIaRechargeLegereMs; }), soins.end());
     // Revue du lot 5 : plancher de vie apres paiement (CoaIaPayeEnVieTropCher).
     soins.erase(std::remove_if(soins.begin(), soins.end(), [bot](Usable const& spell)
         { return CoaIaPayeEnVieTropCher(bot, EffectiveSpell(bot, spell.info)); }), soins.end());
