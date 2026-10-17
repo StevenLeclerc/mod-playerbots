@@ -89,6 +89,8 @@ enum CoaMarque : uint16
     MARQUE_VOL_DE_VIE      = 0x0004,  // des degats qui soignent le lanceur (HEALTH_LEECH, PERIODIC_LEECH, drain)
     MARQUE_DEFENSIF_FAIBLE = 0x0008,  // KIND_DEFENSIVE ne tient qu'a une reduction de degats subis de moins de 10 %
     MARQUE_IMMOBILISE      = 0x0010,  // enracine son propre lanceur (aura MOD_ROOT sur soi)
+    // I2 du 17/10 (CoaSurcharge::marques seulement, jamais par Classify) : rend de la mana au groupe (balise du Tinker).
+    MARQUE_REGEN_MANA      = 0x0020,
     // Internes a Classify (relevees en descendant dans les sorts declenches), effacees avant la fin :
     MARQUE_I_SOIN_ALLIE    = 0x0100,  // un effet de soin vise un allie
     MARQUE_I_DEF_FORT      = 0x0200,  // KIND_DEFENSIVE pose par un effet qui n'est pas une reduction de moins de 10 %
@@ -632,6 +634,8 @@ struct CoaSurcharge
     // Heal (GetCoaRole, CoaSpecStrategies.h) ; les autres gardent le classement d'avant (kindAncien), donc leur usage
     // offensif, et ne le lancent jamais sur elles-memes (sorts hostiles, exclus des soins sur soi).
     bool soigneur = false;
+    // I2 du 17/10 : marques ajoutees au sort (CoaMarque), avec le classement du lot 1.
+    uint16 marques = 0;
 };
 
 constexpr CoaSurcharge CoaSurcharges[] =
@@ -708,6 +712,10 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // diagnostic : il entre aussi dans « coa heal », au dernier rang (zone, CoaHealAction::Rang).
     { 560744, KIND_HEAL | KIND_GROUP_HEAL, 0, 0 },
     { 801801, KIND_GROUP_HEAL, 0, 0 },
+    // I2 du 17/10 (Tinker 51) : Build: Replenishment Beacon 560750 (« restoring [...] $560819s1% base mana every $560751T1
+    // sec to allies », 3 charges, 5 % de mana de base ; DUMMY + SUMMON, kind 0) ; limite par la mana au volet A (0-2 % a la
+    // fin de chaque essai A1/A2). Marque MARQUE_REGEN_MANA, lue par « coa regen mana » (CoaRegenManaTrigger).
+    { 560750, 0, 0, 0, false, MARQUE_REGEN_MANA },
 };
 
 CoaSurcharge const* CoaSurchargeDe(uint32 spellId)
@@ -794,6 +802,7 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
                 if (surcharge)
                 {
                     ability.kind = uint16((ability.kind | surcharge->ajoute) & ~surcharge->retire);
+                    ability.marques |= surcharge->marques;
                     ability.surchargeSoigneur = surcharge->soigneur;
                     if (surcharge->ajoute & KIND_DEFENSIVE)
                         ability.marques &= ~uint16(MARQUE_DEFENSIF_FAIBLE);
@@ -3542,6 +3551,74 @@ public:
     }
 };
 
+/*
+ * I2 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Tinker 51 : mana a 0-2 % a la fin de chaque essai
+ * A1/A2, balise de mana jamais posee). Un soigneur CoA en combat, sous CoaRegenManaPct de mana, pose un sort marque
+ * MARQUE_REGEN_MANA (Build: Replenishment Beacon 560750, surcharge du lot 1) sur lui-meme : la balise se pose au sol a sa
+ * position et rend de la mana aux allies autour. Sous AiPlayerbot.CoaIa.ReserveSoigneur (la reserve de mana du soigneur,
+ * lot 4) ET AiPlayerbot.CoaIa.Classement (la marque vient d'une surcharge du lot 1) : pas d'option propre, le seuil de
+ * 60 % est celui du diagnostic. Hors arene 1v1 et duel (CoaIaDecisionActive) comme les autres decisions de combat.
+ * Une balise posee n'est pas relancee avant la fin de sa duree (Spell.dbc, DurationIndex) : le sort a 3 charges, et
+ * rien d'autre ne dirait qu'une balise est deja au sol (c'est une invocation, pas une aura).
+ */
+constexpr float CoaRegenManaPct = 60.0f;
+
+bool CoaIaDecisionActive(Player* bot);  // lot 5, plus bas
+
+bool CoaRegenManaArmee(Player* bot)
+{
+    return sPlayerbotAIConfig.coaIaReserveSoigneur && sPlayerbotAIConfig.coaIaClassement && bot->getPowerType() == POWER_MANA &&
+           bot->GetMaxPower(POWER_MANA) > 0 && bot->GetPowerPct(POWER_MANA) < CoaRegenManaPct && GetCoaRole(bot) == CoaRole::Heal &&
+           CoaIaDecisionActive(bot);
+}
+
+std::vector<Usable> CoaRegenManaSorts(PlayerbotAI* botAI, Player* bot)
+{
+    return KnownAbilities(botAI, bot, [](uint16, uint16 marques) { return (marques & MARQUE_REGEN_MANA) != 0; });
+}
+
+class CoaRegenManaTrigger : public Trigger
+{
+public:
+    CoaRegenManaTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa regen mana") {}
+
+    bool IsActive() override
+    {
+        return CoaRegenManaArmee(bot) && CoaIaUnPret(botAI, bot, CoaRegenManaSorts(botAI, bot), bot);
+    }
+};
+
+class CoaRegenManaAction : public Action
+{
+public:
+    CoaRegenManaAction(PlayerbotAI* botAI) : Action(botAI, "coa regen mana") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        std::vector<Usable> const sorts = CoaRegenManaSorts(botAI, bot);
+        t_bancSoinEchec = BancSoinEchec();
+        SpellInfo const* cast = CastFirst(botAI, bot, sorts, bot);
+        BancSoinTracer(bot, "regen_mana", cast, sorts.empty());
+        if (cast)
+        {
+            int32 const duree = cast->GetMaxDuration();
+            prochainMs = getMSTime() + uint32(duree > 0 ? duree : 15 * IN_MILLISECONDS);
+            if (!prochainMs)
+                prochainMs = 1;
+        }
+        return cast != nullptr;
+    }
+
+    // Le delai est teste ici, comme le repli de CoaStealthAction : une action inutile laisse le tour aux autres.
+    bool isUseful() override
+    {
+        return (!prochainMs || getMSTimeDiff(prochainMs, getMSTime()) < 0x80000000u) && CoaRegenManaArmee(bot);
+    }
+
+private:
+    uint32 prochainMs = 0;  // getMSTime ; 0 : aucune balise posee par cette instance (une instance d'action par bot)
+};
+
 // Removes a harmful magic, curse, disease or poison effect from the bot or a group member.
 class CoaDispelAction : public Action
 {
@@ -4613,6 +4690,9 @@ public:
                                              NextAction("coa heal", ACTION_CRITICAL_HEAL) }));
         triggers.push_back(new TriggerNode("party member almost full health",
                                            { NextAction("coa hot", ACTION_MEDIUM_HEAL) }));
+        // I2 du 17/10 (CoaRegenManaTrigger) : 25, sous les soins (30+), « coa defensive » (28), l'interruption (27) et la
+        // dissipation (26) du soigneur ; devant « coa aoe » (22) et la rotation (10). Inerte hors soigneur a balise.
+        triggers.push_back(new TriggerNode("coa regen mana", { NextAction("coa regen mana", ACTION_MEDIUM_HEAL + 5) }));
     }
 
 protected:
@@ -4737,6 +4817,7 @@ public:
         creators["coa veno soin"] = &CoaActionFactoryInternal::coa_veno_soin;
         creators["coa veno forme"] = &CoaActionFactoryInternal::coa_veno_forme;
         creators["coa drop target"] = &CoaActionFactoryInternal::coa_drop_target;
+        creators["coa regen mana"] = &CoaActionFactoryInternal::coa_regen_mana;
     }
 
 private:
@@ -4772,6 +4853,7 @@ private:
     static Action* coa_veno_soin(PlayerbotAI* botAI) { return new CoaVenoSoinAction(botAI); }
     static Action* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeAction(botAI); }
     static Action* coa_drop_target(PlayerbotAI* botAI) { return new CoaDropTargetAction(botAI); }
+    static Action* coa_regen_mana(PlayerbotAI* botAI) { return new CoaRegenManaAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -4789,6 +4871,7 @@ public:
         creators["coa veno soin"] = &CoaTriggerFactoryInternal::coa_veno_soin;
         creators["coa veno forme"] = &CoaTriggerFactoryInternal::coa_veno_forme;
         creators["coa invalid target"] = &CoaTriggerFactoryInternal::coa_invalid_target;
+        creators["coa regen mana"] = &CoaTriggerFactoryInternal::coa_regen_mana;
     }
 
 private:
@@ -4802,6 +4885,7 @@ private:
     static Trigger* coa_veno_soin(PlayerbotAI* botAI) { return new CoaVenoSoinTrigger(botAI); }
     static Trigger* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeTrigger(botAI); }
     static Trigger* coa_invalid_target(PlayerbotAI* botAI) { return new CoaInvalidTargetTrigger(botAI); }
+    static Trigger* coa_regen_mana(PlayerbotAI* botAI) { return new CoaRegenManaTrigger(botAI); }
 };
 
 }  // namespace
