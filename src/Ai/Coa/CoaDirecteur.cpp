@@ -11845,6 +11845,9 @@ void RepondreTraqueur(Player* player)
                                  player->GetName(), player->GetName(), 0, false);
     player->SendDirectMessage(&paquet);
 }
+
+// Carte des evenements (17/10/2026) : prefixe COAEV, addon CoAMonde. Option AiPlayerbot.Directeur.CarteEvenements.
+#include "CoaDirecteurCarte.inc"
 }  // namespace
 
 class coa_directeur_onglet_playerscript : public PlayerScript
@@ -11860,8 +11863,16 @@ public:
     bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& message,
                             Player* receiver) override
     {
-        if (type != CHAT_MSG_WHISPER || language != LANG_ADDON || !player ||
-            message.compare(0, sizeof(ONGLET_PREFIXE) - 1, ONGLET_PREFIXE) != 0)
+        if (type != CHAT_MSG_WHISPER || language != LANG_ADDON || !player)
+            return true;
+        // Carte des evenements (COAEV, CoaDirecteurCarte.inc) : consommee dans tous les cas, jamais transmise.
+        if (message.compare(0, sizeof(CARTE_PREFIXE) - 1, CARTE_PREFIXE) == 0)
+        {
+            if (receiver == player && message.size() <= 255)
+                RepondreCarte(player, message.substr(sizeof(CARTE_PREFIXE) - 1));
+            return false;
+        }
+        if (message.compare(0, sizeof(ONGLET_PREFIXE) - 1, ONGLET_PREFIXE) != 0)
             return true;
         // Le protocole est consomme dans tous les cas : jamais transmis a un autre joueur.
         if (receiver != player || message.size() > 255)

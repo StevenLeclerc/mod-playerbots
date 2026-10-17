@@ -148,6 +148,8 @@ struct EvObjectif
     uint32 finS = 0;        // Maintenant() de l'echeance de l'affichage
 };
 std::unordered_map<uint32, EvObjectif> evObjectifs;   // cle : guid du joueur de l'evenement ; fil monde seul
+// Carte des evenements (17/10/2026, CoaDirecteurCarte.inc, inclus plus loin) : note une issue des sa pose.
+void CarteObjectifPose(EvObjectif const& o);
 
 struct ObjEnvoye
 {
@@ -333,6 +335,7 @@ void ExecuterObjectif(CoaDirCommande const& c)
             break;
     }
     evObjectifs[c.cible] = o;
+    CarteObjectifPose(o);   // carte des evenements : une issue y reste 2 min
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     JournaliserObjectif(c.id, c.cible, c.valeur, NomObjEtape(lu.etape), remplace ? "remplace" : "pose");
     Accuser(c, "execute", nullptr);

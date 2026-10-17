@@ -4493,6 +4493,19 @@ AiPlayerbot.Directeur.TraqueurIntervalleMs = 2000
 #        Default: 0
 AiPlayerbot.Directeur.Avis = 0
 
+#    AiPlayerbot.Directeur.CarteEvenements
+#        Carte des evenements (17/10/2026) : l'addon client CoAMonde chuchote `COAEV` / `CARTE` (carte du monde
+#        ouverte, toutes les 15 s) ou `COMPTE` (carte fermee, toutes les 30 s) a soi-meme ; le serveur repond par
+#        des chuchotements d'addon `COAEV` : les evenements en cours du continent du joueur (faille, nuit, convoi :
+#        type, variante, zone, position -- pour un convoi, la zone et sa direction seulement --, etape), les tetes
+#        mises a prix (force, zone, cercle de 300 yd DECALE, jamais la position, le nom ni le montant), un resume
+#        des autres continents. Lu dans les registres du jeu au fil monde (objectifs de zone : EXIGE
+#        Directeur.EvenementObjectifs = 1 pour lister un evenement), aucune requete MySQL. Une CARTE toutes les
+#        4 s et un COMPTE toutes les 10 s au plus par joueur. Protocole : CoaDirecteurCarte.inc.
+#        0 : la demande est consommee sans reponse (l'addon ne montre rien). Lue a chaud (`.reload config`).
+#        Default: 0
+AiPlayerbot.Directeur.CarteEvenements = 0
+
 #    AiPlayerbot.Directeur.Reactions
 #        Lots T4-T5 (12/10/2026) : la CIBLE d'un contrat sur un bot reagit selon `params.reaction` de son arc
 #        (tiree au hasard par contrats.py, recit.conf `contrats_reactions`). Lu toutes les 5 s, agi chaque seconde :
