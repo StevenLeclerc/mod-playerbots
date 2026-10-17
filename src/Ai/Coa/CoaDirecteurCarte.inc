@@ -45,7 +45,12 @@
 // SOURCES -- uniquement les registres du jeu, au FIL MONDE (CMSG_MESSAGECHAT est PROCESS_THREADUNSAFE : traite par
 // World::UpdateSessions, cartes a l'arret, P-137), aucune requete MySQL :
 //   evObjectifs (CoaDirecteurObjectifs.inc) : un evenement = un objectif de zone (titre 1-5 faille, 6-10 nuit, 11
-//     « autre » : convoi si son joueur a un protege) ; SANS l'option EvenementObjectifs, rien n'est liste.
+//     « autre » : convoi si son joueur a un protege). Le service ne pose d'objectif que pour un HUMAIN.
+//   evInvoques SANS objectif (17/10, DecrireSansObjectif) : les evenements entre bots (failles, nuits, convois ancres
+//     sur un bot) -- un evenement = les invoques VIVANTS d'une meme ancre sur une meme carte, ancre sans objectif ;
+//     type deduit des gabarits (CARTE_FAILLE_*, CARTE_NUIT_*, CARTE_CONVOI_* : creature_template lue le 17/10),
+//     etat `vague` (faille, nuit) ou route/attaque/barricade (convoi, protege vivant exige), jamais d'issue.
+//   Garde des primes (17/10) : l'ancre d'une tete mise a prix n'a JAMAIS de position, sa zone seule.
 //   evInvoques (lot D) : position = centre des invoques vivants de l'evenement, hors renforts, hors protege, hors
 //     gabarits des RARES (CARTE_RARE_MIN-MAX : rares.py, plage mesuree le 16/10) -- jamais un rare n'est lu ni envoye ;
 //     protege du convoi (EntreeProtege) : sa zone, son cap, son combat.
@@ -254,6 +259,7 @@ struct CarteEv
     uint32 n = 0, m = 0, reste = 0;
     int32 cap = -1;
     uint32 finS = 0;        // Maintenant() de l'issue ; 0 : en cours
+    uint32 ancre = 0;       // guid bas du joueur ou du bot de l'evenement : JAMAIS envoye (garde des primes)
 };
 std::vector<CarteEv> carteFins;                        // fil monde seul, CARTE_FINS_MAX au plus
 
@@ -348,6 +354,7 @@ CarteEv DecrireEvenement(EvObjectif const& o, uint32 maintenant)
 
     CarteEv e;
     e.id = s.id;
+    e.ancre = o.joueur;
     e.type = s.convoi ? "convoi" : o.titre >= 1 && o.titre <= 5 ? "faille" : o.titre >= 6 && o.titre <= 10 ? "nuit"
                                                                                                          : "autre";
     e.variante = s.convoi ? s.variante : std::string(o.titre <= OBJ_TITRES ? CARTE_VARIANTES[o.titre] : "");
@@ -425,6 +432,209 @@ void CarteObjectifPose(EvObjectif const& o)
         PurgerSuivis();
 }
 
+// ------------------------------------------------------------------ evenements SANS objectif (17/10/2026)
+// Plages des gabarits, LUES dans acore_world.creature_template le 17/10/2026 (et CARTE_VARIANTES) :
+//   faille 9100001-9100004 (classique, plage 9100001-9100009), 9100201-204 nuee_harpies, 211-213 pas_des_geants, 221-223 couvee_orage,
+//          231-234 maree_orage ;
+//   nuit   9100301-304 (classique), 311-314 procession_ames, 321-323 fosse_recousus, 331-333 ailes_naxxramas,
+//          341-345 chevauchee_acherus ;
+//   convoi 9100010-9100016 caravane, 9100030-9100036 prisonniers, 9100040-9100046 militaire, 9100050-9100055 chefs.
+// Toute autre entree de 9100000-9100399 : « autre » (zone seule). Au-dela de CARTE_EVENEMENT_MAX (rares, artisanat) :
+// jamais lu.
+constexpr uint32 CARTE_FAILLE_MIN = 9100001, CARTE_FAILLE_MAX = 9100009;
+constexpr uint32 CARTE_FAILLE2_MIN = 9100200, CARTE_FAILLE2_MAX = 9100239;
+constexpr uint32 CARTE_NUIT_MIN = 9100300, CARTE_NUIT_MAX = 9100349;
+constexpr uint32 CARTE_CONVOI_MIN = 9100010, CARTE_CONVOI_MAX = 9100059;
+constexpr uint32 CARTE_EVENEMENT_MAX = 9100399;      // au-dela (rares 9100400-9100599, Sourcier 9105000...) : ignore
+constexpr size_t CARTE_SANS_OBJ_MAX = 128;
+
+// Titre (index de CARTE_VARIANTES) d'un gabarit de faille ou de nuit ; 0 : ni l'un ni l'autre.
+uint32 TitreDeGabarit(uint32 e)
+{
+    if (e >= CARTE_FAILLE_MIN && e <= CARTE_FAILLE_MAX)
+        return 1;
+    if (e >= CARTE_FAILLE2_MIN && e <= CARTE_FAILLE2_MAX)
+        return 2 + (e - CARTE_FAILLE2_MIN) / 10;          // 2-5
+    if (e >= CARTE_NUIT_MIN && e <= CARTE_NUIT_MAX)
+        return 6 + (e - CARTE_NUIT_MIN) / 10;             // 6-10
+    return 0;
+}
+
+char const* VarianteConvoiParPlage(uint32 e)
+{
+    switch ((e - CARTE_CONVOI_MIN) / 10)
+    {
+        case 0: return "caravane";      // 9100010-9100019
+        case 2: return "prisonniers";   // 9100030-9100039
+        case 3: return "militaire";     // 9100040-9100049
+        default: return "";            // 9100050-9100059 : chefs, communs aux variantes
+    }
+}
+
+struct CarteSansObj
+{
+    uint32 id = 0;          // numero opaque
+    int32 cap = -1;
+    bool vu = false;        // vu a cette passe (purge)
+};
+std::unordered_map<uint64, CarteSansObj> carteSansObj;   // cle : (ancre << 32) | carte ; fil monde seul
+
+// Les evenements dont l'ancre n'a PAS d'objectif (fil monde ; pointeurs de creature locaux a l'appel, jamais gardes).
+void DecrireSansObjectif(std::vector<CarteEv>& sortie)
+{
+    struct Groupe
+    {
+        uint32 joueur = 0, carte = 0;
+        uint32 nombre = 0;                  // vivants comptes au centre (hors renforts, protege)
+        double sx = 0.0, sy = 0.0;
+        Creature* premier = nullptr;        // un vivant quelconque (repli de zone)
+        std::vector<Creature*> centre;      // les vivants comptes au centre
+        Creature* protege = nullptr;        // protege VIVANT du convoi
+        bool convoi = false;
+        std::string varConvoi;
+        uint32 titres[OBJ_TITRES + 1] = {}; // votes faille/nuit par titre (hors renforts d'abord)
+        uint32 titresRenfort[OBJ_TITRES + 1] = {};
+    };
+    std::vector<Groupe> groupes;
+    for (EvInvoque const& v : evInvoques)
+    {
+        if (v.mort || v.entree > CARTE_EVENEMENT_MAX || (v.entree >= CARTE_RARE_MIN && v.entree <= CARTE_RARE_MAX) ||
+            evObjectifs.count(v.joueur))
+            continue;
+        Creature* cr = CreatureInvoquee(v);
+        if (!cr || !cr->IsInWorld() || !cr->IsAlive() || cr->GetMapId() != v.carte)
+            continue;
+        auto g = std::find_if(groupes.begin(), groupes.end(),
+                              [&v](Groupe const& x) { return x.joueur == v.joueur && x.carte == v.carte; });
+        if (g == groupes.end())
+        {
+            if (groupes.size() >= EV_INVOQUES_MAX)
+                continue;
+            groupes.emplace_back();
+            g = std::prev(groupes.end());
+            g->joueur = v.joueur;
+            g->carte = v.carte;
+        }
+        if (!g->premier)
+            g->premier = cr;
+        if (v.entree >= CARTE_CONVOI_MIN && v.entree <= CARTE_CONVOI_MAX)
+        {
+            g->convoi = true;
+            char const* var = v.protege ? VarianteConvoi(v.entree) : VarianteConvoiParPlage(v.entree);
+            if (*var && (g->varConvoi.empty() || v.protege))
+                g->varConvoi = var;
+        }
+        if (v.protege)
+        {
+            g->convoi = true;
+            if (!g->protege)
+                g->protege = cr;
+            continue;
+        }
+        if (uint32 t = TitreDeGabarit(v.entree))
+        {
+            if (v.renfort)
+                ++g->titresRenfort[t];
+            else
+                ++g->titres[t];
+        }
+        if (v.renfort)
+            continue;
+        g->sx += cr->GetPositionX();
+        g->sy += cr->GetPositionY();
+        g->centre.push_back(cr);
+        ++g->nombre;
+    }
+
+    for (auto& [cle, s] : carteSansObj)
+        s.vu = false;
+    for (Groupe const& g : groupes)
+    {
+        // Un convoi sans protege vivant n'est plus un convoi qu'on puisse dire « en route » : rien (supposition :
+        // le service clot le lot a la perte du protege).
+        if (g.convoi && !g.protege)
+            continue;
+        uint64 const cle = (uint64(g.joueur) << 32) | g.carte;
+        auto [it, neuf] = carteSansObj.try_emplace(cle);
+        CarteSansObj& s = it->second;
+        if (neuf)
+            s.id = NumeroCarte();
+        s.vu = true;
+
+        CarteEv e;
+        e.id = s.id;
+        e.ancre = g.joueur;
+        e.carte = g.carte;
+        if (g.convoi)
+        {
+            e.type = "convoi";
+            e.variante = g.varConvoi;
+            e.zone = g.protege->GetZoneId();
+            if (!g.protege->IsInCombat() || s.cap < 0)   // en combat, il fait face a l'attaquant (revue m7)
+                s.cap = Secteur(g.protege->GetOrientation());
+            e.cap = s.cap;
+            bool barricade = false;
+            for (EvBarricade const& b : evBarricades)
+                if (b.joueur == g.joueur && ObjetBarricade(b))
+                    barricade = true;
+            e.etat = barricade ? "barricade" : g.protege->IsInCombat() ? "attaque" : "route";
+        }
+        else
+        {
+            // Titre majoritaire (hors renforts ; a defaut, les renforts) ; egalite : le plus petit.
+            auto majoritaire = [](uint32 const* t)
+            {
+                uint32 titre = 0, voix = 0;
+                for (uint32 k = 1; k <= OBJ_TITRES; ++k)
+                    if (t[k] > voix)
+                    {
+                        voix = t[k];
+                        titre = k;
+                    }
+                return titre;
+            };
+            uint32 titre = majoritaire(g.titres);
+            if (!titre)
+                titre = majoritaire(g.titresRenfort);
+            e.type = titre >= 1 && titre <= 5 ? "faille" : titre >= 6 && titre <= 10 ? "nuit" : "autre";
+            e.variante = titre ? CARTE_VARIANTES[titre] : "";
+            e.etat = "vague";
+            if (g.nombre)
+            {
+                // Zone du centre = zone du vivant le plus proche du centre (aucune requete de terrain : GetZoneId
+                // d'un point creerait sa grille si elle n'est pas chargee).
+                float const cx = float(g.sx / g.nombre), cy = float(g.sy / g.nombre);
+                Creature const* proche = nullptr;
+                float d2min = 0.0f;
+                for (Creature const* c : g.centre)
+                {
+                    float const dx = c->GetPositionX() - cx, dy = c->GetPositionY() - cy;
+                    if (!proche || dx * dx + dy * dy < d2min)
+                    {
+                        proche = c;
+                        d2min = dx * dx + dy * dy;
+                    }
+                }
+                e.zone = proche ? proche->GetZoneId() : 0;
+                if (titre)   // « autre » : JAMAIS de position, sa zone seule (comme le titre 11)
+                {
+                    e.x = cx;
+                    e.y = cy;
+                    e.aPos = true;
+                }
+            }
+            if (!e.zone)
+                e.zone = g.premier->GetZoneId();
+        }
+        if (e.carte && e.zone)
+            sortie.push_back(std::move(e));
+    }
+    for (auto it = carteSansObj.begin(); it != carteSansObj.end();)
+        it = it->second.vu ? std::next(it) : carteSansObj.erase(it);
+    if (carteSansObj.size() > CARTE_SANS_OBJ_MAX)
+        carteSansObj.clear();
+}
+
 struct CarteCercle
 {
     uint32 id = 0;          // numero opaque
@@ -465,6 +675,8 @@ CarteEtat EtatCarteMonde()
             r.evenements.push_back(std::move(e));
     }
     PurgerSuivis();
+    // 1 bis. Evenements SANS objectif (entre bots), apres ceux des humains (plafond CARTE_EVENEMENTS_MAX par continent).
+    DecrireSansObjectif(r.evenements);
     // 2. Issues des CARTE_FIN_S dernieres secondes (plus recentes d'abord).
     carteFins.erase(std::remove_if(carteFins.begin(), carteFins.end(),
                                    [maintenant](CarteEv const& f) { return f.finS + CARTE_FIN_S <= maintenant; }),
@@ -532,6 +744,13 @@ CarteEtat EtatCarteMonde()
     }
     for (auto it = carteCercles.begin(); it != carteCercles.end();)
         it = vues.count(it->first) ? std::next(it) : carteCercles.erase(it);
+    // 4. Garde des primes (17/10) : un evenement ancre sur une tete mise a prix ne dit jamais sa position (le centre
+    // de ses invoques la trahirait) ; sa zone seule, sans direction.
+    if (!lues.empty())
+        for (CarteEv& e : r.evenements)
+            if (e.aPos && std::any_of(lues.begin(), lues.end(),
+                                      [&e, maintenant](Lue const& l) { return l.joueur == e.ancre && l.finS > maintenant; }))
+                e.aPos = false;
     return r;
 }
 
