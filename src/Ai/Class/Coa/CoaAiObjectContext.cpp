@@ -718,6 +718,28 @@ constexpr CoaSurcharge CoaSurcharges[] =
     { 560750, 0, 0, 0, false, MARQUE_REGEN_MANA },
 };
 
+/*
+ * I5 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Ranger 28 et 29) : surcharges qui ne valent que pour
+ * le bot qui connait un passif. Survival Potion 802839 (recharge 60 s) ne fait que dissiper (aura 23 -> 704341, deux
+ * DISPEL sur soi : KIND_DISPEL) ; le passif Survival Kit 504329 la fait soigner (spell_proc 504329 : famille 27, masque
+ * 0x20000000 = celui de 802839, phase de lancer -> 504328, aura 20 OBS_MOD_HEALTH, 10 % de la vie max toutes les 3 s, 9 s).
+ * Classify ne suit pas un proc : jamais lancee au banc (0 ligne), lancee en monde ouvert comme dissipation seulement. Avec
+ * le passif : soin sur soi seulement (MARQUE_SOIN_SOI_SEUL), periodique ; KIND_DISPEL garde. Sans lui, rien ne change.
+ * Appliquees par KnownKit au classement du lot 1 (AiPlayerbot.CoaIa.Classement), a l'id cite et aux autres rangs.
+ */
+struct CoaSurchargeSiPassif
+{
+    uint32 spellId;
+    uint32 passif;
+    uint16 ajoute;
+    uint16 marques;
+};
+
+constexpr CoaSurchargeSiPassif CoaSurchargesSiPassif[] =
+{
+    { 802839, 504329, KIND_HEAL | KIND_SELF_HEAL | KIND_HOT, MARQUE_SOIN_SOI_SEUL },
+};
+
 CoaSurcharge const* CoaSurchargeDe(uint32 spellId)
 {
     for (CoaSurcharge const& surcharge : CoaSurcharges)
@@ -810,6 +832,10 @@ std::unordered_map<uint8, ClassKit> const& ClassAbilities()
                 }
                 kit.kinds |= ability.kind;
                 kit.kindsAncien |= ability.kindAncien;
+                // I5 : ce qu'une surcharge sous passif PEUT ajouter compte pour ClassHas (test bon marche avant les sorts).
+                for (CoaSurchargeSiPassif const& c : CoaSurchargesSiPassif)
+                    if (ability.spellId == c.spellId || (ability.firstSpellId && ability.firstSpellId == c.spellId))
+                        kit.kinds |= c.ajoute;
             }
         }
 
@@ -915,6 +941,15 @@ std::vector<CoaKnownAbility> const& KnownKit(PlayerbotAI* botAI, Player* bot)
         // (Righteous Tempest 807274, Zenith 712325 : « -1 % », soit 0). Le sort garde ses autres marques (degats...).
         if (sPlayerbotAIConfig.coaIaSurvie && (marques & MARQUE_DEFENSIF_FAIBLE))
             kind &= ~uint16(KIND_DEFENSIVE);
+        // I5 du 17/10 : surcharge sous passif (CoaSurchargesSiPassif), au classement du lot 1 seulement.
+        if (lot1)
+            for (CoaSurchargeSiPassif const& c : CoaSurchargesSiPassif)
+                if ((ability.spellId == c.spellId || (ability.firstSpellId && ability.firstSpellId == c.spellId)) &&
+                    bot->HasSpell(c.passif))
+                {
+                    kind |= c.ajoute;
+                    marques |= c.marques;
+                }
         coaContext->knownKit.push_back({ info, kind, ability.dispelMask, ability.firstSpellId, marques });
     }
 
