@@ -3241,6 +3241,10 @@ void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& us
             return 0;
         if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
             return 0;
+        // Relecture : un sort que la forme, l'arme ou l'etat du lanceur interdit maintenant (memes tests que CastFirst)
+        // n'est pas « pret » -- sans quoi une forme jamais prise retiendrait la mana pour rien.
+        if (CoaRefuseParFormeOuArme(bot, info) || CoaRefuseParAuraDuLanceur(bot, info))
+            return 0;
         if (bot->GetSpellCooldownDelay(info->Id) > CoaIaReservePretDansMs)
             return 0;
         return std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask()));
