@@ -2735,18 +2735,43 @@ constexpr float CoaIaResteMinPv = 15.0f;
  * par seconde sur le lanceur proprietaire, aura retiree seulement quand la vie ne suffit plus). CoaIaPayeEnVieTropCher ne
  * lisait que le cout du lancer (50, aussi). Sorts concernes parmi ceux qu'un personnage connait (releve du 17/10) : les
  * 7 rangs d'Immolation Aura (800207, 501270-501272, 572615-572617), Final Embrace 524865 (Bloodmage, 30 + 1 par niveau),
- * Transfer Life 801530 (Necromancer, 5 + 1 par niveau). Sous AiPlayerbot.CoaIa.Survie.
+ * Transfer Life 801530 (Necromancer, 5 + 1 par niveau) ; seuls les 7 rangs d'Immolation Aura sont traites (revue, plus
+ * bas). Sous AiPlayerbot.CoaIa.Survie.
  */
-bool CoaIaPayeEnVieParSeconde(SpellInfo const* info)
+// Revue de I4 : restreint aux 7 rangs d'Immolation Aura, la liste du diagnostic. Le predicat generique attrapait aussi
+// Final Embrace 524865 (forme maudite renforcee du Bloodmage, recharge 180 s) : une perte rapide a 90 % de vie l'annulait
+// et perdait sa recharge. Transfer Life 801530 (pose sur les serviteurs) sort aussi du perimetre, comme avant I4.
+bool CoaIaImmolationAura(uint32 id)
 {
-    return info->PowerType == POWER_HEALTH && (info->ManaPerSecond > 0 || info->ManaPerSecondPerLevel > 0);
+    switch (id)
+    {
+        case 800207:
+        case 501270:
+        case 501271:
+        case 501272:
+        case 572615:
+        case 572616:
+        case 572617:
+            return true;
+        default:
+            return false;
+    }
 }
 
-// Sort paye en vie PAR SECONDE, et le bot sous mediumHealth (65 %) : ne pas le lancer (survie, « coa attack », « coa aoe »).
-bool CoaIaVieParSecondeRefusee(Player* bot, SpellInfo const* info)
+bool CoaIaPayeEnVieParSeconde(SpellInfo const* info)
+{
+    return info->PowerType == POWER_HEALTH && (info->ManaPerSecond > 0 || info->ManaPerSecondPerLevel > 0) &&
+           CoaIaImmolationAura(info->Id);
+}
+
+// Sort paye en vie PAR SECONDE, et le bot sous mediumHealth (65 %) ou en perte rapide : ne pas le lancer (survie,
+// « coa attack », « coa aoe »). Revue de I4 : sans la perte rapide ici, l'aura retiree sur perte rapide au-dessus de 65 %
+// (CoaIaRetirerAurasPayeesEnVie) etait relancee au tick suivant (572617 n'a aucune recharge), pour 50 PV et un GCD, puis
+// retiree de nouveau tant que la fenetre de 4 s gardait la perte.
+bool CoaIaVieParSecondeRefusee(Player* bot, SpellInfo const* info, bool perteRapide = false)
 {
     return sPlayerbotAIConfig.coaIaSurvie && CoaIaPayeEnVieParSeconde(info) &&
-           bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth);
+           (perteRapide || bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth));
 }
 
 // Sous lowHealth (45 %) ou sur une perte rapide : retire du bot les auras qu'il s'est posees et qui lui coutent de la vie
@@ -3356,10 +3381,13 @@ public:
 
         if (saveMana)
             DropManaSpells(bot, usable);
-        // I4 du 17/10 : sous mediumHealth, aucun sort paye en vie par seconde (Immolation Aura du Slayer).
+        // I4 du 17/10 : sous mediumHealth ou en perte rapide, aucun sort paye en vie par seconde (Immolation Aura du Slayer).
         if (CoaIaSurvieActive(bot))
-            usable.erase(std::remove_if(usable.begin(), usable.end(), [this](Usable const& spell)
-                { return CoaIaVieParSecondeRefusee(bot, EffectiveSpell(bot, spell.info)); }), usable.end());
+        {
+            bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
+            usable.erase(std::remove_if(usable.begin(), usable.end(), [this, perte](Usable const& spell)
+                { return CoaIaVieParSecondeRefusee(bot, EffectiveSpell(bot, spell.info), perte); }), usable.end());
+        }
         // I8 du 17/10 : sous mediumHealth, la mana du defensif et d'un soin est gardee (CoaIaReserveSurvie).
         CoaIaReserveSurvie(botAI, bot, usable);
         // Retire ce que le coeur refuserait ici et maintenant — trop pres, ou hors combat
@@ -3466,10 +3494,13 @@ public:
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
         if (SavingManaForHeals(botAI, bot) || CoaIaSoigneurRetient(botAI, bot))
             DropManaSpells(bot, spells);
-        // I4 du 17/10 : comme dans « coa attack », aucun sort paye en vie par seconde sous mediumHealth.
+        // I4 du 17/10 : comme dans « coa attack », aucun sort paye en vie par seconde sous mediumHealth ou en perte rapide.
         if (CoaIaSurvieActive(bot))
-            spells.erase(std::remove_if(spells.begin(), spells.end(), [this](Usable const& spell)
-                { return CoaIaVieParSecondeRefusee(bot, EffectiveSpell(bot, spell.info)); }), spells.end());
+        {
+            bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
+            spells.erase(std::remove_if(spells.begin(), spells.end(), [this, perte](Usable const& spell)
+                { return CoaIaVieParSecondeRefusee(bot, EffectiveSpell(bot, spell.info), perte); }), spells.end());
+        }
         // I8 du 17/10 : la reserve de survie, comme dans « coa attack ».
         CoaIaReserveSurvie(botAI, bot, spells);
         // CoaArene, survie (11/10) : comme dans « coa attack », ni etendard ni soutien au sol vise sur l'adversaire.
