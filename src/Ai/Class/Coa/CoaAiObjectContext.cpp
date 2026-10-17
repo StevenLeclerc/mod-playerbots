@@ -3180,6 +3180,61 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
     return soins;
 }
 
+/*
+ * I8 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Cultist Godblade 42, Runemaster 61-63) : LA RESERVE
+ * DE SURVIE HORS ARENE. Godblade : mana a 0-11 % chaque fois que la vie passe sous 30 % (6/6 essais), Embrace the Void
+ * 582591 (30 % de la mana de base) jamais lance ; Runemaster : Granite Resolve absent avec la mana a sec. La reserve de
+ * mana existante (SavingManaForHeals, CoaCasterManaReserve) n'agit que sous 15 % et pour un bot qui connait un soin ; celle
+ * de l'arene (CoaAreneReserveMana) ne vaut qu'en arene 1v1 et en duel.
+ * Un bot NON soigneur paye en mana, sous mediumHealth (65 %), ne lance plus de sort d'attaque paye en mana qui laisserait
+ * moins que : le cout du plus cher de ses defensifs payes en mana prets ou prets dans CoaIaReservePretDansMs, plus le cout
+ * du moins cher de ses soins sur soi payes en mana dans la meme fenetre. Tous les defensifs comptent, quel que soit leur
+ * palier (Embrace, recharge 300 s, n'est admis que sous 30 % : c'est pour lui que la mana se garde). Ni « par serviteur »
+ * sans serviteur, ni sort qui exclut son lanceur ou l'enracine. Rien a garder (aucun sort de survie paye en mana) : rien
+ * n'est retire. Sous AiPlayerbot.CoaIa.Survie (CoaIaSurvieActive : hors arene 1v1 et duel) ; pas d'option propre.
+ */
+constexpr uint32 CoaIaReservePretDansMs = 10 * IN_MILLISECONDS;
+
+void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
+{
+    if (usable.empty() || !CoaIaSurvieActive(bot) || GetCoaRole(bot) == CoaRole::Heal || !bot->GetMaxPower(POWER_MANA) ||
+        bot->GetHealthPct() >= float(sPlayerbotAIConfig.mediumHealth))
+        return;
+    bool const sansServiteur = !CoaAreneAServiteur(bot);
+    // Cout en mana d'un sort de survie pret dans la fenetre, 0 sinon.
+    auto coutPret = [bot, sansServiteur](Usable const& spell) -> int32
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        if (info->PowerType != POWER_MANA || (spell.marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)))
+            return 0;
+        if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
+            return 0;
+        if (bot->GetSpellCooldownDelay(info->Id) > CoaIaReservePretDansMs)
+            return 0;
+        return std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask()));
+    };
+    int32 defensif = 0;
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }))
+        defensif = std::max(defensif, coutPret(spell));
+    int32 soin = 0;
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+             { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
+        if (int32 const cout = coutPret(spell))
+            soin = soin ? std::min(soin, cout) : cout;
+    int32 const reserve = defensif + soin;
+    if (reserve <= 0)
+        return;
+    int32 const mana = int32(bot->GetPower(POWER_MANA));
+    usable.erase(std::remove_if(usable.begin(), usable.end(), [bot, mana, reserve](Usable const& spell)
+        {
+            SpellInfo const* info = EffectiveSpell(bot, spell.info);
+            if (info->PowerType != POWER_MANA)
+                return false;
+            int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+            return cout > 0 && mana - cout < reserve;
+        }), usable.end());
+}
+
 // Un sort de la liste passerait les filtres de CastFirst qui ne dependent que du lanceur (memes tests que
 // HasReadyAbility), et n'est pas deja pose par le bot sur `cible` (CoaSoinDejaPose).
 // `gcd` faux (revue) : la recharge globale ne compte pas -- pour la potion, qui ne doit pas partir parce qu'un defensif
@@ -3269,6 +3324,8 @@ public:
         if (CoaIaSurvieActive(bot))
             usable.erase(std::remove_if(usable.begin(), usable.end(), [this](Usable const& spell)
                 { return CoaIaVieParSecondeRefusee(bot, EffectiveSpell(bot, spell.info)); }), usable.end());
+        // I8 du 17/10 : sous mediumHealth, la mana du defensif et d'un soin est gardee (CoaIaReserveSurvie).
+        CoaIaReserveSurvie(botAI, bot, usable);
         // Retire ce que le coeur refuserait ici et maintenant — trop pres, ou hors combat
         // seulement. Apres DropManaSpells, pour ne pas payer le calcul de portee sur des
         // sorts qu'on vient d'ecarter.
@@ -3377,6 +3434,8 @@ public:
         if (CoaIaSurvieActive(bot))
             spells.erase(std::remove_if(spells.begin(), spells.end(), [this](Usable const& spell)
                 { return CoaIaVieParSecondeRefusee(bot, EffectiveSpell(bot, spell.info)); }), spells.end());
+        // I8 du 17/10 : la reserve de survie, comme dans « coa attack ».
+        CoaIaReserveSurvie(botAI, bot, spells);
         // CoaArene, survie (11/10) : comme dans « coa attack », ni etendard ni soutien au sol vise sur l'adversaire.
         CoaAreneRetirerSoutiens(botAI, bot, spells);
         CoaAreneReserveMana(botAI, bot, spells);
