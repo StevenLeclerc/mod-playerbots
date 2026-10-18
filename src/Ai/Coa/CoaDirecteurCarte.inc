@@ -50,6 +50,8 @@
 //     sur un bot) -- un evenement = les invoques VIVANTS d'une meme ancre sur une meme carte, ancre sans objectif ;
 //     type deduit des gabarits (CARTE_FAILLE_*, CARTE_NUIT_*, CARTE_CONVOI_* : creature_template lue le 17/10),
 //     etat `vague` (faille, nuit) ou route/attaque/barricade (convoi, protege vivant exige), jamais d'issue.
+//     18/10 : une faille ou une nuit sans vivant (entre deux vagues) reste CARTE_SANS_OBJ_GRACE_MS (90 s) avec sa derniere
+//     description et son id ; jamais un convoi.
 //   Garde des primes (17/10) : l'ancre d'une tete mise a prix n'a JAMAIS de position, sa zone seule.
 //   evInvoques (lot D) : position = centre des invoques vivants de l'evenement, hors renforts, hors protege, hors
 //     gabarits des RARES (CARTE_RARE_MIN-MAX : rares.py, plage mesuree le 16/10) -- jamais un rare n'est lu ni envoye ;
@@ -472,16 +474,21 @@ char const* VarianteConvoiParPlage(uint32 e)
     }
 }
 
+constexpr uint32 CARTE_SANS_OBJ_GRACE_MS = 90000;    // 18/10 : un evenement entre bots reste 90 s sur la carte sans vivant
+
 struct CarteSansObj
 {
     uint32 id = 0;          // numero opaque
     int32 cap = -1;
     bool vu = false;        // vu a cette passe (purge)
+    uint32 vuMs = 0;        // getMSTime() de la derniere passe ou il avait un vivant
+    bool decrit = false;    // `dernier` est rempli (faille, nuit : jamais un convoi)
+    CarteEv dernier;        // sa derniere description, renvoyee pendant la grace
 };
 std::unordered_map<uint64, CarteSansObj> carteSansObj;   // cle : (ancre << 32) | carte ; fil monde seul
 
 // Les evenements dont l'ancre n'a PAS d'objectif (fil monde ; pointeurs de creature locaux a l'appel, jamais gardes).
-void DecrireSansObjectif(std::vector<CarteEv>& sortie)
+void DecrireSansObjectif(std::vector<CarteEv>& sortie, std::vector<CarteEv>& grace)
 {
     struct Groupe
     {
@@ -630,11 +637,36 @@ void DecrireSansObjectif(std::vector<CarteEv>& sortie)
         if (neuf)   // une ligne par evenement neuf vu par la carte (preuve d'installation : `strings`)
             LOG_INFO("playerbots", "coa directeur carte: sans_objectif id={} type={} carte={} zone={} position={}", e.id,
                      e.type, e.carte, e.zone, e.aPos ? 1 : 0);
+        s.vuMs = getMSTime();
+        s.decrit = !g.convoi && e.carte && e.zone;
+        if (s.decrit)
+            s.dernier = e;
         if (e.carte && e.zone)
             sortie.push_back(std::move(e));
     }
+    // 18/10 (commanditaire : « je ne vois aucun evenement ») : une faille entre bots pose un monstre a la fois, tue en
+    // quelques secondes ; entre deux vagues elle n'a aucun vivant. Elle reste CARTE_SANS_OBJ_GRACE_MS sur la carte avec
+    // sa derniere description (meme id), sauf si son ancre a pris un objectif (l'evenement est alors decrit par lui).
+    // Un convoi n'en a jamais : sans protege vivant, il n'est plus en route.
+    uint32 const maintenantMs = getMSTime();
     for (auto it = carteSansObj.begin(); it != carteSansObj.end();)
-        it = it->second.vu ? std::next(it) : carteSansObj.erase(it);
+    {
+        CarteSansObj const& s = it->second;
+        if (s.vu)
+        {
+            ++it;
+            continue;
+        }
+        bool const garde = s.decrit && getMSTimeDiff(s.vuMs, maintenantMs) < CARTE_SANS_OBJ_GRACE_MS &&
+                           !evObjectifs.count(uint32(it->first >> 32));
+        if (!garde)
+        {
+            it = carteSansObj.erase(it);
+            continue;
+        }
+        grace.push_back(s.dernier);   // apres les issues recentes (revue m2) : le plafond par continent les garde
+        ++it;
+    }
     if (carteSansObj.size() > CARTE_SANS_OBJ_MAX)
         carteSansObj.clear();
 }
@@ -680,7 +712,8 @@ CarteEtat EtatCarteMonde()
     }
     PurgerSuivis();
     // 1 bis. Evenements SANS objectif (entre bots), apres ceux des humains (plafond CARTE_EVENEMENTS_MAX par continent).
-    DecrireSansObjectif(r.evenements);
+    std::vector<CarteEv> grace;
+    DecrireSansObjectif(r.evenements, grace);
     // 2. Issues des CARTE_FIN_S dernieres secondes (plus recentes d'abord).
     carteFins.erase(std::remove_if(carteFins.begin(), carteFins.end(),
                                    [maintenant](CarteEv const& f) { return f.finS + CARTE_FIN_S <= maintenant; }),
@@ -688,6 +721,9 @@ CarteEtat EtatCarteMonde()
     for (auto f = carteFins.rbegin(); f != carteFins.rend(); ++f)
         if (f->carte && f->zone)
             r.evenements.push_back(*f);
+    // 2 bis. Evenements entre bots sans vivant, en grace (CARTE_SANS_OBJ_GRACE_MS) : en dernier.
+    for (CarteEv& e : grace)
+        r.evenements.push_back(std::move(e));
     // 3. Tetes mises a prix : copie du registre sous le verrou partage, puis la cible au fil monde.
     struct Lue
     {
