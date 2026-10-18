@@ -448,6 +448,16 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         }
     }
 
+    // CoA, 18/10/2026 (PlayerbotAIConfig.h, wildPvpBotsPvpMinLevel) : le JcJ ENTRE FACTIONS ouvert entre bots. Un bot
+    // aleatoire sans maitre, vivant, de ce niveau ou plus, hors lieu sans JcJ (CoaLieuSansPvp : sanctuaires,
+    // capitales, listes PvpProhibited*), porte le drapeau JcJ ordinaire ; la branche ordinaire de la convoitise
+    // (IsOpposing && IsPvP) fait le reste. Pas de FFA : sa propre faction ne lui devient pas hostile. 0 : eteint.
+    if (sPlayerbotAIConfig.wildPvpEnabled && sPlayerbotAIConfig.wildPvpBotsPvpMinLevel && bot->IsAlive() &&
+        !bot->IsPvP() && !GetMaster() && !HasGameClientMaster() &&
+        bot->GetLevel() >= sPlayerbotAIConfig.wildPvpBotsPvpMinLevel && sRandomPlayerbotMgr.IsRandomBot(bot) &&
+        !sPlayerbotAIConfig.CoaLieuSansPvp(bot->GetZoneId(), bot->GetAreaId()))
+        bot->UpdatePvP(true, true);
+
     // Handle cheat options (set bot health and power if cheats are enabled)
     if (bot->IsAlive() &&
         (static_cast<uint32>(GetCheat()) > 0 || static_cast<uint32>(sPlayerbotAIConfig.botCheatMask) > 0))

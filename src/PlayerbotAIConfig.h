@@ -324,6 +324,17 @@ public:
     // reste celui d'un bot ordinaire, faction contre faction.
     bool wildPvpAllBotsAreTargets;
 
+    // CoA, 18/10/2026 (Mulgore « jonche de cadavres ») : avec AllBotsAreTargets, chaque bot porte le FFA et le
+    // grind d'un bot ORDINAIRE prenait les bots de sa faction pour des monstres (71 a 97 % des morts JcJ).
+    // SeulMercenaireMemeFaction (defaut 1) : seul un mercenaire convoite un joueur de SA faction (riposte, champ de
+    // bataille, arene et duel restent permis). TreveTous (defaut 1) : la treve apres une mort JcJ
+    // (TruceAfterDeathSec) protege la victime de TOUS les bots, plus seulement des mercenaires. BotsPvpMinLevel
+    // (defaut 0 : eteint) : un bot aleatoire sans maitre, de ce niveau ou plus, hors lieu sans JcJ, porte le
+    // drapeau JcJ ordinaire -- le JcJ entre factions est ouvert entre bots, sans FFA.
+    bool wildPvpSeulMercenaireMemeFaction;
+    bool wildPvpTreveTous;
+    uint32 wildPvpBotsPvpMinLevel;
+
     // Nombre maximum de mercenaires qui peuvent engager la MEME cible. A 1, un
     // duel. C'est la borne qui empeche la meute, sans laquelle chaque
     // mercenaire decide seul et trois d'entre eux repondent trois fois oui.

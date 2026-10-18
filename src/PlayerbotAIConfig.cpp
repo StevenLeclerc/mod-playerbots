@@ -731,6 +731,9 @@ bool PlayerbotAIConfig::Initialize()
         wildPvpMercenaryPercent = 100;
 
     wildPvpAllBotsAreTargets = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.AllBotsAreTargets", false);
+    wildPvpSeulMercenaireMemeFaction = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.SeulMercenaireMemeFaction", true);
+    wildPvpTreveTous = sConfigMgr->GetOption<bool>("AiPlayerbot.WildPvp.TreveTous", true);
+    wildPvpBotsPvpMinLevel = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.BotsPvpMinLevel", 0);
     wildPvpMaxAttackersPerTarget = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.MaxAttackersPerTarget", 1);
     wildPvpKillXpDivisor = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.KillXpDivisor", 4);
     wildPvpKillRepeatCooldown = sConfigMgr->GetOption<uint32>("AiPlayerbot.WildPvp.KillRepeatCooldown", 900);

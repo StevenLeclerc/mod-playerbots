@@ -12,6 +12,7 @@
 #include "DBCStructure.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
+#include "MercenaryRewards.h"
 #include "Playerbots.h"
 #include "SharedDefines.h"
 #include "SpellAuraDefines.h"
@@ -154,6 +155,22 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
         if (CoaDirecteur::CibleDeBanc(bot->GetGUID().GetCounter()) && !bot->InBattleground() && !bot->InArena() &&
             !(bot->duel && bot->duel->Opponent == unit))
             return false;
+
+        // CoA, 18/10/2026 (PlayerbotAIConfig.h, wildPvpSeulMercenaireMemeFaction / wildPvpTreveTous) : apres
+        // l'autodefense (qui a rendu vrai pour qui attaque le bot) et les gardes du Directeur, avant les exemptions
+        // qui rendent vrai. Couvre « nearest enemy players » ET le grind. Champ de bataille, arene, duel : permis.
+        if (sPlayerbotAIConfig.wildPvpEnabled && !bot->InBattleground() && !bot->InArena() &&
+            !(bot->duel && bot->duel->Opponent == unit))
+        {
+            // La victime d'une mort JcJ recente n'est convoitee par aucun bot (la riposte reste permise, plus haut).
+            if (sPlayerbotAIConfig.wildPvpTreveTous &&
+                MercenaryRewards::instance().IsUnderTruce(unit->GetGUID().GetRawValue()))
+                return false;
+            // Seul un mercenaire convoite sa propre faction. Test d'equipe d'abord (gratuit), EstMercenaire ensuite.
+            if (sPlayerbotAIConfig.wildPvpSeulMercenaireMemeFaction &&
+                unit->ToPlayer()->GetTeamId() == bot->GetTeamId() && !MercenaryRewards::EstMercenaire(bot))
+                return false;
+        }
 
         // Skip restrictions in BG/Arena
         if (bot->InBattleground() || bot->InArena())

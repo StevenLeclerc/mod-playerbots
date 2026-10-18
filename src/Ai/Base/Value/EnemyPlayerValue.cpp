@@ -278,7 +278,9 @@ bool NearestEnemyPlayersValue::AcceptUnit(Unit* unit)
         }
     }
     uint32 const plafondNormal = sPlayerbotAIConfig.wildPvpMaxAttackersPerTarget;
-    if (botEstMercenaire && MercenaryRewards::instance().IsUnderTruce(enemy->GetGUID().GetRawValue()))
+    // CoA, 18/10/2026 : TreveTous -- la treve apres une mort JcJ protege aussi la victime des bots ordinaires.
+    if ((botEstMercenaire || (enemy && sPlayerbotAIConfig.wildPvpEnabled && sPlayerbotAIConfig.wildPvpTreveTous)) &&
+        MercenaryRewards::instance().IsUnderTruce(enemy->GetGUID().GetRawValue()))
         return false;
     if (botEstMercenaire)
     {
