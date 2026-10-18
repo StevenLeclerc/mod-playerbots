@@ -449,14 +449,33 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     }
 
     // CoA, 18/10/2026 (PlayerbotAIConfig.h, wildPvpBotsPvpMinLevel) : le JcJ ENTRE FACTIONS ouvert entre bots. Un bot
-    // aleatoire sans maitre, vivant, de ce niveau ou plus, hors lieu sans JcJ (CoaLieuSansPvp : sanctuaires,
-    // capitales, listes PvpProhibited*), porte le drapeau JcJ ordinaire ; la branche ordinaire de la convoitise
-    // (IsOpposing && IsPvP) fait le reste. Pas de FFA : sa propre faction ne lui devient pas hostile. 0 : eteint.
-    if (sPlayerbotAIConfig.wildPvpEnabled && sPlayerbotAIConfig.wildPvpBotsPvpMinLevel && bot->IsAlive() &&
-        !bot->IsPvP() && !GetMaster() && !HasGameClientMaster() &&
-        bot->GetLevel() >= sPlayerbotAIConfig.wildPvpBotsPvpMinLevel && sRandomPlayerbotMgr.IsRandomBot(bot) &&
-        !sPlayerbotAIConfig.CoaLieuSansPvp(bot->GetZoneId(), bot->GetAreaId()))
-        bot->UpdatePvP(true, true);
+    // aleatoire sans maitre, vivant, de ce niveau ou plus, SANS FFA (revue B1 : un bot FFA et JcJ toucherait de ses
+    // sorts de zone les bots FFA de sa faction, Unit.cpp:11498-11500 ; le FFA le rend deja hostile a l'autre faction),
+    // hors lieu sans JcJ (CoaLieuSansPvp : sanctuaires, capitales, listes PvpProhibited*), porte le drapeau JcJ
+    // ordinaire, sans minuteur ; la branche ordinaire de la convoitise (IsOpposing && IsPvP) fait le reste. Revue B2 :
+    // un bot qui n'y a plus droit (maitre, FFA, ville, option eteinte) et dont le drapeau est SANS minuteur
+    // (EndTimer 0, celui qu'on pose) recoit le minuteur ordinaire de 5 min (UpdatePvP(true) sans forcage), hors
+    // combat, champ de bataille et arene : le coeur le retire ensuite (UpdatePvPFlag). 0 : eteint, rien n'est touche.
+    if (sPlayerbotAIConfig.wildPvpBotsPvpMinLevel && bot->IsAlive())
+    {
+        bool const auJcJ = bot->IsPvP();
+        if (!auJcJ || bot->pvpInfo.EndTimer == 0)
+        {
+            // IsRandomBot (cache global, P-050) seulement pour POSER le drapeau : un bot deja marque sans minuteur
+            // l'a ete ici (IsRandomBot a passe), on ne le relit pas a chaque tick.
+            bool const permis = sPlayerbotAIConfig.wildPvpEnabled && !bot->IsFFAPvP() && !GetMaster() &&
+                                !HasGameClientMaster() &&
+                                bot->GetLevel() >= sPlayerbotAIConfig.wildPvpBotsPvpMinLevel &&
+                                !sPlayerbotAIConfig.CoaLieuSansPvp(bot->GetZoneId(), bot->GetAreaId());
+            if (!auJcJ)
+            {
+                if (permis && sRandomPlayerbotMgr.IsRandomBot(bot))
+                    bot->UpdatePvP(true, true);
+            }
+            else if (!permis && !bot->IsInCombat() && !bot->InBattleground() && !bot->InArena())
+                bot->UpdatePvP(true);
+        }
+    }
 
     // Handle cheat options (set bot health and power if cheats are enabled)
     if (bot->IsAlive() &&

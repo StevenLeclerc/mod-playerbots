@@ -162,13 +162,16 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
         if (sPlayerbotAIConfig.wildPvpEnabled && !bot->InBattleground() && !bot->InArena() &&
             !(bot->duel && bot->duel->Opponent == unit))
         {
+            // Seul un mercenaire convoite sa propre faction. Test d'equipe d'abord (gratuit), puis le hachage
+            // (IsMercenary, sans verrou), EstMercenaire (IsRandomBot, cache global : P-050) seulement s'il passe.
+            if (sPlayerbotAIConfig.wildPvpSeulMercenaireMemeFaction &&
+                unit->ToPlayer()->GetTeamId() == bot->GetTeamId() &&
+                !(sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()) && MercenaryRewards::EstMercenaire(bot)))
+                return false;
             // La victime d'une mort JcJ recente n'est convoitee par aucun bot (la riposte reste permise, plus haut).
+            // Apres le test d'equipe : IsUnderTruce prend un verrou partage.
             if (sPlayerbotAIConfig.wildPvpTreveTous &&
                 MercenaryRewards::instance().IsUnderTruce(unit->GetGUID().GetRawValue()))
-                return false;
-            // Seul un mercenaire convoite sa propre faction. Test d'equipe d'abord (gratuit), EstMercenaire ensuite.
-            if (sPlayerbotAIConfig.wildPvpSeulMercenaireMemeFaction &&
-                unit->ToPlayer()->GetTeamId() == bot->GetTeamId() && !MercenaryRewards::EstMercenaire(bot))
                 return false;
         }
 
