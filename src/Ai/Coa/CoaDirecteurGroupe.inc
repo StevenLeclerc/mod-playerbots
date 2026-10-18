@@ -42,6 +42,21 @@
 // groupe, a suivre le joueur, jusqu'a l'echeance de l'inscription (duree d'ambiance, jusqu'a 3600 s). Un
 // inscrit mort (inscription levee `mort`) RESTE dans le groupe tant que d'autres servent le joueur : le joueur peut le
 // relever, et il ne quitte pas le groupe sous ses yeux au milieu d'une vague.
+//
+// FIN D'EVENEMENT (13/10/2026, remontee R-20261013-1757, Faille d'orage de Dereir, 13/10 17:56 Paris) : « le groupe
+// se defait tout seul a la fin, des que je clique sur le portail [...] il y a marque "You don't have permission to
+// loot that corpse." ». MESURE (CoaBots.log, 15:56:13 UTC) : les trois inscrits quittent a la seconde qui suit les
+// `lever` du service, `motif=quitte raison=fin`, le dernier dissout le groupe (`dissous=1`, `cree=1`). LU (coeur) :
+// Creature::SetLootRecipient garde le guid du GROUPE du tapeur (m_lootRecipientGroup) ; Player::isAllowedToLoot,
+// joueur sans groupe, n'admet plus que `this == GetLootRecipient()`, et joueur groupe, que le MEME groupe : un corps
+// tape par un bot (ou par le groupe, bot en tete) devient interdit au joueur des que le groupe disparait.
+// Option Directeur.EvenementGroupeAttenteS > 0 : a la fin, l'inscrit RESTE (finS, ligne `motif=attente`) et sort au
+// premier de : joueur parti du groupe (`joueur_parti`, vaut aussi pendant l'evenement), joueur hors ligne, joueur a
+// plus de EvenementGroupeAttenteYd ou sur une autre carte (`joueur_eloigne`), delai echu (`attente_echue`), nouvel
+// evenement du joueur (`nouvel_evenement` : un bot en attente a un maitre humain, ExecuterAffectation refuserait
+// sa re-inscription `maitre_humain` ; il rend sa place aux nouveaux inscrits). Option a 0 : la sortie `fin` d'avant,
+// meme logique (la ligne `motif=quitte` gagne seulement le champ final `attente_s=0`). En champ de bataille,
+// GetGroup() rend le groupe du champ : le groupe d'evenement est alors GetOriginalGroup(), le joueur n'est pas parti.
 
 struct GroupeDEvenement
 {
@@ -50,6 +65,7 @@ struct GroupeDEvenement
     ObjectGuid::LowType groupe = 0;     // Group::GetGUID().GetCounter()
     bool cree = false;                  // le groupe a ete cree pour l'evenement
     uint32 vuS = 0;                     // Maintenant() a l'entree, puis au dernier invoque publie pour le joueur
+    uint32 finS = 0;                    // Maintenant() a la fin de l'evenement (attente du joueur) ; 0 : il sert
 };
 // Sans invoque publie pour le joueur depuis ce temps, le groupe d'evenement est quitte (`sans_evenement`). Bien
 // au-dela des attentes du service (attente des bots 150 s, entre deux vagues 75 s par defaut, nuit_des_morts.py) :
@@ -72,6 +88,7 @@ bool GroupeDEvenementPour(uint32 botLow, uint32 joueurLow)
 // Le bot quitte le groupe pose pour l'evenement. Fil monde. `raison` : mot du journal.
 void QuitterGroupeDEvenement(uint32 botLow, GroupeDEvenement const& e, char const* raison)
 {
+    uint32 const attente = e.finS ? Maintenant() - e.finS : 0;
     ObjectGuid const botGuid = ObjectGuid::Create<HighGuid::Player>(botLow);
     Group* g = e.groupe ? sGroupMgr->GetGroupByGUID(e.groupe) : nullptr;
     uint32 membres = 0;
@@ -85,10 +102,36 @@ void QuitterGroupeDEvenement(uint32 botLow, GroupeDEvenement const& e, char cons
         g->RemoveMember(botGuid, GROUP_REMOVEMETHOD_DEFAULT);
         retire = true;
     }
+    // Revue 16/10 : un groupe CREE par le Directeur est en butin libre (plus bas). S'il survit au depart du dernier bot
+    // de l'evenement (le joueur a invite un ami entre-temps), il revient au mode par defaut du coeur (GROUP_LOOT,
+    // Group::Create), sans quoi deux humains restaient en butin libre sans l'avoir choisi. Seulement s'il est encore en
+    // FREE_FOR_ALL : un choix fait depuis par le chef est garde. Le groupe est RELU (RemoveMember a pu le dissoudre).
+    bool butinRendu = false;
+    if (retire && e.cree && !dissous)
+        if (Group* reste = sGroupMgr->GetGroupByGUID(e.groupe))
+            if (reste->GetLootMethod() == FREE_FOR_ALL && !reste->isBGGroup() && !reste->isBFGroup() &&
+                !reste->isLFGGroup())
+            {
+                bool autreBot = false;
+                for (auto const& [autre, ge] : groupesEvenement)
+                    if (autre != botLow && ge.groupe == e.groupe &&
+                        reste->IsMember(ObjectGuid::Create<HighGuid::Player>(autre)))
+                    {
+                        autreBot = true;
+                        break;
+                    }
+                if (!autreBot)
+                {
+                    reste->SetLootMethod(GROUP_LOOT);
+                    reste->SendUpdate();
+                    butinRendu = true;
+                }
+            }
     LOG_INFO("playerbots",
              "coa directeur groupe: id={} guid={} joueur={} motif=quitte raison={} retire={} dissous={} membres_avant={}"
-             " cree={}",
-             e.id, botLow, e.joueur, raison, retire ? 1 : 0, dissous ? 1 : 0, membres, e.cree ? 1 : 0);
+             " cree={} attente_s={} butin_rendu={}",
+             e.id, botLow, e.joueur, raison, retire ? 1 : 0, dissous ? 1 : 0, membres, e.cree ? 1 : 0, attente,
+             butinRendu ? 1 : 0);
 }
 
 // Pourquoi ce bot ne peut pas rejoindre le joueur (nullptr : il le peut). `groupe` : le groupe du joueur, ou nul.
@@ -179,11 +222,19 @@ void RejoindreGroupeDEvenement(uint32 botLow, uint32 joueurLow, uint32 id)
              cree ? "cree" : "ajoute", groupe->GetMembersCount());
 }
 
+// Le groupe `g` (ou nul) est-il le groupe d'evenement de guid bas `groupe` ?
+bool DansLeGroupe(Group const* g, ObjectGuid::LowType groupe)
+{
+    return g && g->GetGUID().GetCounter() == groupe;
+}
+
 // Chaque seconde, fil monde (Entretien, apres SuivreAffectations : une arrivee constatee a cette seconde est en
 // SEJOUR), cartes a l'arret (P-137). Sans entree ni option : une lecture de booleen et un test de conteneur vide.
 void SuivreGroupesEvenement()
 {
     bool const option = sPlayerbotAIConfig.directeurEvenementGroupe && sPlayerbotAIConfig.directeurEvenementBots;
+    uint32 const attenteS = sPlayerbotAIConfig.directeurEvenementGroupeAttenteS;
+    float const attenteYd = float(sPlayerbotAIConfig.directeurEvenementGroupeAttenteYd);
     if (!option && groupesEvenement.empty())
     {
         groupesTentes.clear();
@@ -224,18 +275,46 @@ void SuivreGroupesEvenement()
             e.vuS = maintenant;
         char const* raison = nullptr;
         Player* bot = JoueurConnecte(botLow);
+        Player* joueur = JoueurConnecte(e.joueur);
         // Ordre : la cause la plus precise d'abord (un joueur deconnecte voit aussi ses inscriptions levees a la
         // meme seconde, `joueur_hors_ligne` : sans cet ordre, la ligne dirait `fin`).
         if (!option)
             raison = "option_eteinte";
-        else if (!JoueurConnecte(e.joueur))
+        else if (!joueur)
             raison = "joueur_hors_ligne";
         else if (!bot)
             raison = "bot_hors_ligne";
         else if (!bot->GetGroup() || bot->GetGroup()->GetGUID().GetCounter() != e.groupe)
             raison = "plus_dans_le_groupe";   // renvoye par le joueur, groupe dissous par lui : rien a retirer
-        else if (!joueursServis.count(e.joueur))
-            raison = "fin";
+        else if (attenteS && !DansLeGroupe(joueur->GetGroup(), e.groupe) &&
+                 !DansLeGroupe(joueur->GetOriginalGroup(), e.groupe))
+            raison = "joueur_parti";   // bouton natif « Quitter le groupe » : le groupe reste aux bots, on le defait
+        else if (!attenteS && (e.finS || !joueursServis.count(e.joueur)))
+            raison = "fin";   // e.finS : attente en cours quand l'option est repassee a 0 (rechargement) : on sort
+        else if (attenteS && (e.finS || !joueursServis.count(e.joueur)))
+        {
+            // Fin d'evenement : le bot reste au groupe le temps que le joueur pille (remontee R-20261013-1757).
+            if (!e.finS)
+            {
+                e.finS = maintenant;
+                LOG_INFO("playerbots",
+                         "coa directeur groupe: id={} guid={} joueur={} motif=attente delai_s={} distance_yd={}", e.id,
+                         botLow, e.joueur, attenteS, uint32(attenteYd));
+            }
+            // Nouvel evenement du joueur : le bot en attente rend sa place (sa re-inscription serait refusee
+            // `maitre_humain` par ExecuterAffectation, il a un maitre humain).
+            if (joueursServis.count(e.joueur))
+                raison = "nouvel_evenement";
+            else if (maintenant - e.finS >= attenteS)
+                raison = "attente_echue";
+            // Distance : ni en teleportation (position de transit), ni l'un des deux mort (un fantome court au
+            // cimetiere puis revient a son corps : il ne s'eloigne pas, et le delai borne l'attente).
+            else if (bot->IsInWorld() && joueur->IsInWorld() && !bot->IsBeingTeleported() &&
+                     !joueur->IsBeingTeleported() && bot->IsAlive() && joueur->IsAlive() &&
+                     (bot->GetMapId() != joueur->GetMapId() || bot->GetInstanceId() != joueur->GetInstanceId() ||
+                      bot->GetDistance(joueur) > attenteYd))
+                raison = "joueur_eloigne";
+        }
         else if (maintenant > e.vuS + GROUPE_SANS_EVENEMENT_S)
             raison = "sans_evenement";   // service mort sans ses levees : l'inscription tient, le groupe non
         if (raison)

@@ -194,15 +194,29 @@ class coa_directeur_soin_unitscript : public UnitScript
 public:
     coa_directeur_soin_unitscript() : UnitScript("coa_directeur_soin_unitscript", true, {UNITHOOK_ON_HEAL}) {}
 
-    void OnHeal(Unit* soigneur, Unit* receveur, uint32& gain) override { NoterSoinRecu(soigneur, receveur, gain); }
+    void OnHeal(Unit* soigneur, Unit* receveur, uint32& gain) override
+    {
+        NoterSoinRecu(soigneur, receveur, gain);
+        NoterSoinPatient(soigneur, receveur, gain);   // lot D5 (CoaDirecteurImprevu.inc) : un chargement sans soigneur
+    }
 };
 
 }  // namespace (lot S : les fonctions publiques, puis retour a l'espace anonyme)
 
 Player* CoaDirecteur::JoueurASoigner(Player* bot)
 {
+    // Lot D5 (15/10/2026, verbe `soigner`, CoaDirecteurImprevu.inc) : le patient IMPOSE a ce bot passe d'abord.
+    // Sans soigneur publie : un chargement atomique (PatientImpose), rien d'autre.
+    t_patientImpose = false;
+    if (!bot)
+        return nullptr;
+    if (Player* patient = PatientImpose(bot))
+    {
+        t_patientImpose = true;
+        return patient;
+    }
     // LA QUESTION D'ABORD : option eteinte ou aucun inscrit, un test et un chargement atomique.
-    if (!sPlayerbotAIConfig.directeurEvenementSoins || !evsNbInscrits.load(std::memory_order_relaxed) || !bot)
+    if (!sPlayerbotAIConfig.directeurEvenementSoins || !evsNbInscrits.load(std::memory_order_relaxed))
         return nullptr;
     if (!bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsAlive())
         return nullptr;
@@ -237,7 +251,12 @@ Player* CoaDirecteur::JoueurASoigner(Player* bot)
 
 void CoaDirecteur::NoterSoinChoisi()
 {
-    evsSoinChoix.fetch_add(1, std::memory_order_relaxed);
+    // Lot D5 : le joueur retenu est un patient impose (meme fil, appel juste apres JoueurASoigner) : compteur du
+    // bilan `bus:` (soin_choix_soigneurs), pas celui des evenements.
+    if (t_patientImpose)
+        sdChoix.fetch_add(1, std::memory_order_relaxed);
+    else
+        evsSoinChoix.fetch_add(1, std::memory_order_relaxed);
 }
 
 namespace

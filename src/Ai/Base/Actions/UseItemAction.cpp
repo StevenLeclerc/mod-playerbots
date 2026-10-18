@@ -5,6 +5,7 @@
  */
 
 #include "UseItemAction.h"
+#include "CoaBancSoin.h"
 #include "ChatHelper.h"
 #include "Event.h"
 #include "ItemPackets.h"
@@ -393,7 +394,19 @@ bool UseItemAction::SocketItem(Item* item, Item* gem, bool replace)
     return fits;
 }
 
-bool UseItemAction::isPossible() { return getName() == "use" || AI_VALUE2(uint32, "item count", getName()) > 0; }
+bool UseItemAction::isPossible()
+{
+    // CoA banc des soins, B-2 (17/10/2026) : aucune potion ni pierre de soin pour un membre d'essai en cours
+    // (AiPlayerbot.CoaSoin.Potions = 0) -- leur contenu de sac faisait varier la survie de +/- 15 s (DIAG du 17/10).
+    // Les sacs ne sont pas touches. Hors essai : un chargement atomique.
+    if (CoaBancSoin::PotionsInterdites(bot->GetGUID().GetCounter()))
+    {
+        std::string const nom = getName();
+        if (nom == "healing potion" || nom == "mana potion" || nom == "healthstone")
+            return false;
+    }
+    return getName() == "use" || AI_VALUE2(uint32, "item count", getName()) > 0;
+}
 
 bool UseSpellItemAction::isUseful() { return AI_VALUE2(bool, "spell cast useful", getName()); }
 

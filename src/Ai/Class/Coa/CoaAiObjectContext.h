@@ -31,6 +31,9 @@ struct CoaKnownAbility
     uint16 kind;
     uint32 dispelMask;
     uint32 firstSpellId;
+    // IA soins/survie (16/10/2026) : marques de Classify (MARQUE_* de CoaAiObjectContext.cpp), deja filtrees par les
+    // options AiPlayerbot.CoaIa.* au moment ou le kit est construit.
+    uint16 marques = 0;
 };
 
 /*
@@ -122,6 +125,14 @@ struct CoaAreneEtat
     // « familier_attente » (pourquoi le declencheur reste muet), une par raison toutes les 5 s.
     uint32 familierAttenteMs = 0;
     uint8 familierAttenteRaison = 0;
+    // Lot 19 (11/10, ouvertures) : monture de classe lue une fois par engagement (0 : aucune, ou pas d'attaque montee),
+    // essais d'attaque montee a portee sans rien lancer (au troisieme, le bot descend), debit de « ouverture_refus ».
+    bool montureLue = false;
+    uint32 montureClasseId = 0;
+    uint8 ouvertureMonteeEssais = 0;
+    uint32 ouvertureMonteeDebutMs = 0;  // premier tick monte portes ouvertes (plafond CoaAreneOuvertureMonteeMaxMs)
+    uint32 ouvertureRefusMs = 0;
+    uint8 ouvertureRefusRaison = 0;
     // Combat contre un humain (11/10, CoaAreneIa.inc, arene 1v1 et duel, CoaArene.IaCommune) : interruption,
     // dissipation sur soi, fenetre de burst apres un controle. Bilan : compteurs ci-dessous.
     // Incantation adverse suivie par CoaAreneMaj (les deux bras) : identite de la derniere vue (sort et adresse du
@@ -169,6 +180,7 @@ struct CoaAreneEtat
     uint32 pireCoupMs = 0;
     float survieSeuilDanger = 50.0f;
     uint32 survieControles = 0;        // controles lances par la survie faute de soin ou de defensif (bilan)
+    uint32 survieControleMs = 0;       // dernier controle de secours (lot 18 : au plus un par CoaAreneSurvieControleFenetreMs)
     uint32 survieArretMs = 0;          // dernier « survie_arret » (au plus un toutes les 2 s)
     uint32 retourVuDepuisMs = 0;       // retour d'un tireur : adversaire en vue sans interruption depuis (0 : pas en vue)
     // Dissipation sur soi, politique de cout (IaSurvie) : attente apres un succes (3 -> 6 -> 12 s, plafond 15 s, doublee
@@ -184,6 +196,12 @@ struct CoaAreneEtat
     // Sorts ecartes faute de ressource (CoaPeutPayer) : bilan, et derniere trace par sort (une toutes les 5 s au plus).
     uint32 refusRessource = 0;
     std::unordered_map<uint32, uint32> refusRessourceTraceMs;
+    // Lot 20 (13/10) : soins ou boucliers deja poses ecartes (CoaSoinDejaPose), generateurs de ressource lances par la
+    // survie, soins a aura retenus par la reserve de mana du meilleur outil de survie -- bilan (par sort et par 5 s pour
+    // les deux refus), et derniere trace par sort.
+    uint32 dejaPose = 0, survieGenerateurs = 0, survieReserveMana = 0;
+    std::unordered_map<uint32, uint32> dejaPoseTraceMs;
+    std::unordered_map<uint32, uint32> reserveManaTraceMs;
     // Etendards et autres sorts au sol de soutien poses sur soi (« coa arene soutien ») : prochain essai, poses.
     uint32 prochainSoutienMs = 0;
     uint32 soutiens = 0;
@@ -267,6 +285,28 @@ public:
 
     // CoaArene IA : voir CoaAreneEtat plus haut.
     CoaAreneEtat arene;
+
+    // IA soins/survie, lot 3 (16/10/2026, CoaAiObjectContext.cpp, CoaIaPerteRecente) : releve de la vie du bot pour la
+    // « perte rapide », 16 points espaces d'au moins 250 ms (4 s). Ecrit et lu par la seule IA de ce bot, sans verrou.
+    struct CoaSurvieReleve
+    {
+        uint32 ms[16] = {};
+        float pv[16] = {};
+        uint8 n = 0;     // points valides
+        uint8 tete = 0;  // prochain point a ecrire
+    };
+    CoaSurvieReleve survieReleve;
+
+    // IA soins/survie, lot 5 (16/10/2026, CoaAiObjectContext.cpp, CoaVenoEtat) : la forme du Venomancer quittee pour se
+    // soigner sous 35 %. `forme` 0 : aucune sortie en cours. `repriseMs` 0 : jamais repris (aucun ecart a respecter).
+    // Ecrit et lu par la seule IA de ce bot, sans verrou.
+    struct CoaVenoForme
+    {
+        uint32 forme = 0;      // Beetle Form 803183 ou Spider Form 800841, a reprendre
+        uint32 sortieMs = 0;   // getMSTime() de la sortie
+        uint32 repriseMs = 0;  // getMSTime() de la derniere reprise par ce lot
+    };
+    CoaVenoForme venoForme;
 };
 
 #endif

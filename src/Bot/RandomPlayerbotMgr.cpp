@@ -13,6 +13,7 @@
 #include "CellImpl.h"
 #include "ChannelMgr.h"
 #include "CoaDirecteur.h"
+#include "CoaBancSoin.h"
 #include "CoaHotelDesVentes.h"
 #include "DBCStores.h"
 #include "DBCStructure.h"
@@ -1370,6 +1371,12 @@ void RandomPlayerbotMgr::ScheduleChangeStrategy(uint32 bot, uint32 time)
 
 bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
 {
+    // CoA banc des soins (13/10/2026, CoaBancSoin.cpp) : un membre d'essai en cours n'est ni deconnecte (evenement
+    // « add » echu), ni revive, ni re-randomise, ni teleporte par ce gestionnaire ; le banc le rend a sa vie ordinaire
+    // a la fin de l'essai. Sans essai : un chargement atomique.
+    if (CoaBancSoin::MembreEngage(bot))
+        return false;
+
     ObjectGuid botGUID = ObjectGuid::Create<HighGuid::Player>(bot);
     Player* player = GetPlayerBot(botGUID);
     PlayerbotAI* botAI = player ? GET_PLAYERBOT_AI(player) : nullptr;
@@ -1488,6 +1495,13 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
     if (!botAI)
         return false;
 
+    // CoA banc des soins (revue du 13/10/2026) : ce chemin-ci est aussi appele par RandomBotUpdateAction (strategie
+    // « default », fil de carte), que la garde de ProcessBot(uint32) ne couvre pas. Il quitterait le groupe du banc
+    // (« leader is random bot »), reviverait, re-randomiserait ou teleporterait un membre d'essai en cours.
+    // Sans essai : un chargement atomique.
+    if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return false;
+
     // CoA -- banc de garde G1 : aussi par RandomBotUpdateAction, qui passe en combat (CoaGelBanc.h).
     if (CoaGelBanc(bot))
         return false;
@@ -1504,6 +1518,8 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
     // garde de fil que AvantDestruction plus bas (CoaHotelDesVentes.h) : appele
     // ici depuis un fil de carte (RandomBotUpdateAction), il ne fait rien.
     CoaHotelDesVentes::ReleverCourrier(bot);
+    // CoA -- ressources d'evenement (12/10/2026) : vente anticipee, meme garde de fil (Ressources.VenteAnticipee).
+    CoaHotelDesVentes::VendreRessources(bot);
 
     // if death revive
     if (bot->isDead())
@@ -1634,6 +1650,12 @@ void RandomPlayerbotMgr::Revive(Player* player)
 {
     uint32 bot = player->GetGUID().GetCounter();
 
+    // CoA banc des soins (revue du 13/10/2026) : FindCorpseAction (fil de carte, « death count » >= 5) appelle Revive
+    // directement ; Refresh y quitterait le groupe du banc et la teleportation sortirait le membre de l'enclos. Le
+    // banc le ressuscite lui-meme a la fin de l'essai. Sans essai : un chargement atomique.
+    if (CoaBancSoin::MembreEngage(bot))
+        return;
+
     // LOG_INFO("playerbots", "Bot {} revived", player->GetName().c_str());
     SetEventValue(bot, "dead", 0, 0);
     SetEventValue(bot, "revive", 0, 0);
@@ -1660,6 +1682,9 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_TELEPORTS_SUSPENDUS);
         return;
     }
+    // CoA banc des soins (13/10/2026) : jamais un membre d'essai en cours (il quitterait l'enclos).
+    if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return;
 
     // ignore when alrdy teleported or not in the world yet.
     if (bot->IsBeingTeleported() || !bot->IsInWorld())

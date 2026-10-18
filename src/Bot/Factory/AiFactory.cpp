@@ -28,6 +28,7 @@
 #include "SpellInfo.h"
 #include "CoaAiObjectContext.h"
 #include "CoaDirecteur.h"
+#include "CoaBancSoin.h"
 #include "SpellMgr.h"
 #include "WarlockAiObjectContext.h"
 #include "WarriorAiObjectContext.h"
@@ -900,12 +901,23 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
     // Le Directeur la fait relire (ResetStrategies) a l'ajout et au retrait du bot
     // dans la liste (SuivreBancs). Jamais un bot mene par un humain, jamais en champ
     // de bataille.
+    // CoA banc des soins (13/10/2026, CoaBancSoin.cpp) : un MEMBRE d'essai en cours, meme composition (il reste dans
+    // l'enclos entre deux combats, aucune errance, aucun groupe quitte par « leave far away »). Le banc fait relire la
+    // composition (ResetStrategies) a l'inscription et a la fin de l'essai. Sans essai : un chargement atomique.
     if (!player->InBattleground() && !(facade && facade->HasGameClientMaster()) &&
         (CoaDirecteur::CibleDeBanc(player->GetGUID().GetCounter()) ||
-         CoaDirecteur::CibleImmobile(player->GetGUID().GetCounter())))   // 04/10 : cible de contrat
+         CoaDirecteur::CibleImmobile(player->GetGUID().GetCounter()) ||   // 04/10 : cible de contrat
+         CoaBancSoin::MembreEngage(player->GetGUID().GetCounter())))
     {
         nonCombatEngine->removeAllStrategies();
         nonCombatEngine->addStrategiesNoInit("dps assist", "stay", "chat", "default", nullptr);
+        // B-3 du banc des soins (17/10) : pendant l'attente hors combat avant l'engagement
+        // (AiPlayerbot.CoaSoin.AttenteAvantCombat > 0), un membre d'essai de classe CoA garde « coa buff », comme dans
+        // sa composition ordinaire (plus haut) : auras de preparation (Fetid Ward...) et serviteur leve. Sans elle, les
+        // essais ia-A / ia-B n'en posaient aucune. Banc d'avant (attente 0) : rien de change.
+        if (CoaBancSoin::MembreEngage(player->GetGUID().GetCounter()) && CoaBancSoin::BuffsAvantCombat() &&
+            IsAscensionCustomClassId(player->getClass()))
+            nonCombatEngine->addStrategy("coa buff", false);
     }
 }
 

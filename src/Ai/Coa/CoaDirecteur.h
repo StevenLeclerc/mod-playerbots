@@ -49,6 +49,7 @@
 
 class Map;
 class Creature;
+class ObjectGuid;
 class Player;
 class Unit;
 class WorldLocation;
@@ -570,6 +571,8 @@ void Compter(CoaDirCompteur c);
 // Requete neuve du 8888 (lecture seule, fil monde) :
 //   joueur,<guid> -> guid,regle,equipe,race,classe,niveau,groupe,mj,bg,ffa,pvp,arret,ciel,meteo,afk
 // (`afk`, 15e champ, 02/10 : 1 si PLAYER_FLAGS_AFK, EN FIN de ligne)
+// (`soin`, 16e champ, lot D5 du 15/10 : 1 si PlayerbotAI::IsHeal(p) -- bot : strategie de soin, le test du refus
+//  `pas_soigneur` ; humain : specialisation --, EN FIN de ligne ; les 15 premiers champs inchanges)
 // `absent` si le personnage n'est pas en jeu, `invalid` si mal formee OU bus eteint.
 
 // ------------------------------------------------------------------ lot F des evenements (06/10/2026)
@@ -649,9 +652,40 @@ void NoterAssaillantsRetenus(size_t ajoutes, size_t retenus);
 // par le bot (Unit::IsValidAssistTarget : pas MJ, pas hostile, pas FFA si le bot ne l'est pas...) ; nul sinon.
 // Option AiPlayerbot.Directeur.EvenementSoins ETEINTE (defaut) : nul au premier chargement atomique, toujours.
 // Fil de carte du bot.
+// Lot D5 (15/10/2026, verbe `soigner`, CoaDirecteurImprevu.inc) : rend D'ABORD le patient IMPOSE a ce bot par le bus
+// (option AiPlayerbot.Directeur.Soigneurs), s'il est valide (humain, vivant, sans drapeau JcJ ni FFA, a 60 yd,
+// assistable, sous le seuil ou tous deux en combat). Sans soigneur publie : un chargement atomique de plus.
 Player* JoueurASoigner(Player* bot);
 // PartyMemberToHeal::Calculate a retenu le joueur servi comme cible de soin (bilan `soin_choix=`). Fil de carte.
 void NoterSoinChoisi();
+
+// Butin des bots aux evenements (12/10/2026, coa-project/docs/CONCEPTION-ressources-rares-evenements.md § 4.1, lot 3,
+// decisions D2 et D6 ; code dans CoaDirecteurButin.inc). Tout fil, sans verrou propre (config lue, AffectationDe).
+//
+// EstRessourceDEvenement : `itemId` est-il dans AiPlayerbot.Directeur.ButinObjets ? (lu aussi par l'HV des bots).
+bool EstRessourceDEvenement(uint32 itemId);
+// EstCreatureDEvenement : `entree` est-elle dans la plage des gabarits d'evenement (9100000-9109999) ?
+bool EstCreatureDEvenement(uint32 entree);
+// D2 (a), la voie la moins intrusive : vrai si l'option Directeur.ButinBots est allumee ET que le bot est dans un
+// groupe en butin LIBRE (FREE_FOR_ALL) sans y etre autorise par l'amont (FreeMethodLoot = 0, pas un « self bot »).
+// C'est le SEUL cas ou LootAction::isUseful rendait faux : l'appelant (LootAction, StoreLootAction) passe alors en
+// ramassage RESTREINT -- corps de creature d'evenement seulement (EstCreatureDEvenement), objets selon D6
+// (PeutPrendreEnButinLibre), jamais l'or. Aucun autre cas ne change : hors groupe, ou groupe hors FFA, le code
+// d'avant decide seul.
+bool RamassageRestreint(Player* bot);
+// D6 : en ramassage restreint, le bot peut-il prendre cet objet ? Une ressource d'evenement SEULEMENT, et :
+//   - MULTI_DROP (rare, epique) : oui, c'est SA copie (LootMgr FillFFALoot), personne d'autre ne la verrait ;
+//   - exemplaire unique (verte) : seulement si AUCUN membre du groupe n'est un humain (membre hors ligne ou
+//     introuvable compte comme humain : prudence). Un humain du groupe la garde pour lui.
+bool PeutPrendreEnButinLibre(Player* bot, uint32 itemId);
+// Revue du 12/10 : en ramassage restreint, reste-t-il sur ce corps une ressource que CE bot peut prendre (sa copie
+// MULTI_DROP non prise, ou une verte non prise s'il n'y a aucun humain) ? Sans cela, un corps ou ne reste que la verte
+// d'un humain serait rouvert a chaque LootDelay (AddAllLootAction le remet dans la pile). Fil de carte du bot (le
+// corps est sur sa carte : LootAction le trouve par botAI->GetCreature).
+bool ResteAPrendre(Player* bot, Creature* corps);
+// Trace `coa directeur butin:` (option Directeur.ButinTrace) : appelee par le crochet OnPlayerLootItem de
+// Playerbots.cpp pour TOUT pilleur (humain ou bot) ; ne journalise que les ressources d'evenement. Fil de carte.
+void TracerButin(Player* pilleur, uint32 itemId, uint32 quantite, ObjectGuid const& source);
 }  // namespace CoaDirecteur
 
 void AddSC_coa_directeur();

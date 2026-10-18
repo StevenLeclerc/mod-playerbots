@@ -6,6 +6,7 @@
 
 #include "CoaSpecialization.h"
 #include "CoaArene1v1.h"
+#include "CoaBancSoin.h"
 #include "CoaLevelBuildData.h"
 #include "CoaLevelBuildDataKami.h"
 #include "CoaSpecStrategies.h"
@@ -30,6 +31,7 @@
 #include <array>
 #include <mutex>
 #include <set>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -437,6 +439,13 @@ bool EnsureCoaSpecialization(Player* bot)
     if (!sRandomPlayerbotMgr.IsRandomBot(bot))
         return false;
 
+    // CoA banc des soins (13/10/2026, CoaBancSoin.cpp) : un membre d'essai en cours garde la specialisation DECLAREE
+    // que le banc lui a posee (soin, tank ou degats), quel qu'en soit le role ; sans ce garde, la composition
+    // (ResetStrategies -> AiFactory -> ici) la rendrait au role tire par le hachage. Aucun essai : un chargement
+    // atomique.
+    if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
+        return false;
+
     // CoA arene 1v1 (10/10 soir) : un gladiateur ENGAGE (inscrit, en file, en arene, retenu) garde la
     // specialisation de degats que sa preparation lui a posee (CoaSpecialiserGladiateur) ; sans ce garde, la
     // composition a l'entree en arene (Liberer -> ResetStrategies) la rendrait au role tire par le hachage.
@@ -526,6 +535,57 @@ bool EnsureCoaSpecialization(Player* bot)
     return true;
 }
 
+/*
+ * Lot 20 (13/10/2026) -- CLASSES DONT LE GLADIATEUR JOUE A DISTANCE. Une table, pas des cas disperses : le gladiateur
+ * d'une classe listee ne prend qu'une specialisation de degats qui n'est pas de melee (Style de Profiles[]).
+ *   - Ranger (21) : L1 de l'IA d'arene ne joue que 28 et 29 ; le gladiateur 682 (specialisation 30, melee) a joue le 10/10
+ *     a 21:12 (Paris) sans aucun geste de L1 (CoaAreneEstRangerDistance), ni ouverture, ni recul, ni burst garde.
+ *   - Starcaller (26) : sur le banc du 12/10 (docs/ANALYSE-classes-faibles-arene-20261013.md § 4), le seul gladiateur joue, 435,
+ *     a joue ses 8 matchs en Warden (45, melee, aucune approche) : 3 matchs sur 8 sans jamais atteindre le contact, 350
+ *     degats subis par seconde, 31 sorts de zone ecartes hors de portee. Sentinel (44) est sa specialisation par defaut
+ *     (CoaSpecStrategies.h) et la seule autre de degats.
+ * Une classe ajoutee ici sans specialisation de degats a distance garde la regle commune (candidats vides : rien ne
+ * change).
+ */
+static constexpr uint8 GladiateursADistance[] = { CLASS_RANGER, CLASS_STARCALLER };
+
+static bool GladiateurADistance(uint8 classId)
+{
+    return std::find(std::begin(GladiateursADistance), std::end(GladiateursADistance), classId) !=
+           std::end(GladiateursADistance);
+}
+
+// Lot 20 : signal seulement. Specialisation `spec` de melee, la classe en a une de degats a distance, et le bot ne connait
+// aucun sort qui le porte vers l'ennemi (CHARGE, CHARGE_DEST, JUMP, JUMP_DEST visant une cible ennemie ou un point sur
+// elle : meme lecture que CoaAreneSortDeRapprochement, CoaAreneIa.inc).
+static bool MeleeSansApproche(Player* bot, uint32 spec)
+{
+    SpecializationProfile const* profile = FindProfile(spec);
+    if (!profile || profile->Style != CoaStyle::Melee)
+        return false;
+    bool distanceExiste = false;
+    for (uint32 autre : SpecializationsByRole(bot->getClass())[uint8(CoaRole::Dps)])
+        if (SpecializationProfile const* p = FindProfile(autre))
+            distanceExiste = distanceExiste || p->Style != CoaStyle::Melee;
+    if (!distanceExiste)
+        return false;
+    auto versAdversaire = [](uint32 t) { return t == 6 || t == 25 || t == 53 || (t >= 63 && t <= 71); };
+    for (AscensionClassAbility const& a : GetAscensionClassAbilities(bot->getClass()))
+    {
+        if ((a.SpecId && a.SpecId != spec) || !bot->HasSpell(a.SpellId))
+            continue;
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(a.SpellId);
+        if (!info || info->IsPassive() || !(info->GetExplicitTargetMask() & TARGET_FLAG_UNIT_MASK))
+            continue;
+        for (SpellEffectInfo const& effet : info->Effects)
+            if ((effet.Effect == SPELL_EFFECT_CHARGE || effet.Effect == SPELL_EFFECT_CHARGE_DEST ||
+                 effet.Effect == SPELL_EFFECT_JUMP || effet.Effect == SPELL_EFFECT_JUMP_DEST) &&
+                (versAdversaire(effet.TargetA.GetTarget()) || versAdversaire(effet.TargetB.GetTarget())))
+                return false;
+    }
+    return true;
+}
+
 uint32 CoaSpecialiserGladiateur(Player* bot)
 {
     if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel ||
@@ -533,9 +593,8 @@ uint32 CoaSpecialiserGladiateur(Player* bot)
         return 0;
 
     std::vector<uint32> candidates = SpecializationsByRole(bot->getClass())[uint8(CoaRole::Dps)];
-    // Le Ranger : seulement a distance. Le gladiateur 682 (specialisation 30, melee) a joue le 10/10 a 21:12
-    // (Paris) sans aucun geste de L1 (CoaAreneEstRangerDistance), ni ouverture, ni recul, ni burst garde.
-    if (bot->getClass() == CLASS_RANGER)
+    bool const distance = GladiateurADistance(bot->getClass());
+    if (distance)
         candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [](uint32 spec)
             {
                 SpecializationProfile const* profile = FindProfile(spec);
@@ -546,7 +605,14 @@ uint32 CoaSpecialiserGladiateur(Player* bot)
 
     uint32 const avant = GetAscensionActiveSpecialization(bot);
     if (std::find(candidates.begin(), candidates.end(), avant) != candidates.end())
+    {
+        // Lot 20 : la specialisation gardee est tracee aussi (meme ligne, changee=0), pour que le banc lise le signal
+        // « melee sans approche » a chaque preparation.
+        LOG_INFO("playerbots.coa", "coa arene ia: guid={} action=gladiateur_spe classe={} spe={} avant={} niveau={} "
+                 "changee=0 distance={} melee_sans_approche={}", bot->GetGUID().GetCounter(), bot->getClass(), avant, avant,
+                 bot->GetLevel(), distance ? 1 : 0, MeleeSansApproche(bot, avant) ? 1 : 0);
         return 0;
+    }
 
     uint32 const choisie = candidates[Hash(bot->GetGUID().GetCounter(), 0x474C4144u) % candidates.size()];   // 'GLAD'
     if (!SwitchAscensionSpecialization(bot, choisie))
@@ -558,7 +624,66 @@ uint32 CoaSpecialiserGladiateur(Player* bot)
     uint32 const points = ApplyCoaTalents(bot);
     LOG_INFO("playerbots", "coa: {} (class {}, level {}) took gladiator specialization {} (was {}), {} talent entries raised",
              bot->GetName(), bot->getClass(), bot->GetLevel(), choisie, avant, points);
+    // Lot 20 : la meme decision au format des lignes d'IA d'arene (champs nommes), pour le banc. `distance` : la classe
+    // est dans GladiateursADistance ; `melee_sans_approche` : la specialisation posee est de melee, la classe en a une de
+    // degats a distance, et le bot ne connait aucune charge ni aucun saut vers l'ennemi (signale, rien n'est change).
+    LOG_INFO("playerbots.coa", "coa arene ia: guid={} action=gladiateur_spe classe={} spe={} avant={} niveau={} changee=1 "
+             "distance={} melee_sans_approche={}", bot->GetGUID().GetCounter(), bot->getClass(), choisie, avant,
+             bot->GetLevel(), distance ? 1 : 0, MeleeSansApproche(bot, choisie) ? 1 : 0);
     return choisie;
+}
+
+bool CoaPoserSpecialisationDeclaree(Player* bot, uint32 spe, std::string& refus)
+{
+    refus.clear();
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()))
+    {
+        refus = "pas_classe_coa";
+        return false;
+    }
+    if (bot->GetLevel() < SpecializationLevel)
+    {
+        refus = "niveau_sans_spe";
+        return false;
+    }
+    uint32 const avant = GetAscensionActiveSpecialization(bot);
+    uint32 const voulue = spe ? spe : avant;
+    if (!voulue)
+    {
+        refus = "sans_spe";
+        return false;
+    }
+    if (IsExcludedSpecialization(voulue))
+    {
+        refus = "spe_exclue";
+        return false;
+    }
+    // Les specialisations que la classe peut apprendre (tout role), sans les exclues : SpecializationsByRole.
+    bool deLaClasse = false;
+    for (std::vector<uint32> const& parRole : SpecializationsByRole(bot->getClass()))
+        deLaClasse = deLaClasse || std::find(parRole.begin(), parRole.end(), voulue) != parRole.end();
+    if (!deLaClasse)
+    {
+        refus = "spe_hors_classe";
+        return false;
+    }
+    if (avant != voulue && !SwitchAscensionSpecialization(bot, voulue))
+    {
+        refus = "spe_refusee";
+        return false;
+    }
+    if (GetAscensionActiveSpecialization(bot) != voulue)
+    {
+        refus = "spe_refusee";
+        return false;
+    }
+    // Toujours, meme sans changement : les points du niveau (le banc a pu monter le bot) et la table de
+    // AiPlayerbot.Coa.BuildSource, comme a chaque composition.
+    uint32 const points = ApplyCoaTalents(bot);
+    LOG_INFO("playerbots.coa", "coa soin preparation: guid={} action=spe classe={} spe={} avant={} niveau={} changee={}"
+             " entrees_talent={} role={}", bot->GetGUID().GetCounter(), uint32(bot->getClass()), voulue, avant,
+             uint32(bot->GetLevel()), avant != voulue ? 1 : 0, points, uint32(RoleOf(bot->getClass(), voulue)));
+    return true;
 }
 
 namespace
@@ -723,6 +848,55 @@ uint32 GetCoaBuildTable(Player const* bot)
         h *= 16777619u;
     }
     return (h >> 31) ? 1 : 2;     // bit FORT : le bit faible d un FNV n est que la parite des octets
+}
+
+std::string CoaArbrePorte(Player const* bot, uint32& voulues, uint32& manquantes, uint32& enTrop)
+{
+    voulues = manquantes = enTrop = 0;
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()))
+        return std::string();
+    uint8 const classId = bot->getClass();
+    uint32 const specializationId = GetAscensionActiveSpecialization(bot);
+    // Les rangs voulus : ceux qu'ApplyCoaTalents vise (meme table, meme niveau).
+    std::vector<std::pair<uint32, uint8>> wanted;
+    uint8 buildTop = 0;
+    if (specializationId)
+    {
+        if (GetCoaBuildTable(bot) == 1)
+            CollectWantedRanks(CoaLevelBuildDataKami::Picks, classId, specializationId, bot->GetLevel(), wanted, buildTop);
+        else
+            CollectWantedRanks(CoaLevelBuildData::Picks, classId, specializationId, bot->GetLevel(), wanted, buildTop);
+    }
+    // Toutes les entrees que l'une ou l'autre table donne a la classe, toutes specialisations : ce que le bot tient
+    // d'une autre specialisation se voit aussi (`en_trop`).
+    std::set<uint32> entrees;
+    for (CoaLevelBuildData::Pick const& pick : CoaLevelBuildDataKami::Picks)
+        if (pick.ClassId == classId)
+            entrees.insert(pick.EntryId);
+    for (CoaLevelBuildData::Pick const& pick : CoaLevelBuildData::Picks)
+        if (pick.ClassId == classId)
+            entrees.insert(pick.EntryId);
+    for (auto const& [entryId, rank] : wanted)
+        entrees.insert(entryId);
+    std::string texte;
+    for (uint32 const entryId : entrees)
+    {
+        uint32 const tenu = GetAscensionTalentRank(bot, entryId);
+        auto itr = std::find_if(wanted.begin(), wanted.end(),
+            [entryId](std::pair<uint32, uint8> const& w) { return w.first == entryId; });
+        uint32 const voulu = itr == wanted.end() ? 0 : itr->second;
+        if (voulu)
+        {
+            ++voulues;
+            if (tenu < voulu)
+                ++manquantes;
+        }
+        if (tenu > voulu)
+            ++enTrop;
+        if (tenu)
+            texte += (texte.empty() ? "" : ",") + std::to_string(entryId) + ":" + std::to_string(tenu);
+    }
+    return texte;
 }
 
 uint32 ApplyCoaTalents(Player* bot)

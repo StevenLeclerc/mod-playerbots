@@ -5,6 +5,7 @@
  */
 
 #include "ItemUsageValue.h"
+#include "CoaHotelDesVentes.h"
 #include "AiFactory.h"
 #include "ChatHelper.h"
 #include "GuildTaskMgr.h"
@@ -31,6 +32,13 @@ ItemUsage ItemUsageValue::Calculate()
     ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
     if (!proto)
         return ITEM_USAGE_NONE;
+
+    // CoA -- ressources d'evenement (12/10/2026, option Coa.HotelDesVentes.Ressources, depot reel) : le bot les
+    // GARDE pour l'HV des bots. KEEP n'est ni vendu au marchand (SellAction : VENDOR, AH), ni detruit sac plein
+    // (DestroyItemAction : NONE, VENDOR, AH, SKILL, USE), ni propose a l'echange (TradeValues) ; et il reste
+    // ramasse (NormalLootStrategy : tout sauf NONE).
+    if (CoaHotelDesVentes::RessourceProtegee(itemId))
+        return ITEM_USAGE_KEEP;
 
     if (IsRealPlayer(botAI->GetMaster()))
     {

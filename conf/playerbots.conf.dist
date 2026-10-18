@@ -1598,6 +1598,125 @@ AiPlayerbot.CoaArene.IaPiliers = 0
 AiPlayerbot.CoaArene.IaSurvie = 1
 # --- fin CoaArene IA ------------------------------------------------------------------
 
+# --- IA soins/survie des bots CoA (16/10/2026, Ai/Class/Coa/CoaAiObjectContext.cpp) ----------
+# Corrections de l'IA de combat des classes CoA tirees du banc des soins (coa-project/docs/
+# DIAG-banc-soins-survie-20261016.md, DIAG-banc-soins-rotation-20261016.md,
+# DIAG-banc-soins-sorts-jamais-lances-20261016.md). Une option par changement de comportement,
+# toutes a 1 par defaut ; a 0, le comportement d'avant revient tel quel. Relues a chaud,
+# comme les options CoaArene : « .reload config » puis « playerbots rndbot reload » (le kit
+# d'un bot est ensuite reconstruit en 5 s au plus). Aucune recomposition des strategies.
+#
+# Lot 1, classement des sorts : un bouclier ou une reduction de degats courte posee sur un
+# allie ou une zone d'allies est un defensif (et un bouclier de zone, un soin de zone) ; une
+# aura de zone persistante qui soigne est un soin de zone ; une table de surcharges commentee
+# (Defiance, Ignis Ultimatus, Hand of Yogg-Saron, Revelation, Spirit Charge, Moonflow, Kael's
+# Command, Fetid Ward, Carapace Regeneration, Aeon of Renewal, Libram of Grace, Horn of
+# Endurance, Infinite Shield) ; un soin dont la partie soin ne vise que le lanceur n'est plus
+# offert pour soigner un autre (Devour Curse) ; un sort qui exclut son lanceur ou vise un
+# ennemi n'est plus lance sur soi (Temple Guardian, Valkyr's Calling) ; un sort qui soigne sa
+# cible ennemie n'est plus lance du tout (Babify). Journal au demarrage : « coa ia soins: ».
+# Default: 1
+AiPlayerbot.CoaIa.Classement = 1
+
+# Lot 2, posture selon le role : hors combat, une specialisation TANK prend la posture qui est
+# l'aura exigee (CasterAuraSpell) du plus grand nombre de ses sorts defensifs connus, et en
+# change si elle en porte une autre (Guardian Vanguard : Tower Formation 800317 au lieu
+# d'Assault Formation). Sans defensif lie a une posture, rien ne change. Cursed Form du
+# Bloodmage et formes du Venomancer sont hors de la regle (lot 5 : CoaIa.FormeMaudite, VenomancerSoin).
+# Default: 1
+AiPlayerbot.CoaIa.PostureRole = 1
+
+# Lot 3, survie de tous les roles (hors arene 1v1 et duel, ou la survie d'arene garde la main) :
+# defensif leger (recharge <= 60 s) sous AiPlayerbot.MediumHealth ou sur une perte rapide (15
+# points de vie en 4 s au plus), defensif moyen sous AiPlayerbot.LowHealth, gros defensif
+# (recharge >= 120 s) sous 30 % ; candidats tries par force (reduction ou absorption) ; une
+# reduction de degats subis de moins de 10 % n'est plus un defensif (Righteous Tempest) ; soin
+# sur soi sous MediumHealth pour les tanks et les degats (« coa soin soi »), soins de zone qui
+# couvrent le lanceur en dernier recours ; vol de vie en tete de la rotation sous MediumHealth.
+# Default: 1
+AiPlayerbot.CoaIa.Survie = 1
+
+# Lot 3, potion de soin des AiPlayerbot.LowHealth quand aucun defensif n'est pret (avant : sous
+# AiPlayerbot.CriticalHealth seulement). Exige la strategie « potions » et une potion en sac.
+# Default: 1
+AiPlayerbot.CoaIa.SurviePotion = 1
+
+# Lot 4, rotation des soigneurs. ReserveSoigneur : un soigneur EN GROUPE n'attaque avec des sorts
+# payes en mana que si tout le groupe proche est au-dessus de AiPlayerbot.AlmostFullHealth et sa
+# mana au-dessus de ReserveSoigneurMana (en %) ; hors groupe, rien ne change.
+# Default: 1
+AiPlayerbot.CoaIa.ReserveSoigneur = 1
+# Default: 80
+AiPlayerbot.CoaIa.ReserveSoigneurMana = 80
+
+# Lot 4 : un HoT a cible unique (SPELL_ATTR5_LIMIT_N) deja tenu par le bot sur un autre membre
+# avec plus de 30 % de sa duree n'est pas deplace, sauf urgence (cible sous LowHealth, porteur
+# au-dessus de MediumHealth). Nanobot Reconstruction du Tinker.
+# Default: 1
+AiPlayerbot.CoaIa.HotUnique = 1
+
+# Lot 4 : « deja pose » cherche sur le lanceur quand toutes les auras du sort se posent sur lui
+# (Ingredient: Jungle Shrooms du Witch Doctor, relance en boucle). Vaut pour tous les bots CoA.
+# Default: 1
+AiPlayerbot.CoaIa.AuraSurLanceur = 1
+
+# Lot 4 : soins directs tries selon le deficit de la cible et le rendement en mana (vie par
+# point de ressource), le plus rapide d'abord sous AiPlayerbot.CriticalHealth ; remplace le
+# « moins cher d'abord » sous la reserve pour ces soins et pour le soin sur soi du lot 3.
+# Default: 1
+AiPlayerbot.CoaIa.TriSoins = 1
+
+# Lot 4 : les tests d'utilite des actions de soin et de defense suivent ce que le lancement
+# refusera (recharge globale, soin deja pose, HoT tenu ailleurs, refus certains sur la cible) :
+# plus d'action « utile » qui ne lance rien. Sans effet sur le choix des sorts.
+# Default: 1
+AiPlayerbot.CoaIa.UtiliteAlignee = 1
+
+# Lot 5, decision de jeu du 16/10 (Bloodmage) : sous AiPlayerbot.LowHealth en combat, le bot entre
+# en forme maudite a duree bornee (Blood Curse, Accursed Form, Transgression ; ni Eternal Curse
+# ni Sanguine Essence, sans duree ; jamais Moon Gaze, qui l'etourdit) puis lance ses defensifs
+# de forme, un a la fois : Endure the Curse,
+# Eternal Resolve, Wicked Howl. Une forme payee en vie n'est prise que s'il lui reste 15 %
+# de vie apres paiement. Hors arene 1v1 et duel. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.FormeMaudite = 1
+
+# Lot 5, decision de jeu du 16/10 (Venomancer, trois specialisations) : sous 35 % de vie en combat,
+# le bot quitte Beetle Form ou Spider Form, se soigne (Emerald Veil, Shadra's Prayer, interdits en
+# forme), et reprend sa forme a 40 %, quand ses soins ne sont plus prets, ou au bout de 5 s (tank)
+# ou 8 s ; pas de nouvelle sortie avant 15 s (tank) ou 8 s. Hors arene 1v1 et duel.
+# A 0 : comportement d'avant (une sortie en cours se termine par la reprise de la forme).
+# Default: 1
+AiPlayerbot.CoaIa.VenomancerSoin = 1
+
+# C1, 16/10 (coa-project/docs/DIAG-banc-soins-inertie-pyro-sunc-20261016.md) : un bot SOIGNEUR des classes
+# custom (role Heal) dont la cible ennemie devient invalide (hors de vue, creature en esquive, morte...)
+# l'efface SANS quitter le moteur de combat, tant que le coeur le tient en combat ET que lui-meme
+# est blesse ou attaque, ou qu'un membre vivant du groupe a 100 yd au plus est en combat ou blesse. Il continue
+# donc a soigner et reprend une cible par « dps assist ». Combat fini (coeur hors combat, ou plus personne en
+# combat ni blesse) : « drop target » d'origine, retour au moteur hors combat. Avant : « drop target » le
+# rendait au moteur hors combat, sans aucun soin, 40 a 130 s pendant que son groupe mourait.
+# Une cible encore vivante et vue que « dps target » propose (effrayee, metamorphosee, controlee) est
+# GARDEE, sans quoi « dps assist » la reprendrait a chaque tour ; le soigneur ne la frappe alors pas
+# (« coa attack », « coa aoe ») tant qu'elle porte un controle que les degats brisent, peur comprise.
+# Tanks, degats et classes 1 a 11 : inchanges. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.SoigneurResteEnCombat = 1
+
+# I7, 17/10 (Necromancer) : hors combat, hors arene et hors duel, un bot qui porte le kit Life Force
+# et n'a aucun serviteur en leve un (« coa buff »), le moins cher d'abord, un essai toutes les 30 s
+# au plus. Agit seulement si AiPlayerbot.CoaIa.Survie vaut aussi 1. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.LeverServiteur = 1
+
+# I8, 17/10 : reserve de survie hors arene 1v1 et duel. Sous AiPlayerbot.MediumHealth, un bot ni
+# soigneur ni tank qui paie en mana ne lance pas une attaque (« coa attack », « coa aoe ») qui ferait
+# tomber sa mana sous le cout du plus cher de ses defensifs payes en mana prets dans 10 s, plus celui
+# du moins cher de ses soins sur soi (Godblade, Runemaster). Agit seulement si
+# AiPlayerbot.CoaIa.Survie vaut aussi 1. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.ReserveDefensif = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
@@ -2015,6 +2134,59 @@ AiPlayerbot.Arene1v1.Trace = 1
 # Exige AiPlayerbot.CoaArene.IaCommune ou IaRanger (sinon refus `ia_eteinte`).
 # Default: 0 (la commande refuse)
 AiPlayerbot.Arene1v1.Banc = 0
+
+#
+# BANC DES SOINS (Conquest of Azeroth, 13/10/2026) -- coa-project/docs/CONCEPTION-banc-soigneurs.md § 9.
+# A FAIRE TOURNER SUR ARMAGEDDON OU LE PTR, JAMAIS SUR LE LIVE. Pilote : coa-project/outils/banc-soigneurs.py.
+#   .coa soin banc <A1|A2|A3|A4|A5|B1|B2> <essai> <nom[:spe]> [<nom[:spe]> ...]   (MJ, console RA)
+#   .coa soin arret <essai>
+# Le premier nom est le soigneur (volet A) ou le bot seul (volet B) ; en A, le deuxieme est le tank (2 a 5 membres).
+# Des bots aleatoires CoA EN LIGNE, libres (ni groupe, ni combat, ni arene, ni Directeur). Prepares (niveau, spe
+# declaree de tout role, set fixe si AiPlayerbot.Arene1v1.BancSetFixe), groupes, teleportes dans l'enclos ; une
+# creature pacifiee et immortelle les met en combat ; la charge (% des PV max par seconde) est appliquee par le
+# serveur, absorptions et reductions comprises (armure non). Traces `coa soin ...:` dans CoaBots.log.
+# Les options sont relues a chaque commande (`.reload config` suffit).
+# Default: 0 (la commande refuse ; aucun essai, aucune trace)
+AiPlayerbot.CoaSoin.Banc = 0
+
+# Lieu de l'enclos : "<carte> <x> <y> <z>", carte non instanciee, lieu isole. Chaque essai simultane prend une case
+# decalee de 60 yd en x (case 0 = ce point). Vide : la commande refuse (enclos_invalide).
+AiPlayerbot.CoaSoin.Enclos = ""
+
+# Creature de banc (gabarit creature_template). Default: 14830 (Unkillable Test Dummy 60 Warrior)
+AiPlayerbot.CoaSoin.Creature = 14830
+
+# Essais simultanes au plus (1-8). Default: 4
+AiPlayerbot.CoaSoin.Max = 4
+
+# Niveau de preparation des bots (jamais descendus : un bot au-dessus est refuse). Default: 60
+AiPlayerbot.CoaSoin.Niveau = 60
+
+# Charge, en % des PV max PAR SECONDE (relue a chaque commande, pour calibrer sans compiler).
+#   Palier.Depart / Palier.Pas / Palier.DureePalier (s) : escalade (A1, A2, A4, B1).
+#   Palier.Fond : charge de fond (A3, B2). Palier.Constant : charge constante (A5).
+#   DureeMax (s) : plafond de duree de tout essai (A5 : sa duree). 10-1800.
+# Les ecritures sans « Palier. » (et Palier.DureeMax) sont lues en repli.
+AiPlayerbot.CoaSoin.Palier.Depart = 2.0
+AiPlayerbot.CoaSoin.Palier.Pas = 1.0
+AiPlayerbot.CoaSoin.Palier.DureePalier = 30
+AiPlayerbot.CoaSoin.Palier.Fond = 1.0
+AiPlayerbot.CoaSoin.Palier.Constant = 3.0
+AiPlayerbot.CoaSoin.DureeMax = 300
+
+# Corrections du banc du 17/10/2026 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, B-1 a B-4 ;
+# conception § 10). Les valeurs par defaut SONT les corrections ; l'autre valeur rend le banc d'avant.
+# B-1 : 0 = la creature prend les degats (jamais tuee, remise a plein chaque seconde) : le vol de vie periodique
+#       n'est plus nul. 1 = degats a 0 (banc d'avant). Default: 0
+AiPlayerbot.CoaSoin.CreatureInvulnerable = 0
+# B-2 : 0 = aucune potion ni pierre de soin pendant l'essai (sacs non touches). 1 = permises (banc d'avant).
+#       Les recharges sont TOUJOURS remises a zero a la preparation et au retour. Default: 0
+AiPlayerbot.CoaSoin.Potions = 0
+# B-3 : secondes hors combat dans l'enclos avant l'engagement, avec « coa buff » (0-60). 0 = banc d'avant. Default: 10
+AiPlayerbot.CoaSoin.AttenteAvantCombat = 10
+# B-4 : auras dont la pose et la levee sont tracees (`coa soin aura:`), en plus de toute aura payee en vie par
+#       seconde ; 16 ids au plus. Default: "572617 680388" (Immolation Aura, Fetid Ward)
+AiPlayerbot.CoaSoin.AurasSuivies = "572617 680388"
 
 # PvP Restricted Zones (bots will not initiate PvP or defend themselves if attacked)
 AiPlayerbot.PvpProhibitedZoneIds = "2255,656,2361,2362,2363,976,35,2268,3425,392,541,1446,3828,3712,3738,3565,3539,3623,4152,3988,4658,4284,4418,4436,4275,4323,4395,3703,4298,3951"
@@ -3616,6 +3788,37 @@ AiPlayerbot.Coa.HotelDesVentes.TeleportVisible = 0
 AiPlayerbot.Coa.HotelDesVentes.TeleportVisiblePct = 100
 
 ###################################################################################################
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.VenteAnticipee
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMin / Ressources.CoefMax
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParMaison / Ressources.MaxParModele
+#    AiPlayerbot.Coa.HotelDesVentes.Ressources.GarderMaxPiles
+#        Ressources d'evenement (12/10/2026, CONCEPTION-ressources-rares-evenements.md § 4.2, lot 4). Exige
+#        Enable = 1 ; liste des objets : AiPlayerbot.Directeur.ButinObjets. A 1 :
+#        - vendues EN PRIORITE (avant tout autre objet du bot), qualite 4 (epique) comprise ;
+#        - PLACE RESERVEE : hors de MaxParMaison, MaxParModele et MaxActivesParBot, bornees par
+#          Ressources.MaxParMaison (encheres de ressources de bots par maison, EN PLUS de MaxParMaison : les autres
+#          objets gardent tout MaxParMaison) et Ressources.MaxParModele (par ressource et par maison) ;
+#        - prix unitaire = SellPrice x [CoefMin ; CoefMax], bruit, sous-enchere et plancher communs, plafond marchand
+#          BuyPrice x n - 1 (ici 6 x SellPrice) ;
+#        - en depot REEL seulement (Simulation = 0) : PROTEGEES du vidage des sacs (ClearInventory : refresh, revive,
+#          randomize ; au plus GarderMaxPiles piles, au-dela detruites comme avant) et gardees par le bot (ni
+#          vendues au marchand, ni detruites sac plein).
+#        VenteAnticipee : a 1, un bot libre (sans groupe, maitre humain ni affectation) qui porte une ressource la
+#        depose des son prochain passage dans ProcessBot, sans attendre le vidage des sacs (30 min a 2 h 30).
+#        Trace : une ligne `coa hv ressource:` par ressource retenue ; champs ressources_* en fin de `coa hv:`.
+#        Retour arriere : Ressources = 0 (les ressources gardees seront detruites au vidage suivant, comme avant),
+#        puis .reload config et playerbots rndbot reload.
+#        Default: 0, 0, 3, 5, 60, 15, 12
+AiPlayerbot.Coa.HotelDesVentes.Ressources = 0
+AiPlayerbot.Coa.HotelDesVentes.Ressources.VenteAnticipee = 0
+AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMin = 3
+AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMax = 5
+AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParMaison = 60
+AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParModele = 15
+AiPlayerbot.Coa.HotelDesVentes.Ressources.GarderMaxPiles = 12
+
+###################################################################################################
 ###################################################################################################
 #    DIRECTEUR -- BUS DE COMMANDES (lot D2a)
 #
@@ -3879,10 +4082,36 @@ AiPlayerbot.Directeur.EvenementSoins = 0
 #        le bot suit le joueur (maitre humain : son IA de playerbots) et garde son inscription.
 #        Il QUITTE le groupe (dissous s'il n'y reste que le joueur) et reprend sa vie quand plus aucun bot n'est
 #        inscrit a l'evenement de ce joueur (fin, `lever`, stop, bus eteint, deconnexion du joueur), ou a sa
-#        propre deconnexion, ou si l'option est eteinte. Exige EvenementBots = 1.
+#        propre deconnexion, ou si l'option est eteinte. Exige EvenementBots = 1. A la FIN d'un evenement :
+#        voir EvenementGroupeAttenteS (ci-dessous), qui garde les inscrits au groupe le temps du pillage.
 #        Lue par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
 #        Default: 0
 AiPlayerbot.Directeur.EvenementGroupe = 0
+
+#    AiPlayerbot.Directeur.EvenementGroupeAttenteS
+#    AiPlayerbot.Directeur.EvenementGroupeAttenteYd
+#        Fin d'evenement (13/10/2026, remontee R-20261013-1757) : « le groupe se defait tout seul [...] il y a marque
+#        You don't have permission to loot that corpse ». Le droit de butin d'un corps tape en groupe est attache au
+#        GROUPE (Creature::SetLootRecipient garde son guid, Player::isAllowedToLoot le compare) : groupe dissous,
+#        seul celui qui a tape le corps peut encore le piller, et un corps tape par un bot devient interdit.
+#        AttenteS > 0 : a la fin de l'evenement, les inscrits RESTENT dans le groupe du joueur (ligne
+#        `motif=attente`), et le quittent (ligne `motif=quitte raison=...`) au premier de :
+#          - le joueur quitte le groupe (bouton natif « Quitter le groupe ») : `joueur_parti` -- vaut aussi PENDANT
+#            l'evenement ; le joueur renvoie un bot : `plus_dans_le_groupe` ;
+#          - le joueur se deconnecte : `joueur_hors_ligne` ;
+#          - le joueur s'eloigne a plus de AttenteYd du bot, ou change de carte : `joueur_eloigne` ;
+#          - AttenteS secondes apres la fin : `attente_echue` ;
+#          - un nouvel evenement du joueur commence : `nouvel_evenement` (le bot en attente a un maitre humain, sa
+#            re-inscription serait refusee `maitre_humain` ; il rend sa place aux nouveaux inscrits).
+#        Joueur en champ de bataille PENDANT l'evenement : pas « parti » (groupe d'origine) ; pendant l'attente,
+#        autre carte : `joueur_eloigne`. Vol en taxi : `joueur_eloigne`.
+#        Sans humain, il n'y a pas de groupe d'evenement : les evenements entre bots ne changent pas.
+#        AttenteS : borne haute 1800. AttenteYd : borne basse 120 (au-dela de la laisse d'evenement, 110 yd).
+#        Valeur proposee en service : AttenteS = 600 (10 min).
+#        Lue par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0 (sortie a la fin, comportement d'avant), 200
+AiPlayerbot.Directeur.EvenementGroupeAttenteS = 0
+AiPlayerbot.Directeur.EvenementGroupeAttenteYd = 200
 
 #
 #    DIRECTEUR -- LOT D4c (coa-project/docs/SPEC-directeur-D4.md, § 3, § 6)
@@ -4202,6 +4431,26 @@ AiPlayerbot.Directeur.EvenementAncreBot = 0
 #        Default: 0 (rien n'est touche : comportement d'avant, a l'identique)
 AiPlayerbot.Directeur.RessourcesNiveauMonstre = 0
 
+#    AiPlayerbot.Directeur.ButinObjets
+#    AiPlayerbot.Directeur.ButinBots
+#    AiPlayerbot.Directeur.ButinTrace
+#        Butin des bots aux evenements (12/10/2026, coa-project/docs/CONCEPTION-ressources-rares-evenements.md § 4.1,
+#        lot 3, decisions D2 et D6).
+#        ButinObjets : les ressources d'evenement (ids d'item_template, separes par des virgules). Lue aussi par
+#        l'HV des bots (AiPlayerbot.Coa.HotelDesVentes.Ressources). Defaut : les six objets V2.
+#        ButinBots : a 1, un bot d'un groupe en butin LIBRE (le groupe d'evenement du Directeur), qui ne ramassait
+#        rien (FreeMethodLoot = 0), ramasse sur un corps de CREATURE D'EVENEMENT (9100000-9109999) et la seulement :
+#        sa copie des ressources MULTI_DROP (rare, epique), et la verte (exemplaire unique) seulement si aucun membre
+#        du groupe n'est humain. Jamais l'or, jamais un autre objet. Hors groupe ou groupe hors FFA : inchange.
+#        ButinTrace : a 1, une ligne `coa directeur butin:` dans CoaBots.log par ressource ramassee, humain ou bot
+#        (pilleur, bot, inscrit, groupe, objet, qualite, copie, n, source, evenement, carte, zone).
+#        Lues par PlayerbotAIConfig::Initialize seulement : `.reload config` PUIS `playerbots rndbot reload`.
+#        Ligne de preuve a chaque lecture : `coa directeur butin: sous_action=config bots= trace= objets= hv_ressources=`.
+#        Default: (les six objets), 0, 0
+AiPlayerbot.Directeur.ButinObjets = 9100101,9100106,9100107,9100111,9100116,9100117
+AiPlayerbot.Directeur.ButinBots = 0
+AiPlayerbot.Directeur.ButinTrace = 0
+
 #    AiPlayerbot.Directeur.EvenementInvoquesParJoueur
 #        invoques VIVANTS par joueur au plus (1-24), 64 en tout dans le royaume ; au-dela, refus `plein`.
 #        Default: 12
@@ -4228,3 +4477,114 @@ AiPlayerbot.Directeur.EvenementInvocationDistanceYd = 220
 #        `playerbots rndbot reload` (P-125) ; le Directeur relit la valeur chaque seconde.
 #        Default: "" (aucun : rien ne change)
 AiPlayerbot.Directeur.PrimeBanc = ""
+
+#    AiPlayerbot.Directeur.Traqueur
+#        Traqueur de contrat, lot T1 (12/10/2026, coa-project/docs/CONCEPTION-primes-traqueur-bots.md).
+#        L'addon client CoABounty (1.5 et plus) chuchote `COABH` / `TRAQUE` a soi-meme ; le serveur
+#        repond par un chuchotement d'addon de prefixe `COABT` : la distance (arrondie) et la direction
+#        de la cible du contrat sur un bot ACTIF du joueur (coa_dir_arc, genre `contrat`, ecrit par le
+#        service contrats.py ; le jeu ne fait que LIRE). L'addon affiche une fleche et la distance.
+#        Ligne `coa directeur traqueur:` dans CoaBots.log a chaque changement d'etat d'un contrat (prep,
+#        piste, refuge, carte, mort, absent), jamais une par lecture.
+#        0 : la demande est consommee sans reponse (l'addon ne montre rien). A chaud : `.reload config`
+#        PUIS `playerbots rndbot reload` (P-125).
+#        Default: 0
+AiPlayerbot.Directeur.Traqueur = 0
+
+#    AiPlayerbot.Directeur.TraqueurIntervalleMs
+#        Traqueur : une lecture par joueur au plus toutes les N millisecondes (borne 1000-60000) ; le
+#        serveur l'annonce a l'addon, qui demande a ce rythme. Une demande trop tot reste sans reponse.
+#        Default: 2000
+AiPlayerbot.Directeur.TraqueurIntervalleMs = 2000
+
+#    AiPlayerbot.Directeur.Avis
+#        Lot T3 (12/10/2026) : l'onglet Bounty Hunting montre les AVIS DE RECHERCHE du joueur (lignes `W` du
+#        protocole COABH : rang, nom, niveau, zone, prime, temps restant, rival), lus dans la table coa_dir_avis
+#        (ecrite par le service, contrats.py, recit.conf `contrats_avis = 1`). EXIGE la migration
+#        exploitation/directeur/sql/2026_10_12_01_coa_dir_avis.sql (coa-project) : sans la table, la requete
+#        echouerait a chaque rafraichissement. 0 : aucune requete. A chaud : `.reload config` PUIS
+#        `playerbots rndbot reload` (P-125).
+#        Default: 0
+AiPlayerbot.Directeur.Avis = 0
+
+#    AiPlayerbot.Directeur.CarteEvenements
+#        Carte des evenements (17/10/2026) : l'addon client CoAMonde chuchote `COAEV` / `CARTE` (carte du monde
+#        ouverte, toutes les 15 s) ou `COMPTE` (carte fermee, toutes les 30 s) a soi-meme ; le serveur repond par
+#        des chuchotements d'addon `COAEV` : les evenements en cours du continent du joueur (faille, nuit, convoi :
+#        type, variante, zone, position -- pour un convoi, la zone et sa direction seulement --, etape), les tetes
+#        mises a prix (force, zone, cercle de 300 yd DECALE, jamais la position, le nom ni le montant), un resume
+#        des autres continents. Lu dans les registres du jeu au fil monde (objectifs de zone : EXIGE
+#        Directeur.EvenementObjectifs = 1 pour lister un evenement), aucune requete MySQL. Une CARTE toutes les
+#        4 s et un COMPTE toutes les 10 s au plus par joueur. Protocole : CoaDirecteurCarte.inc.
+#        0 : la demande est consommee sans reponse (l'addon ne montre rien). Lue a chaud (`.reload config`).
+#        Default: 0
+AiPlayerbot.Directeur.CarteEvenements = 0
+
+#    AiPlayerbot.Directeur.Reactions
+#        Lots T4-T5 (12/10/2026) : la CIBLE d'un contrat sur un bot reagit selon `params.reaction` de son arc
+#        (tiree au hasard par contrats.py, recit.conf `contrats_reactions`). Lu toutes les 5 s, agi chaque seconde :
+#          defense      : le chasseur vu a 40 yd (ligne de vue), elle l'engage la premiere ;
+#          fuite_gardes : tant que le chasseur est a plus de 250 yd et qu'aucun humain n'est a 150 yd, ses gardes
+#                         (params.gardes, prepares au niveau du chasseur) la rejoignent par un saut cache ; le
+#                         chasseur a 60 yd en vue (ou aux prises avec elle), elle fuit une fois a 120 yd et ses gardes
+#                         a 100 yd du chasseur l'engagent.
+#        Une reaction inconnue de ce binaire : journalisee une fois, la cible reste passive.
+#        Ligne `coa directeur reaction:` dans CoaBots.log a chaque etape. 0 : rien n'est lu.
+#        Default: 0
+AiPlayerbot.Directeur.Reactions = 0
+
+#    AiPlayerbot.Directeur.ReactionsT6
+#        Lot T6 (13/10/2026), exige Directeur.Reactions = 1 :
+#          fuite_monture : le chasseur a 60 yd en vue (ou aux prises), elle MONTE (sorts de monture terrestre qu'elle
+#                          connait, comme l'action « check mount state » ; en exterieur, hors combat) puis fuit a
+#                          200 yd ; sans monture, a pied a 120 yd. A l'arrivee elle descend et reste sur place ; apres
+#                          6 s de souffle, le chasseur de nouveau a 60 yd en vue, elle fuit UNE seconde fois, a pied,
+#                          dans une autre direction si le sol le permet (etape=fuite2), puis ne fuit plus ;
+#          fuite_gardes  : comme T5, plus la meme seconde fuite (et ses gardes a 100 yd du chasseur l'engagent) ;
+#          soudoiement   : le chasseur a 40 yd en vue, elle s'arrete, ne l'attaque pas et lui CHUCHOTE un pot-de-vin
+#                          (params.pot_de_vin_c de l'arc). L'addon CoABounty (traqueur, Directeur.Traqueur = 1)
+#                          montre l'offre et deux boutons ; le service tranche (accepte : contrat clos, elle repart ;
+#                          refus ou 30 s : params.reaction devient `defense`). S'il la frappe : elle se defend.
+#        0 : `fuite_monture` et `soudoiement` sont inconnus (cible passive) et `fuite_gardes` fuit une fois.
+#        Default: 0
+AiPlayerbot.Directeur.ReactionsT6 = 0
+
+###################################################################################################
+# DIRECTEUR, LOT D5 « L'IMPREVU », PARTIE JEU (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md)
+#
+#    Deux verbes du bus, inertes tant qu'ils ne sont pas dans AiPlayerbot.Directeur.Verbes ET que l'ENUM
+#    `verbe` de coa_dir_commande ne contient pas ,'attirer' et ,'soigner' (lu au demarrage : sinon
+#    `colonnes imprevu absentes` au journal et refus `colonnes_imprevu`).
+#    Lues par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
+#
+#    AiPlayerbot.Directeur.Attirer
+#        Verbe `attirer` (mode `patrouille` seul) : 1 a 3 creatures EXISTANTES (jamais invoquees), prises a
+#        120 yd au moins du joueur et a `rayon` (120-180) au plus, courent vers lui hors combat (tenues actives,
+#        setActive) et l'engagent a 25 yd. Laisse prolongee chaque seconde ; renvoyees (evasion) a 60 yd du point
+#        d'engagement, pres d'un autre humain (150 yd), en lieu sans JcJ, d'un chasseur ou d'un inscrit (60 yd),
+#        a l'echeance `duree_s` sans engagement, au stop, a la levee. Lignes `coa directeur attirer:`.
+#        0 : refus `attirer_eteint`, et les creatures en cours rentrent (raison `option`).
+#        Default: 0
+AiPlayerbot.Directeur.Attirer = 0
+
+#    AiPlayerbot.Directeur.Soigneurs
+#        Verbe `soigner` : le bot `cible`, soigneur (strategie de soin), SANS groupe, deja ARRIVE a sa presence pres du joueur
+#        (meme proprietaire, comme une approche C-), compte ce joueur parmi ses cibles de soin (meme crochet que
+#        Directeur.EvenementSoins) jusqu'a `duree_s` (420 s au plus), quand ses PV sont sous `valeur` (40-70 %) ou
+#        que tous deux sont en combat. Hors combat, quand le patient est en combat et sous le seuil, le bot entre en
+#        combat contre une creature qui le frappe (assistance). Jamais pour un joueur High Risk/FFA (refus `ffa`) ni
+#        porteur du drapeau JcJ (refus `pvp`). Lignes `coa directeur soigner:`.
+#        0 : refus `soigner_eteint`, et les soigneurs en cours sont leves (raison `option`).
+#        Default: 0
+AiPlayerbot.Directeur.Soigneurs = 0
+
+#    AiPlayerbot.Directeur.ImprevuBanc
+#        Banc avec les bots en jeu (15/10/2026) : `attirer` admet un BOT ALEATOIRE (sans maitre humain, non
+#        mercenaire) comme `joueur`, `soigner` un bot comme patient (sans presence exigee : le soigneur doit deja etre
+#        a 60 yd de lui, sinon refus `loin`). Tous les autres
+#        refus restent ; `humain_proche` ne compte que les vrais humains. Le bot vise n'est ni groupe ni deplace.
+#        Lignes `coa directeur attirer:` / `soigner:` d'un bot : `banc=1` en fin de ligne. Remise a 0 : les entrees
+#        de banc en cours sortent (raison `banc`).
+#        0 : un humain est exige (refus `pas_humain`), comportement inchange.
+#        Default: 0
+AiPlayerbot.Directeur.ImprevuBanc = 0

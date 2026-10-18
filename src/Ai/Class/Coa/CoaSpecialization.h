@@ -69,6 +69,13 @@ bool EnsureCoaSpecialization(Player* bot);
 // posee, 0 si rien n'a change. EnsureCoaSpecialization ne la defait pas tant que le gladiateur est engage.
 uint32 CoaSpecialiserGladiateur(Player* bot);
 
+// CoA banc des soins (13/10/2026, Ai/Coa/CoaBancSoin.cpp, preparation, FIL MONDE) : la specialisation DECLAREE d'un
+// bot de banc, de TOUT role (soin, tank, degats) -- a l'inverse de CoaSpecialiserGladiateur, qui force les degats.
+// `spe` 0 : la courante. Refuse (code court dans `refus`) une specialisation exclue des bots (101), qui n'est pas de
+// la classe, ou que le module refuse de poser ; sinon la pose si besoin et remet les talents en conformite
+// (ApplyCoaTalents, toujours). Seul un membre d'essai la garde ensuite (garde de EnsureCoaSpecialization).
+bool CoaPoserSpecialisationDeclaree(Player* bot, uint32 spe, std::string& refus);
+
 // Spends a random bot's Character Advancement points the way a player of its specialization
 // would: one ability essence at every even level from 10 (class tree), one talent essence at every
 // odd level from 11 (specialization tree), in the order of the ascensionsidekick.com level build.
@@ -78,6 +85,13 @@ uint32 ApplyCoaTalents(Player* bot);
 // Build table this bot follows now (AiPlayerbot.Coa.BuildSource): 0, 1 or 2; under 3 (experiment),
 // 1 or 2 drawn once and for all from the bot's guid.
 uint32 GetCoaBuildTable(Player const* bot);
+
+// CoA banc des soins, B-7 (17/10/2026) : l'arbre PORTE, « entree:rang,... » (rangs > 0, entrees triees) sur toutes les
+// entrees que les deux tables (kami et d'origine) donnent a la classe. `voulues` : entrees que la table du bot
+// (GetCoaBuildTable) veut a son niveau pour sa specialisation active ; `manquantes` : celles tenues sous le rang voulu ;
+// `enTrop` : entrees tenues au-dessus du rang voulu (0 si non voulues). Deux entrees partageant un sort (IsAliasedEntry)
+// peuvent compter en trop : indicatif. Lecture seule, FIL MONDE.
+std::string CoaArbrePorte(Player const* bot, uint32& voulues, uint32& manquantes, uint32& enTrop);
 
 // Palier d'equipement demande a la selection.
 //

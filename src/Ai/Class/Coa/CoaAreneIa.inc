@@ -69,6 +69,14 @@ constexpr uint32 CoaAreneOuvertureApresSuccesMs = 10 * IN_MILLISECONDS;
 // L'ouverture ne tente ses sorts qu'a cette distance (centre a centre) ET en vue ; au-dela, ou hors de vue, c'est le
 // retour qui mene le bot (banc du 10/10 22:56 Paris, voir CoaAreneOuvertureDansSaFenetre).
 constexpr float CoaAreneOuvertureDistanceMax = 40.0f;
+// Lot 19, ouverture montee : en dessous, les attaques montees partent (Hellfire Trample : cone 24 de 25 yd devant, bond de
+// 25 yd ; marge pour la course de l'adversaire) ; essais a portee sans rien lancer avant de descendre.
+constexpr float CoaAreneOuvertureMonteeDistance = 20.0f;
+constexpr uint8 CoaAreneOuvertureMonteeEssaisMax = 3;
+// Monte plus longtemps que ceci portes ouvertes sans avoir pu frapper (adversaire cache, chemin sans fin) : descendre.
+constexpr uint32 CoaAreneOuvertureMonteeMaxMs = 15 * IN_MILLISECONDS;
+// Preparation : delai laisse au familier avant de monter (monte, plus rien ne part).
+constexpr uint32 CoaArenePreparationMontureDelaiMs = 6 * IN_MILLISECONDS;
 constexpr uint32 CoaArenePreparationReessaiMs = 5 * IN_MILLISECONDS;
 // La cible ne peut pas suivre si elle court a 70 % de la vitesse du bot ou moins (Dazed : 50 %).
 constexpr float CoaAreneVitesseRelative = 0.7f;
@@ -122,6 +130,11 @@ constexpr float CoaAreneSurviePressionPv = 70.0f;
 constexpr float CoaAreneSurvieDangerPv = 50.0f;
 constexpr float CoaAreneSurvieCritiquePv = 30.0f;
 constexpr float CoaAreneSurviePentePv = 15.0f;
+// Lot 18 : age au-dela duquel le pire coup ne compte plus si la vie ne baisse plus.
+constexpr uint32 CoaAreneSurviePireCoupFraisMs = 6000;
+// Lot 18 : fenetre du controle de secours. 10 s : au-dela de la duree utile d'une peur ou d'un etourdissement de
+// controle (Storm Alert 707905 : DurationIndex 8 ; rompue par les degats), en dessous d'une recharge globale de match.
+constexpr uint32 CoaAreneSurvieControleFenetreMs = 10000;
 constexpr float CoaAreneSurvieDotsPct = 25.0f;
 // Palier pression : soin DIRECT seulement sous 80 % (un soin periodique, lui, part a toute vie).
 constexpr float CoaAreneSurvieSoinPressionPv = 80.0f;
@@ -721,7 +734,11 @@ void CoaAreneClore(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat, Unit* ad
                                         etat.survieSorts[1], etat.survieSorts[2], etat.survieSorts[3], etat.soinsSoi,
                                         etat.survieFuites, etat.dispelRefus[1], etat.dispelRefus[2], etat.dispelRefus[3],
                                         etat.dispelRefus[4], etat.refusRessource, etat.soutiens, etat.sourcesHorsVue,
-                                        etat.survieControles));
+                                        etat.survieControles) +
+                    // Lot 20 (13/10) : soins ou boucliers deja poses ecartes (par sort et par 5 s), generateurs de ressource
+                    // lances par la survie, soins retenus par la reserve de mana (par sort et par 5 s). EN FIN de ligne.
+                    Acore::StringFormat(" deja_pose={} survie_generateurs={} survie_reserve_mana={}", etat.dejaPose,
+                                        etat.survieGenerateurs, etat.survieReserveMana));
     etat.actif = false;
     etat.survieNiveau = 0;
     etat.survieFuiteDebutMs = 0;
@@ -958,7 +975,13 @@ CoaAreneEtat& CoaAreneMaj(PlayerbotAI* botAI, Player* bot)
         // Reality a retire 38 % d'un coup, de 40 a 2 %) : soigner et se proteger AVANT d'arriver sous 2X (danger), le
         // dernier recours avant de tomber sous X (critique). Bornes : danger 85 %, critique 60 %, pression au-dessus du
         // danger (+15, 95 au plus). Sans coup recent, les seuils fixes (70/50/30).
-        float const pire = etat.pireCoupMs && getMSTimeDiff(etat.pireCoupMs, maintenant) <= CoaAreneSurviePireCoupMs
+        // Lot 18 (11/10, match humain id=43, Stormbringer 425) : le pire coup ne hausse les seuils que s'il est FRAIS
+        // (CoaAreneSurviePireCoupFraisMs) ou si le bot perd encore de la vie sur le releve de 2 a 4 s. Vie stable ou qui
+        // remonte apres un seul gros coup : retour aux seuils fixes avant les 15 s de la fenetre.
+        uint32 const agePire = etat.pireCoupMs ? getMSTimeDiff(etat.pireCoupMs, maintenant) : CoaAreneSurviePireCoupMs + 1;
+        bool const pirePertinent = agePire <= CoaAreneSurviePireCoupFraisMs ||
+                                   std::max(etat.pvPrec, etat.pvRef) - bot->GetHealthPct() >= 1.0f;
+        float const pire = etat.pireCoupMs && agePire <= CoaAreneSurviePireCoupMs && pirePertinent
             ? etat.pireCoupPct : 0.0f;
         float const seuilCritique = std::max(CoaAreneSurvieCritiquePv, std::min(pire, 60.0f));
         float const seuilDanger = std::max(CoaAreneSurvieDangerPv, std::min(2.0f * pire, 85.0f));
@@ -1958,6 +1981,14 @@ bool CoaAreneEffetAccessoire(SpellEffectInfo const& effet)
     switch (effet.Effect)
     {
         case SPELL_EFFECT_TRIGGER_SPELL:
+        // Lot 20 (13/10, banc du 12/10 : Waves of Time 801277 du Chronomancer lance 3 fois sur 6 a 106-119 yd). Son effet 0
+        // est le declenchement DIFFERE Ascension (183) du recul en cone 802600 (KNOCK_BACK, cible 24, rayon 13 yd), pose
+        // sur le lanceur ; l'effet 1 est le cone (TRIGGER_SPELL, cible 24) du visuel 65633. Le 183 n'etait ni zone ni
+        // accessoire : il comptait comme « valeur propre » et le sort n'etait jamais ecarte, alors que sa portee est
+        // « soi » (RangeEntry 1 : le pre-controle de portee ne juge rien) et que tout son effet est dans le cone. Le
+        // declenchement differe est lu comme un declenchement immediat : accessoire si le sort declenche n'est pas
+        // benefique (ou inerte), sinon il garde sa valeur propre.
+        case SPELL_EFFECT_ASCENSION_TRIGGER_SPELL_DELAYED:
             return declencheNonBenefique(effet.TriggerSpell);
         case SPELL_EFFECT_APPLY_AURA:
             if (effet.TargetA.GetTarget() != TARGET_UNIT_CASTER)
@@ -2268,6 +2299,134 @@ bool CoaAreneOuvertureDansSaFenetre(Player* bot, Unit* adv)
 bool CoaAreneOuvertureEnAttente(CoaAreneEtat const& etat)
 {
     return etat.prochaineOuvertureMs && getMSTimeDiff(etat.prochaineOuvertureMs, getMSTime()) >= 0x80000000u;
+}
+
+/*
+ * Lot 19 (11/10/2026, ~23:30 Paris) -- « Le chevalier est cense etre sur sa monture pour me charger. Je ne vois aucun
+ * bot qui m'attaque en etant invisible. » Mesure : `ouvertures=1` dans 29 bilans d'arene sur 1 686, tous du Ranger 2239 ;
+ * la preparation et l'ouverture n'etaient armees que pour le Ranger de degats a distance (L1).
+ *
+ * Ouvreur FURTIF : le Ranger L1 comme avant (monde ouvert compris) ; sous IaCommune, en arene 1v1 ou en duel, toute
+ * classe CoA dont le kit porte une furtivite (KIND_STEALTH, aura MOD_STEALTH sur soi), hors soigneur. Releve des 68
+ * gladiateurs (character_spell, Spell.dbc, sonde-ouverture-kits.py) : Ranger 21 (Elude 801345, ouverture Flank),
+ * Venomancer 29 (Skulk 800843 ; Parasite 800921, Arachnophobia 804970, Lure 807759 « seulement furtif »), classe 30
+ * (Underwalk 800797, Shade 573038 ; Haunt 573425, Deathstalker 804054, Soulstone Lure 561376), Runemaster 32
+ * (Runeshroud 500288), Witch Hunter 15 (Witching Shroud 805770, apres un critique magique seulement : StrictCheck
+ * la refuse hors de cette fenetre), Felsworn 14 (Twisted Sight 532229, CANALISEE : jamais prise ici). Mirage 501136
+ * (classe 13) est une INVISIBILITE (aura 18) avec copie laissee derriere : pas une furtivite d'approche, non traitee.
+ */
+bool CoaAreneOuvreurFurtif(Player* bot)
+{
+    if (CoaAreneEstRangerDistance(bot))
+        return true;
+    // Revue lot 19 : CoaAreneUnContreUn (deux lectures de champ) avant le role et le kit -- ce predicat est evalue a
+    // chaque tick par le declencheur de preparation pour TOUS les bots CoA, presque tous hors duel et hors arene.
+    return sPlayerbotAIConfig.coaAreneIaCommune && IsAscensionCustomClassId(bot->getClass()) &&
+           CoaAreneUnContreUn(bot) && GetCoaRole(bot) != CoaRole::Heal && ClassHas(bot, KIND_STEALTH);
+}
+
+/*
+ * Ouvreur MONTE (lot 19) : monture DE CLASSE (sort du kit qui pose SPELL_AURA_MOUNTED sur le lanceur) et attaques
+ * qui partent montees (SPELL_ATTR0_ALLOW_WHILE_MOUNTED, attaque au sens d'IsAttack). Releve du kit des 21 classes
+ * (AscensionCustomClassData.h x Spell.dbc) : seul le Knight of Xoroth (17) a les deux -- Xorothian Warsteed 804703
+ * (niveau 20, aura 78 + 32 +20 % de vitesse, « usable in combat, castable while moving » ; une pile de Path of
+ * Hellfire 804787 toutes les 3 s sans degat donne ni recu, 3 piles au niveau 30, 5 au 40), Hellfire Trample 804704
+ * (bond de 25 yd vers l'avant, degats de feu en cone 24 de rayon 25 devant, +X % par pile) et Dreadrider's Stomp
+ * 804702 (feu autour du lanceur, rayon 8). Le module (AscensionXorothAbilities.cpp:147) refuse 804702/804704 sans
+ * l'aura 804703, ou sous Hellbound Charge 807248. Le coeur accepte une monture en arene (Spell::CheckCast,
+ * SPELL_AURA_MOUNTED : IsBattlegroundOrArena) ; StrictCheck le verifie de toute facon.
+ *
+ * Monte, le bot ne lance RIEN d'autre (Spell::CheckCast : SPELL_FAILED_NOT_MOUNTED sans ALLOW_WHILE_MOUNTED, puis banc
+ * de 20 s) : tant qu'il est sur sa monture de classe en engagement, l'ouverture garde la main -- elle approche, frappe
+ * monte, puis DESCEND (CheckMountStateAction ne joue pas en arene : isUseful faux sous InArena -- garde AMONT, toutes
+ * les arenes, pas propre a ce lot. En DUEL elle joue : le multiplicateur ne lui laisse que la descente pendant
+ * l'engagement, et l'ouverture (57) passe devant elle (54) tant que le bot est en selle.)
+ */
+bool CoaAreneEstMontureClasse(SpellInfo const* info)
+{
+    return info && !info->IsPassive() && info->HasAura(SPELL_AURA_MOUNTED);
+}
+
+bool CoaAreneEstAttaqueMontee(Usable const& spell)
+{
+    return IsAttack(spell.kind, false) && spell.info->HasAttribute(SPELL_ATTR0_ALLOW_WHILE_MOUNTED);
+}
+
+// Monture de classe du kit, si le bot connait aussi au moins une attaque montee ; lue une fois par engagement.
+SpellInfo const* CoaAreneMontureOuvreur(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat)
+{
+    if (!etat.montureLue)
+    {
+        etat.montureLue = true;
+        etat.montureClasseId = 0;
+        std::vector<Usable> const kit = KnownAbilities(botAI, bot, [](uint16) { return true; });
+        bool attaque = std::any_of(kit.begin(), kit.end(), [](Usable const& s) { return CoaAreneEstAttaqueMontee(s); });
+        if (attaque)
+            for (Usable const& s : kit)
+                if (CoaAreneEstMontureClasse(s.info))
+                {
+                    etat.montureClasseId = s.info->Id;
+                    break;
+                }
+    }
+    return etat.montureClasseId ? sSpellMgr->GetSpellInfo(etat.montureClasseId) : nullptr;
+}
+
+bool CoaAreneOuvreurMonteArme(Player* bot)
+{
+    return sPlayerbotAIConfig.coaAreneIaCommune && IsAscensionCustomClassId(bot->getClass()) &&
+           CoaAreneUnContreUn(bot) && GetCoaRole(bot) != CoaRole::Heal;
+}
+
+// Sur sa monture de classe (l'aura du sort de monture, posee par lui).
+bool CoaAreneMonteClasse(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat)
+{
+    SpellInfo const* monture = CoaAreneMontureOuvreur(botAI, bot, etat);
+    return monture && bot->HasAura(monture->Id, bot->GetGUID());
+}
+
+// Furtivite d'arene : la premiere furtivite du kit que le coeur accepte, JAMAIS canalisee (Twisted Sight 532229 lierait
+// la vue a un oeil invoque et planterait le bot), hors combat, a pied. Meme filtre de kit que CoaChasseEntrerEnFurtivite
+// (une furtivite, jamais un sort hostile) ; rend le sort parti, nullptr sinon.
+SpellInfo const* CoaAreneEntrerEnFurtivite(PlayerbotAI* botAI, Player* bot)
+{
+    if (bot->IsInCombat() || bot->IsMounted() || !bot->IsAlive() || bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+        return nullptr;
+    std::vector<Usable> furtivites = KnownAbilities(botAI, bot, [](uint16 kind)
+        { return (kind & KIND_STEALTH) && !(kind & (KIND_HOSTILE | KIND_DAMAGE)); });
+    // Une furtivite qui dure (Underwalk, Skulk, Runeshroud, Elude : duree infinie) avant une furtivite breve a recharge
+    // (Shade 573038, 10 s) : la breve tomberait pendant l'approche et sa recharge serait perdue.
+    std::stable_partition(furtivites.begin(), furtivites.end(),
+                          [](Usable const& s) { return s.info->GetMaxDuration() < 0; });
+    for (Usable const& spell : furtivites)
+    {
+        if (spell.info->IsChanneled() || StrictCheck(bot, spell.info, bot) != SPELL_CAST_OK)
+            continue;
+        if (botAI->CastSpell(spell.info->Id, bot))
+            return RecordUsage(USAGE_STEALTH, spell.info);
+    }
+    return nullptr;
+}
+
+// Ligne « ouverture_refus » : une par raison toutes les 5 s (diagnostic du lot 19 : pourquoi un bot furtif ou monte
+// n'ouvre pas). Raisons : 1 l1_inactif, 2 attente, 3 hors_fenetre (le retour mene), 4 fenetre_recul, 5 recul_en_cours,
+// 6 rien_pret (action), 7 adversaire_invalide (action), 8 descente (action, monte).
+constexpr uint32 CoaAreneOuvertureRefusTraceMs = 5 * IN_MILLISECONDS;
+
+void CoaAreneOuvertureRefus(Player* bot, CoaAreneEtat& etat, uint8 raison, float dist, std::string const& suite = "")
+{
+    static char const* const noms[] = { "?", "l1_inactif", "attente", "hors_fenetre", "fenetre_recul",
+                                        "recul_en_cours", "rien_pret", "adversaire_invalide", "descente" };
+    uint32 const maintenant = getMSTime();
+    if (etat.ouvertureRefusRaison == raison && etat.ouvertureRefusMs &&
+        getMSTimeDiff(etat.ouvertureRefusMs, maintenant) < CoaAreneOuvertureRefusTraceMs)
+        return;
+    etat.ouvertureRefusRaison = raison;
+    etat.ouvertureRefusMs = maintenant ? maintenant : 1;
+    CoaAreneJournal(bot, etat, "ouverture_refus", dist, dist,
+                    Acore::StringFormat(" raison={} classe={} furtif={} monte={}{}", raison < 9 ? noms[raison] : "?",
+                                        uint32(bot->getClass()), bot->HasStealthAura() ? 1 : 0,
+                                        bot->IsMounted() ? 1 : 0, suite));
 }
 
 // Un sort de degats du bot est pret (recharge, banc, ressource) ; portee et ligne de vue mises a part.
@@ -3141,6 +3300,109 @@ bool CoaAreneSousDefensif(PlayerbotAI* botAI, Player* bot)
     return false;
 }
 
+// Lot 20 (13/10) : soin DIRECT estime du sort (a la difference de CoaAreneSoinEstime, qui compte aussi les soins
+// periodiques sur toute leur duree : Vital Shield y vaudrait 360 ticks de 2 %), sans bonus de puissance des sorts (HEAL : valeur de base au niveau du
+// bot ; HEAL_PCT : part de la vie maximale du bot ; HEAL_MAX_HEALTH : vie maximale), lui-meme et ses sorts declenches
+// sans aura (deux niveaux). 0 pour un soin a aura (periodique, differe) ou un soin fait par script (valeur 1 au DBC) :
+// sert a ORDONNER les soins directs de la survie, jamais a en ecarter un.
+float CoaAreneSoinDirectEstime(Player* bot, SpellInfo const* info, uint8 profondeur = 0)
+{
+    float total = 0.0f;
+    for (SpellEffectInfo const& effet : info->Effects)
+    {
+        if (!effet.IsEffect())
+            continue;
+        if (effet.Effect == SPELL_EFFECT_HEAL)
+            total += std::max(0, effet.CalcValue(bot));
+        else if (effet.Effect == SPELL_EFFECT_HEAL_PCT)
+            total += std::max(0, effet.CalcValue(bot)) * float(bot->GetMaxHealth()) / 100.0f;
+        else if (effet.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH)
+            total += float(bot->GetMaxHealth());
+        else if ((effet.Effect == SPELL_EFFECT_TRIGGER_SPELL || effet.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE ||
+                  effet.Effect == SPELL_EFFECT_ASCENSION_TRIGGER_SPELL_DELAYED) &&
+                 effet.TriggerSpell && effet.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effet.TriggerSpell))
+                total += CoaAreneSoinDirectEstime(bot, declenche, profondeur + 1);
+    }
+    return total;
+}
+
+/*
+ * Lot 20 (13/10, banc du 12/10, Cultist niveau 60 : trois Dark Infusion 570249 par match, 30 % de la mana de base chacun,
+ * pour 207 de soin au prochain coup recu ; la mana tombait a 0-10 % et Eldritch Mending 574325 puis Abyssal Ward 804670
+ * etaient refuses faute de mana pendant que la vie s'effondrait). RESERVE DE MANA DU MEILLEUR OUTIL DE SURVIE, en survie
+ * d'arene et de duel :
+ *   - outil principal : soin direct sur soi (CoaSoinDirect) ou defensif, paye en mana, hors recharge, ni entrave ni
+ *     sort de forme ; la reserve est le cout du PLUS CHER d'entre eux (le meilleur outil, qu'il faut pouvoir payer) ;
+ *   - un soin SANS soin direct (aura periodique, differe, conditionnel), paye en mana, n'est pas lance s'il laisserait la
+ *     mana sous cette reserve, ou sous CoaAreneSurvieReserveOutilPct de la mana maximale.
+ * Sans outil principal paye en mana (classe sans mana, ou dont tous les vrais soins se paient autrement), rien n'est
+ * retenu. Rien hors de la survie d'arene et de duel.
+ */
+constexpr float CoaAreneSurvieReserveOutilPct = 40.0f;
+
+int32 CoaAreneReserveOutilMana(PlayerbotAI* botAI, Player* bot)
+{
+    if (!bot->GetMaxPower(POWER_MANA))
+        return 0;
+    int32 reserve = 0;
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+             { return (kind & KIND_DEFENSIVE) || ((kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE))); }))
+    {
+        SpellInfo const* info = EffectiveSpell(bot, spell.info);
+        if (info->PowerType != POWER_MANA || bot->HasSpellCooldown(info->Id) || CoaAreneSortEntrave(info) ||
+            CoaAreneSortFormeUsable(bot, spell))
+            continue;
+        if (!(spell.kind & KIND_DEFENSIVE) && !CoaSoinDirect(info) && !CoaSoinDirect(spell.info))
+            continue;
+        reserve = std::max(reserve, info->CalcPowerCost(bot, info->GetSchoolMask()));
+    }
+    return reserve;
+}
+
+// Le soin `spell` (sort effectif `info`) serait retenu par la reserve `reserve` (CoaAreneReserveOutilMana).
+bool CoaAreneSousReserveOutil(Player* bot, Usable const& spell, SpellInfo const* info, int32 reserve)
+{
+    if (reserve <= 0 || !(spell.kind & KIND_HEAL) || (spell.kind & KIND_DEFENSIVE) || info->PowerType != POWER_MANA ||
+        CoaSoinDirect(info) || CoaSoinDirect(spell.info))
+        return false;
+    uint32 const maxMana = bot->GetMaxPower(POWER_MANA);
+    int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+    if (!maxMana || cout <= 0)
+        return false;
+    int32 const apres = int32(bot->GetPower(POWER_MANA)) - cout;
+    // Hors de portee de toute facon (mana sous le cout) : CastFirst l'ecarte deja (refus_ressource), rien a retenir.
+    if (apres < 0)
+        return false;
+    return apres < reserve || float(apres) * 100.0f / float(maxMana) < CoaAreneSurvieReserveOutilPct;
+}
+
+// Lot 20 : le sort rend au LANCEUR la ressource `pouvoir` -- ENERGIZE ou ENERGIZE_PCT de ce type, ou aura PERIODIC_ENERGIZE,
+// visant le lanceur -- lui-meme ou par un sort qu'il declenche sans aura (deux niveaux). Bloodmoon Blast 501611/501614
+// (Bloodmage) : effet 142 (TRIGGER_SPELL_WITH_VALUE) -> 804092, ENERGIZE MiscValue 1 (rage) sur le lanceur, 4 a 10 de
+// rage. Un generateur fait par script seul (Sanguine Rupture, « Rage for each enemy hit ») n'est pas vu.
+bool CoaAreneGenereRessource(SpellInfo const* info, Powers pouvoir, uint8 profondeur = 0)
+{
+    for (SpellEffectInfo const& effet : info->Effects)
+    {
+        if (!effet.IsEffect())
+            continue;
+        uint32 const cible = effet.TargetA.GetTarget();
+        bool const surSoi = !cible || cible == TARGET_UNIT_CASTER;
+        if (surSoi && effet.MiscValue == int32(pouvoir) &&
+            (effet.Effect == SPELL_EFFECT_ENERGIZE || effet.Effect == SPELL_EFFECT_ENERGIZE_PCT ||
+             effet.IsAura(SPELL_AURA_PERIODIC_ENERGIZE)))
+            return true;
+        if ((effet.Effect == SPELL_EFFECT_TRIGGER_SPELL || effet.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE ||
+             effet.Effect == SPELL_EFFECT_ASCENSION_TRIGGER_SPELL_DELAYED) &&
+            effet.TriggerSpell && effet.TriggerSpell != info->Id && profondeur < 2)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effet.TriggerSpell))
+                if (CoaAreneGenereRessource(declenche, pouvoir, profondeur + 1))
+                    return true;
+    }
+    return false;
+}
+
 // Les sorts de survie du palier : `defensifs` puis `mobiles` (soins utilisables en courant), et a part `incantes` (soins
 // incantes). Defensif deja actif et soin periodique deja pose par le bot retires ; au palier pression, seuls les
 // defensifs a recharge courte, le moins cher d'abord.
@@ -3152,15 +3414,21 @@ bool CoaAreneSousDefensif(PlayerbotAI* botAI, Player* bot)
 // NO_PET pour 802121 et 801530, CANT_DO_THAT pour les « Command ») ou pas du tout (807939). Liste explicite, raison
 // lue dans leur description : « for each Undead minion destroyed », « Siphon life from your undead minions »,
 // « Command your Undead minions », « only ever targets Raised minions ».
+// I6 du 17/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md) : la liste nommait deux rangs de Sacrifice Undead
+// (805027 rang 1, 807939 rang 3) ; Usable.info porte le rang le plus haut connu, et le rang 5 807941 (38 personnages au
+// 17/10) lui echappait -- 14 lancers a vide sur 16 au banc ia-B. Le premier rang de la chaine (spell_ranks : 805027 ->
+// 807938, 807939, 807940, 807941) est teste en plus de l'id : tous les rangs sont couverts, et ceux a venir.
 bool CoaAreneSortParServiteur(uint32 id)
 {
-    switch (id)
-    {
-        case 807939: case 805027: case 802121: case 504868: case 801530:
-            return true;
-        default:
-            return false;
-    }
+    for (uint32 const candidat : { id, sSpellMgr->GetFirstSpellInChain(id) })
+        switch (candidat)
+        {
+            case 807939: case 805027: case 802121: case 504868: case 801530:
+                return true;
+            default:
+                break;
+        }
+    return false;
 }
 
 // Le bot a au moins une unite controlee vivante issue d'une invocation (familier, serviteurs, gardiens).
@@ -3208,7 +3476,9 @@ CoaAreneSurvieListes CoaAreneSurvieSorts(PlayerbotAI* botAI, Player* bot, uint8 
              { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
-        if (((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaAreneSortFormeUsable(bot, spell))
+        // Lot 20 : aussi tout soin sans soin direct dont l'aura est deja posee par le bot (CoaSoinDejaPose ; Vital Shield).
+        if (((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaSoinDejaPose(bot, spell, info, bot) ||
+            CoaAreneSortFormeUsable(bot, spell))
             continue;
         if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
             continue;
@@ -3222,6 +3492,14 @@ CoaAreneSurvieListes CoaAreneSurvieSorts(PlayerbotAI* botAI, Player* bot, uint8 
         }
         (CoaAreneSortMobile(bot, info) ? l.mobiles : l.incantes).push_back(spell);
     }
+    // Lot 20 (13/10, banc du 12/10 : le Bloodmage lancait Vital Shield, soin de 2 % toutes les 5 s, avant Fleshcraft 801952,
+    // 50 % de la vie) : aux paliers danger et critique, le soin DIRECT le plus fort d'abord (CoaAreneSoinDirectEstime), puis les
+    // soins a aura (periodiques, differes) dans leur ordre. Au palier pression, l'ordre du kit reste (le soin periodique y
+    // est le premier outil).
+    if (niveau >= COA_SURVIE_DANGER)
+        for (std::vector<Usable>* soins : { &l.mobiles, &l.incantes })
+            std::stable_sort(soins->begin(), soins->end(), [bot](Usable const& a, Usable const& b)
+                { return CoaAreneSoinDirectEstime(bot, EffectiveSpell(bot, a.info)) > CoaAreneSoinDirectEstime(bot, EffectiveSpell(bot, b.info)); });
     return l;
 }
 
@@ -3235,13 +3513,21 @@ bool CoaAreneSoinPret(PlayerbotAI* botAI, Player* bot)
 {
     Unit* adv = CoaAreneAdversaireVivant(bot, CoaAreneEtatDe(botAI));
     int8 incanteLibre = -1;  // lu une fois, et seulement si un soin incante est pret
+    int32 reserveOutil = -1; // lot 20 : lue une fois, et seulement si un soin est pret
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
              { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
         if (CoaAreneSortEntrave(info) || CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id) ||
             CoaAreneSortFormeUsable(bot, spell) ||
-            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || !CoaAreneSortPret(botAI, bot, spell))
+            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaSoinDejaPose(bot, spell, info, bot) ||
+            !CoaAreneSortPret(botAI, bot, spell))
+            continue;
+        // Lot 20 : un soin que la reserve de mana du meilleur outil retient n'est pas pret pour la survie (sinon il
+        // bloquerait les attaques longues sans jamais partir).
+        if (reserveOutil < 0)
+            reserveOutil = CoaAreneReserveOutilMana(botAI, bot);
+        if (CoaAreneSousReserveOutil(bot, spell, info, reserveOutil))
             continue;
         if (CoaAreneSortMobile(bot, info))
             return true;
@@ -3460,7 +3746,7 @@ void CoaAreneReserveSoin(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& u
         if (bot->HasSpellCooldown(info->Id) || CoaAreneSortEntrave(info) || CoaAreneSortFormeUsable(bot, spell) ||
             (!soinDirect && !(spell.kind & KIND_HOT)) ||
             (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id))) ||
-            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)))
+            ((spell.kind & KIND_HOT) && CoaAreneAuraDeSoi(bot, spell.info, info)) || CoaSoinDejaPose(bot, spell, info, bot))
             continue;
         if (!CoaAreneSortMobile(bot, info))
         {
@@ -3528,6 +3814,30 @@ void CoaAreneNoterRefusRessource(PlayerbotAI* botAI, Player* bot, SpellInfo cons
     derniere = maintenant ? maintenant : 1;
     ++etat.refusRessource;
     CoaAreneTracerSort(botAI, bot, info, target, SPELL_FAILED_NO_POWER, "refus_ressource");
+}
+
+// Lot 20 : soin ou bouclier ecarte parce que son aura est deja posee par le bot (CastFirst, CoaSoinDejaPose), en arene 1v1
+// ou en duel : une ligne « deja_pose » par sort et par 5 s, comptee au bilan ; et la trace du sort pour un gladiateur trace.
+void CoaAreneNoterDejaPose(PlayerbotAI* botAI, Player* bot, SpellInfo const* info, Unit* target, bool trace)
+{
+    CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+    if (!etat.actif)
+        return;
+    uint32 const maintenant = getMSTime();
+    uint32& derniere = etat.dejaPoseTraceMs[info->Id];
+    if (derniere && getMSTimeDiff(derniere, maintenant) < 5 * IN_MILLISECONDS)
+        return;
+    derniere = maintenant ? maintenant : 1;
+    ++etat.dejaPose;
+    Aura const* aura = target ? target->GetAura(info->Id, bot->GetGUID()) : nullptr;
+    Unit* adv = CoaAreneAdversaireVivant(bot, etat);
+    float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
+    CoaAreneJournal(bot, etat, "deja_pose", d, d,
+                    Acore::StringFormat(" niveau={} sort={} cible_soi={} reste_ms={} pv={:.0f}",
+                                        CoaAreneSurvieNom(etat.survieNiveau), info->Id, target == bot ? 1 : 0,
+                                        aura ? aura->GetDuration() : -2, bot->GetHealthPct()));
+    if (trace)
+        CoaAreneTracerSort(botAI, bot, info, target, SPELL_CAST_OK, "deja_pose");
 }
 
 // Au contact d'une cible qui peut suivre, et un sort de rupture est pret.
@@ -3649,7 +3959,8 @@ public:
         // Un Ranger furtif (Elude) ouvre par « coa arene ouverture » -- mais seulement quand elle peut tirer (en vue, a
         // 40 yd au plus) et n'attend pas : ailleurs, c'est le retour qui le mene (CoaAreneOuvertureDansSaFenetre, banc
         // du 10/10 22:56). Les autres classes n'ont pas cette ouverture : furtives, elles reviennent toujours.
-        if (bot->HasStealthAura() && CoaAreneEstRangerDistance(bot) && CoaAreneOuvertureDansSaFenetre(bot, adv) &&
+        // Lot 19 : tout ouvreur furtif (CoaAreneOuvreurFurtif), plus seulement le Ranger.
+        if (bot->HasStealthAura() && CoaAreneOuvreurFurtif(bot) && CoaAreneOuvertureDansSaFenetre(bot, adv) &&
             !CoaAreneOuvertureEnAttente(etat))
             return false;
         uint8 const raison = CoaAreneRetourRaison(botAI, bot, adv);
@@ -3713,7 +4024,8 @@ public:
     }
 };
 
-// Le bot est furtif pendant l'engagement (Elude avant le combat, ou Dust Toss en combat) : ouvrir.
+// Le bot est furtif pendant l'engagement (Elude avant le combat, ou Dust Toss en combat) : ouvrir. Lot 19 : tout ouvreur
+// furtif (CoaAreneOuvreurFurtif), et l'ouvreur MONTE tant qu'il est sur sa monture de classe en engagement.
 class CoaAreneOuvertureTrigger : public Trigger
 {
 public:
@@ -3721,17 +4033,36 @@ public:
 
     bool IsActive() override
     {
-        if (!CoaAreneEstRangerDistance(bot) || !bot->HasStealthAura())
+        bool const furtif = bot->HasStealthAura() && CoaAreneOuvreurFurtif(bot);
+        bool const monteArme = !furtif && bot->IsMounted() && CoaAreneOuvreurMonteArme(bot);
+        if (!furtif && !monteArme)
             return false;
-        CoaAreneEtat const& etat = CoaAreneMaj(botAI, bot);
-        if (!CoaAreneL1Actif(etat) || !etat.adversaire || CoaAreneReculEnCours(etat))
+        CoaAreneMaj(botAI, bot);
+        CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
+        if (monteArme)
+        {
+            // Monte sur sa monture de classe, portes ouvertes : l'ouverture garde la main jusqu'a la descente (rien
+            // d'autre ne part monte). En preparation, rien a faire : on attend les portes, piles de Path of Hellfire.
+            return CoaAreneEnCombat(etat) && CoaAreneMonteClasse(botAI, bot, etat);
+        }
+        if (!CoaAreneL1Actif(etat) || !etat.adversaire)
+        {
+            if (etat.actif && etat.bras && !etat.preparation)
+                CoaAreneOuvertureRefus(bot, etat, 1, -1.0f);
             return false;
+        }
+        if (CoaAreneReculEnCours(etat))
+        {
+            CoaAreneOuvertureRefus(bot, etat, 5, -1.0f);
+            return false;
+        }
         if (etat.prochaineOuvertureMs && getMSTimeDiff(etat.prochaineOuvertureMs, getMSTime()) >= 0x80000000u)
             return false;
         // Blackjack et Dust Toss ne rompent pas la furtivite (SPELL_ATTR1_ALLOW_WHILE_STEALTHED, lu dans Spell.dbc) :
         // apres un sap, le bot est encore furtif, au contact d'une cible etourdie. C'est au recul de jouer d'abord ;
         // ouvrir la tout de suite romprait le sap au contact.
         Unit* adv = ObjectAccessor::GetUnit(*bot, etat.adversaire);
+        float const dist = adv ? bot->GetExactDist2d(adv) : -1.0f;
         // Arene ou duel : hors de sa fenetre de tir (hors de vue, ou a plus de 40 yd), l'ouverture laisse le bot au
         // retour, qui suit un chemin -- sa propre approche en ligne droite restait bloquee derriere un pilier ou contre
         // un relief (banc du 10/10 22:56, voir CoaAreneOuvertureDansSaFenetre). Monde ouvert : inchange (pas de retour).
@@ -3740,19 +4071,50 @@ public:
         if (adv && adv->IsAlive() && (etat.cadre == COA_ARENE_ARENE || etat.cadre == COA_ARENE_DUEL) &&
             CoaAreneRetourArme(bot) && !CoaAreneOuvertureDansSaFenetre(bot, adv) &&
             CoaAreneRetourRaison(botAI, bot, adv) != COA_RETOUR_AUCUN)
+        {
+            CoaAreneOuvertureRefus(bot, etat, 3, dist);
             return false;
-        if (adv && adv->IsAlive() && CoaAreneFenetreDeRecul(bot, adv))
+        }
+        // Le recul apres un sap n'existe que pour le Ranger L1 : les autres ouvreurs furtifs n'ont pas a l'attendre.
+        if (adv && adv->IsAlive() && CoaAreneEstRangerDistance(bot) && CoaAreneFenetreDeRecul(bot, adv))
         {
             float bas = 0.0f, haut = 0.0f;
             CoaArenePlage(botAI, bot, bas, haut);
             if (CoaAreneDistanceCombat(bot, adv) < CoaAreneDistanceVisee(bas, haut) - 5.0f)
+            {
+                CoaAreneOuvertureRefus(bot, etat, 4, dist);
                 return false;
+            }
         }
         return true;
     }
 };
 
-// Arene portes fermees, ou duel en compte a rebours : prendre la furtivite (Elude) pour ouvrir depuis elle.
+// Arene portes fermees, ou duel en compte a rebours : prendre la furtivite (Elude...) pour ouvrir depuis elle, ou monter
+// sa monture de classe (Knight of Xoroth) pour ouvrir en chargeant. Lot 19 : tout ouvreur furtif ou monte.
+// Ce qu'il y a a faire : 0 rien, 1 monter, 2 furtivite. Monter d'abord : la monture romprait la furtivite.
+bool CoaAreneAFamilier(Player* bot);
+
+uint8 CoaArenePreparationAFaire(PlayerbotAI* botAI, Player* bot, CoaAreneEtat& etat)
+{
+    if (bot->IsInCombat() || !bot->IsAlive())
+        return 0;
+    // Monte, plus rien ne part (NOT_MOUNTED) ; furtif, le sort d'invocation romprait la furtivite : laisser d'abord le
+    // familier se lever (« coa arene familier », 24), ou 6 s de preparation au plus si le kit n'en a pas ou si
+    // l'invocation echoue.
+    // Revue lot 19 : sans IaCommune, « coa arene familier » ne tourne pas (son declencheur l'exige) et familierAucun
+    // n'est jamais pose -- le Ranger L1 (IaRanger seul) attendait 6 s pour rien, et ne prenait plus Elude pendant les
+    // 3 s du compte a rebours d'un duel. Il n'attend plus, comme avant le lot 19.
+    bool const familierFait = !sPlayerbotAIConfig.coaAreneIaCommune || etat.familierAucun || etat.familiers ||
+                              CoaAreneAFamilier(bot) ||
+                              (etat.debutMs && getMSTimeDiff(etat.debutMs, getMSTime()) >= CoaArenePreparationMontureDelaiMs);
+    if (CoaAreneOuvreurMonteArme(bot) && CoaAreneMontureOuvreur(botAI, bot, etat))
+        return CoaAreneMonteClasse(botAI, bot, etat) || !familierFait ? 0 : 1;
+    if (CoaAreneOuvreurFurtif(bot) && ClassHas(bot, KIND_STEALTH) && !bot->HasStealthAura() && familierFait)
+        return 2;
+    return 0;
+}
+
 class CoaArenePreparationTrigger : public Trigger
 {
 public:
@@ -3760,12 +4122,16 @@ public:
 
     bool IsActive() override
     {
-        if (!CoaAreneEstRangerDistance(bot) || bot->HasStealthAura() || bot->IsInCombat() || !ClassHas(bot, KIND_STEALTH))
+        // Test court d'abord : ni furtif possible, ni monture a chercher.
+        if (bot->IsInCombat() || (!CoaAreneOuvreurFurtif(bot) && !CoaAreneOuvreurMonteArme(bot)))
             return false;
-        CoaAreneEtat const& etat = CoaAreneMaj(botAI, bot);
+        CoaAreneMaj(botAI, bot);
+        CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
         if (!etat.actif || !etat.bras || !etat.preparation)
             return false;
-        return !etat.prochainePreparationMs || getMSTimeDiff(etat.prochainePreparationMs, getMSTime()) < 0x80000000u;
+        if (etat.prochainePreparationMs && getMSTimeDiff(etat.prochainePreparationMs, getMSTime()) >= 0x80000000u)
+            return false;
+        return CoaArenePreparationAFaire(botAI, bot, etat) != 0;
     }
 };
 
@@ -4812,6 +5178,9 @@ public:
             for (Usable const& spell : l.defensifs)
                 if (!defensifsCourts || CoaAreneRechargeMs(EffectiveSpell(bot, spell.info)) <= CoaAreneSurvieRechargeLegereMs)
                     liste.push_back(spell);
+        // Lot 20 : reserve de mana du meilleur outil de survie (CoaAreneReserveOutilMana), lue une fois par tour.
+        int32 const reserveOutil = CoaAreneReserveOutilMana(botAI, bot);
+        Reserver(etat, adv, reserveOutil, liste);
         if (Noter(etat, adv, CastFirst(botAI, bot, liste, bot, USAGE_DEFENSIVE)))
             return true;
 
@@ -4823,15 +5192,36 @@ public:
                                                  [&](Usable const& spell) { return CoaAreneSortPret(botAI, bot, spell); });
             if (incantePret && Fuir(etat, adv))
                 return true;
-            if (niveau == COA_SURVIE_CRITIQUE && Noter(etat, adv, CastFirst(botAI, bot, l.incantes, bot, USAGE_DEFENSIVE)))
-                return true;
+            if (niveau == COA_SURVIE_CRITIQUE)
+            {
+                std::vector<Usable> incantes = l.incantes;
+                Reserver(etat, adv, reserveOutil, incantes);
+                if (Noter(etat, adv, CastFirst(botAI, bot, incantes, bot, USAGE_DEFENSIVE)))
+                    return true;
+            }
         }
+        // Lot 20 (13/10, banc du 12/10, Bloodmage : Fleshcraft 801952 et ses autres soins refuses faute de rage -- 0 a 44
+        // au refus --, alors que Bloodmoon Blast, qui en genere, partait 0 a 2 fois par match) : aux paliers danger et
+        // critique, rien n'ayant pu partir, si un soin ou un defensif du palier n'attend QUE sa ressource, lancer d'abord
+        // un sort qui la genere (CoaAreneGenereRessource). Le soin passe devant des que la ressource le permet : il est
+        // tente avant, a chaque tour.
+        if (niveau >= COA_SURVIE_DANGER && Generer(etat, adv, l, liste))
+            return true;
         // Ni soin ni defensif n'a pu partir (11/10, match humain id=11 : Stormancer 488, a 44 % puis 33 %, n'a rien lance --
         // son seul soin, Invigorating Surge, coute 25 « Static », une ressource de script que le bot ne suit pas) : aux
         // paliers danger et critique, un CONTROLE sur l'adversaire pour casser la pression (etourdir, effrayer, enraciner,
         // ralentir), s'il est en vue. Rien a dire de plus au cas ou il est deja controle : CastFirst ecarte deja un sort
         // refuse sur sa cible (CoaRefusCibleCertain) et la regle « sous controle » du coeur.
-        if (niveau >= COA_SURVIE_DANGER && adv && vu && !etat.survieFuiteDebutMs)
+        // Lot 18 (11/10, match humain id=43 : Stormbringer 425 a relance Storm Alert toutes les ~2 s pendant 17 s, PV
+        // stables a 42 %, sans une attaque -- la peur, rompue par les degats, disparaissait aussitot) : au plus UN
+        // controle par fenetre, et seulement sous une pression REELLE : le bot perd de la vie sur le releve de 2 a 4 s, ou
+        // l'adversaire incante. Sinon la survie rend la main (false) : l'attaque reprend ce tick-ci.
+        uint32 const maintenantSurvie = getMSTime();
+        bool const fenetreLibre = !etat.survieControleMs ||
+                                  getMSTimeDiff(etat.survieControleMs, maintenantSurvie) >= CoaAreneSurvieControleFenetreMs;
+        bool const pressionReelle = std::max(etat.pvPrec, etat.pvRef) - pv >= 1.0f ||
+                                    (adv && adv->IsNonMeleeSpellCast(false, false, true));
+        if (niveau >= COA_SURVIE_DANGER && adv && vu && !etat.survieFuiteDebutMs && fenetreLibre && pressionReelle)
         {
             std::vector<Usable> controles = KnownAbilities(botAI, bot, [](uint16 kind)
                 { return (kind & KIND_CONTROL) && (kind & KIND_HOSTILE) && !(kind & KIND_HEAL); });
@@ -4847,6 +5237,7 @@ public:
             {
                 RecordUsage(USAGE_DEFENSIVE, cast);
                 ++etat.survieControles;
+                etat.survieControleMs = maintenantSurvie ? maintenantSurvie : 1;
                 float const d = bot->GetExactDist2d(adv);
                 CoaAreneJournal(bot, etat, "survie_controle", d, d,
                                 Acore::StringFormat(" niveau={} sort={} pv={:.0f}", CoaAreneSurvieNom(niveau), cast->Id, pv));
@@ -4874,6 +5265,105 @@ public:
 
 private:
     uint8 niveau;
+
+    // Lot 20 : retire de `liste` les soins que la reserve de mana du meilleur outil retient (CoaAreneSousReserveOutil) ;
+    // une ligne « survie_reserve_mana » par sort et par 5 s, comptee au bilan.
+    void Reserver(CoaAreneEtat& etat, Unit* adv, int32 reserve, std::vector<Usable>& liste)
+    {
+        if (reserve <= 0 || liste.empty())
+            return;
+        uint32 const maintenant = getMSTime();
+        liste.erase(std::remove_if(liste.begin(), liste.end(), [&](Usable const& spell)
+            {
+                SpellInfo const* info = EffectiveSpell(bot, spell.info);
+                if (!CoaAreneSousReserveOutil(bot, spell, info, reserve))
+                    return false;
+                uint32& derniere = etat.reserveManaTraceMs[info->Id];
+                if (!derniere || getMSTimeDiff(derniere, maintenant) >= 5 * IN_MILLISECONDS)
+                {
+                    derniere = maintenant ? maintenant : 1;
+                    ++etat.survieReserveMana;
+                    float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
+                    CoaAreneJournal(bot, etat, "survie_reserve_mana", d, d,
+                                    Acore::StringFormat(" niveau={} sort={} cout={} mana={} reserve={} mana_pct={:.0f} pv={:.0f}",
+                                                        CoaAreneSurvieNom(niveau), info->Id,
+                                                        info->CalcPowerCost(bot, info->GetSchoolMask()),
+                                                        bot->GetPower(POWER_MANA), reserve, bot->GetPowerPct(POWER_MANA),
+                                                        bot->GetHealthPct()));
+                }
+                return true;
+            }), liste.end());
+    }
+
+    // Lot 20 : generateur de la ressource qui manque au premier soin ou defensif du palier (voir Execute).
+    bool Generer(CoaAreneEtat& etat, Unit* adv, CoaAreneSurvieListes const& l, std::vector<Usable> const& liste)
+    {
+        // Par ressource, le premier sort de survie (ordre du palier : liste du tour, puis soins incantes, puis defensifs)
+        // qui n'attend qu'elle : ni en recharge, ni payable, paye dans une ressource autre que la vie. Une ressource dont
+        // aucun generateur ne part laisse sa chance a la suivante (un soin bloque par la mana sans generateur ne doit pas
+        // masquer un soin bloque par la rage qui en a un).
+        struct Manque { SpellInfo const* pour; Powers pouvoir; int32 manque; };
+        std::vector<Manque> manques;
+        auto examiner = [&](std::vector<Usable> const& sorts)
+        {
+            for (Usable const& spell : sorts)
+            {
+                SpellInfo const* info = EffectiveSpell(bot, spell.info);
+                if (info->PowerType >= MAX_POWERS || info->PowerType == POWER_HEALTH || bot->HasSpellCooldown(info->Id) ||
+                    CoaPeutPayer(bot, info) ||
+                    std::any_of(manques.begin(), manques.end(), [info](Manque const& m) { return m.pouvoir == Powers(info->PowerType); }))
+                    continue;
+                int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+                if (cout > 0)
+                    manques.push_back({ info, Powers(info->PowerType), cout - int32(bot->GetPower(Powers(info->PowerType))) });
+            }
+        };
+        examiner(liste);
+        examiner(l.incantes);
+        examiner(l.defensifs);
+        // Revue du lot 20 : rien n'attend sa ressource -> ni recherche de generateur ni « coa attack » compte comme tente
+        // (RecordUsage) a chaque tour de survie sans soin.
+        if (manques.empty())
+            return false;
+        SpellInfo const* cast = nullptr;
+        Manque const* retenu = nullptr;
+        for (Manque const& m : manques)
+        {
+            // Les generateurs : tout sort connu (attaque ou sort sans marque) qui rend cette ressource au lanceur et ne se
+            // paie pas dans cette ressource ; ni soin (deja tente), ni posture, ni furtivite, ni entrave, ni sort de forme.
+            std::vector<Usable> surAdv, surSoi;
+            for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+                     { return !(kind & (KIND_HEAL | KIND_STANCE | KIND_STEALTH)); }))
+            {
+                SpellInfo const* info = EffectiveSpell(bot, spell.info);
+                if (info->PowerType == uint32(m.pouvoir) || CoaAreneSortEntrave(info) || CoaAreneSortFormeUsable(bot, spell) ||
+                    !CoaAreneGenereRessource(info, m.pouvoir))
+                    continue;
+                ((spell.kind & KIND_HOSTILE) ? surAdv : surSoi).push_back(spell);
+            }
+            if (adv && !surAdv.empty())
+                cast = CastFirst(botAI, bot, surAdv, adv, USAGE_ATTACK);
+            if (!cast && !surSoi.empty())
+                cast = CastFirst(botAI, bot, surSoi, bot, USAGE_ATTACK);
+            if (cast)
+            {
+                retenu = &m;
+                break;
+            }
+        }
+        if (!RecordUsage(USAGE_ATTACK, cast) || !retenu)
+            return false;
+        SpellInfo const* pour = retenu->pour;
+        Powers const pouvoir = retenu->pouvoir;
+        int32 const manque = retenu->manque;
+        ++etat.survieGenerateurs;
+        float const d = adv ? bot->GetExactDist2d(adv) : -1.0f;
+        CoaAreneJournal(bot, etat, "survie_generateur", d, d,
+                        Acore::StringFormat(" niveau={} sort={} pour={} ressource={} manque={} pv={:.0f}",
+                                            CoaAreneSurvieNom(niveau), cast->Id, pour->Id, uint32(pouvoir), manque,
+                                            bot->GetHealthPct()));
+        return true;
+    }
 
     bool Noter(CoaAreneEtat& etat, Unit* adv, SpellInfo const* cast)
     {
@@ -4979,16 +5469,29 @@ public:
     {
         CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
         uint32 const maintenant = getMSTime();
+
+        // Lot 19 : monte sur sa monture de classe (le declencheur ne l'arme qu'en engagement, IaCommune, 1v1 ou duel).
+        if (!bot->HasStealthAura() && bot->IsMounted() && CoaAreneOuvreurMonteArme(bot) &&
+            CoaAreneMonteClasse(botAI, bot, etat))
+            return OuvrirMonte(etat);
+
         etat.prochaineOuvertureMs = maintenant + CoaAreneOuvertureReessaiMs;
 
         Unit* adv = etat.adversaire ? ObjectAccessor::GetUnit(*bot, etat.adversaire) : nullptr;
         if (!adv || !adv->IsInWorld() || !adv->IsAlive() || !bot->IsValidAttackTarget(adv))
+        {
+            CoaAreneOuvertureRefus(bot, etat, 7, -1.0f);
             return false;
+        }
 
         context->GetValue<Unit*>("current target")->Set(adv);
         bot->SetSelection(adv->GetGUID());
 
+        // Le controle d'ouverture (sap) puis le recul n'existent que pour le Ranger L1 ; les autres ouvreurs furtifs
+        // ouvrent par leur plus gros coup « seulement furtif », puis le reste (lot 19).
+        bool const ranger = CoaAreneEstRangerDistance(bot);
         bool const horsCombat = !adv->IsInCombat();
+        bool const furtifAvant = bot->HasStealthAura();
         // Le kit entier sert a choisir la distance d'approche ; la liste de lancement, elle, est filtree d'abord.
         std::vector<Usable> const ouvertures = KnownAbilities(botAI, bot, [](uint16 kind) { return IsAttack(kind, false); });
 
@@ -5002,14 +5505,21 @@ public:
                 ServerFacade::instance().SetFacingTo(bot, adv);
             }
             // Revue M3 : DropUncastableHere AVANT le tri du burst (qui compte ce qui peut partir), puis l'ordre de
-            // l'ouverture par-dessus : controle (cible hors combat), puis « seulement furtif », puis le reste, dont
-            // les consommateurs dans l'ordre que le burst leur a donne (tris stables).
+            // l'ouverture par-dessus : controle (cible hors combat, Ranger), puis « seulement furtif », puis le reste,
+            // dont les consommateurs dans l'ordre que le burst leur a donne (tris stables).
             std::vector<Usable> pretes = ouvertures;
+            // Revue lot 19 (arbitrage) : un ouvreur furtif autre que le Ranger qui a un coup « seulement furtif » hors
+            // recharge ne lance QUE celui-la -- sinon une attaque ordinaire a 40 yd romprait la furtivite avant le
+            // contact. Rien de pret a cette distance : l'approche ci-dessous l'amene a portee de ce coup.
+            if (!ranger && std::any_of(ouvertures.begin(), ouvertures.end(), [this](Usable const& s)
+                    { return s.info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !bot->HasSpellCooldown(s.info->Id); }))
+                pretes.erase(std::remove_if(pretes.begin(), pretes.end(), [](Usable const& s)
+                    { return !s.info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED); }), pretes.end());
             DropUncastableHere(bot, adv, pretes);
             CoaAreneBurst const burst = CoaAreneOrdonnerBurst(botAI, bot, adv, pretes);
             std::stable_partition(pretes.begin(), pretes.end(),
                 [](Usable const& spell) { return spell.info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED); });
-            if (horsCombat)
+            if (horsCombat && ranger)
                 std::stable_partition(pretes.begin(), pretes.end(),
                     [](Usable const& spell) { return (spell.kind & KIND_CONTROL) != 0; });
             if (SpellInfo const* cast = RecordUsage(USAGE_ATTACK, CastFirst(botAI, bot, pretes, adv, USAGE_ATTACK)))
@@ -5019,8 +5529,10 @@ public:
                 bool const controle = std::any_of(pretes.begin(), pretes.end(),
                     [cast](Usable const& s) { return s.info == cast && (s.kind & KIND_CONTROL); });
                 CoaAreneJournal(bot, etat, "ouverture", avant, bot->GetExactDist2d(adv),
-                                Acore::StringFormat(" sort={} controle={} furtif_seul={}", cast->Id, controle ? 1 : 0,
-                                                    cast->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) ? 1 : 0));
+                                Acore::StringFormat(" sort={} controle={} furtif_seul={} classe={} furtif={} monte=0",
+                                                    cast->Id, controle ? 1 : 0,
+                                                    cast->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) ? 1 : 0,
+                                                    uint32(bot->getClass()), furtifAvant ? 1 : 0));
                 if (botAI->GetState() != BOT_STATE_COMBAT)
                     botAI->ChangeEngine(BOT_STATE_COMBAT);
                 // Toxic Dart et Dust Toss ne rompent pas non plus la furtivite : sans ce delai, l'ouverture
@@ -5030,20 +5542,36 @@ public:
             }
         }
 
-        // Rien n'est parti : s'approcher, sans entrer au contact.
+        // Rien n'est parti : s'approcher. Ranger : sans entrer au contact (a 5 yd sous sa portee, ou a portee de son
+        // controle). Autres ouvreurs furtifs (lot 19) : a la portee de leur meilleur coup « seulement furtif » pret
+        // (Parasite, Haunt... souvent au contact), sinon a leur portee d'attaque.
         float bas = 0.0f, haut = 0.0f;
         CoaArenePlage(botAI, bot, bas, haut);
         float approche = haut - 5.0f;
-        if (horsCombat)
+        if (ranger)
+        {
+            if (horsCombat)
+                for (Usable const& spell : ouvertures)
+                {
+                    if (!(spell.kind & KIND_CONTROL) || bot->HasSpellCooldown(spell.info->Id))
+                        continue;
+                    approche = std::max(1.0f, spell.info->GetMaxRange(false, bot) - 2.0f);
+                    break;
+                }
+        }
+        else
+        {
+            float meilleure = -1.0f;
             for (Usable const& spell : ouvertures)
-            {
-                if (!(spell.kind & KIND_CONTROL) || bot->HasSpellCooldown(spell.info->Id))
-                    continue;
-                approche = std::max(1.0f, spell.info->GetMaxRange(false, bot) - 2.0f);
-                break;
-            }
+                if (spell.info->HasAttribute(SPELL_ATTR0_ONLY_STEALTHED) && !bot->HasSpellCooldown(spell.info->Id))
+                    meilleure = std::max(meilleure, spell.info->GetMaxRange(false, bot));
+            approche = std::max(1.0f, (meilleure >= 0.0f ? meilleure : haut) - 1.5f);
+        }
         if (CoaAreneDistanceCombat(bot, adv) <= approche)
+        {
+            CoaAreneOuvertureRefus(bot, etat, 6, avant, Acore::StringFormat(" approche={:.1f}", approche));
             return false;
+        }
         float const rayon = approche + bot->GetCombatReach() + adv->GetCombatReach();
         float const angle = adv->GetAngle(bot);
         float x = adv->GetPositionX() + std::cos(angle) * rayon;
@@ -5055,6 +5583,106 @@ public:
         if (!MoveTo(bot->GetMapId(), x, y, z, false, false, true, false, MovementPriority::MOVEMENT_COMBAT, true, false))
             return false;
         etat.prochaineOuvertureMs = maintenant + CoaAreneOuvertureApprocheMs;
+        return true;
+    }
+
+private:
+    /*
+     * Lot 19, ouverture montee. Tant que le bot est monte, rien d'autre ne part (SPELL_FAILED_NOT_MOUNTED) : cette
+     * branche rend donc toujours vrai, et se termine par une DESCENTE -- apres l'attaque montee si rien d'autre n'est pret,
+     * ou au troisieme tick a portee sans lancer (recharge, refus), ou si l'adversaire n'est plus valide.
+     *   - a portee (CoaAreneOuvertureMonteeDistance, sous le cone de 25 yd de Hellfire Trample) et en vue : les attaques
+     *     montees (ALLOW_WHILE_MOUNTED), par CastFirst -- qui juge le cone (regle tactique 1) et tourne le bot ;
+     *   - sinon : galoper vers un point a 15 yd de l'adversaire, par un CHEMIN (MoveTo, PathGenerator), comme le retour.
+     */
+    bool OuvrirMonte(CoaAreneEtat& etat)
+    {
+        Unit* adv = etat.adversaire ? ObjectAccessor::GetUnit(*bot, etat.adversaire) : nullptr;
+        if (!adv || !adv->IsInWorld() || !adv->IsAlive() || adv->GetMap() != bot->GetMap() ||
+            !bot->IsValidAttackTarget(adv))
+        {
+            CoaAreneOuvertureRefus(bot, etat, 7, -1.0f);
+            return Descendre(etat, "adversaire_invalide", -1.0f);
+        }
+        context->GetValue<Unit*>("current target")->Set(adv);
+        bot->SetSelection(adv->GetGUID());
+
+        float const dist = bot->GetExactDist2d(adv);
+        uint32 const maintenant = getMSTime();
+        if (!etat.ouvertureMonteeDebutMs)
+            etat.ouvertureMonteeDebutMs = maintenant ? maintenant : 1;
+        // En danger, monte, la survie ne peut rien lancer : descendre tout de suite. Plafond de duree : jamais coince
+        // en selle derriere un adversaire cache ou sur un chemin sans fin.
+        if (etat.survieNiveau >= 2)
+            return Descendre(etat, "survie", dist);
+        if (getMSTimeDiff(etat.ouvertureMonteeDebutMs, maintenant) >= CoaAreneOuvertureMonteeMaxMs)
+            return Descendre(etat, "duree", dist);
+        if (dist <= CoaAreneOuvertureMonteeDistance && bot->IsWithinLOSInMap(adv))
+        {
+            std::vector<Usable> pretes = KnownAbilities(botAI, bot, [](uint16 kind) { return IsAttack(kind, false); });
+            pretes.erase(std::remove_if(pretes.begin(), pretes.end(),
+                                        [](Usable const& s) { return !CoaAreneEstAttaqueMontee(s); }),
+                         pretes.end());
+            DropUncastableHere(bot, adv, pretes);
+            if (SpellInfo const* cast = RecordUsage(USAGE_ATTACK, CastFirst(botAI, bot, pretes, adv, USAGE_ATTACK)))
+            {
+                ++etat.ouvertures;
+                etat.ouvertureMonteeEssais = 0;
+                CoaAreneJournal(bot, etat, "ouverture", dist, bot->GetExactDist2d(adv),
+                                Acore::StringFormat(" sort={} controle=0 furtif_seul=0 classe={} furtif=0 monte=1",
+                                                    cast->Id, uint32(bot->getClass())));
+                if (botAI->GetState() != BOT_STATE_COMBAT)
+                    botAI->ChangeEngine(BOT_STATE_COMBAT);
+                return true;
+            }
+            // Plus rien de monte a lancer : on descend au troisieme essai. Revue lot 19 : la recharge globale, une
+            // incantation ou le bond de Hellfire Trample en cours ne comptent PAS -- trois tours d'IA (~0,3 s) tombaient
+            // tous dans la recharge globale de 1,5 s qui suit la premiere attaque montee, et Dreadrider's Stomp ne
+            // partait jamais apres Trample. Borne : CoaAreneOuvertureMonteeMaxMs.
+            bool const attente = bot->IsNonMeleeSpellCast(false, true, true) || bot->HasUnitState(UNIT_STATE_CHARGING) ||
+                                 std::any_of(pretes.begin(), pretes.end(), [this](Usable const& s)
+                                             { return bot->GetGlobalCooldownMgr().HasGlobalCooldown(s.info); });
+            if (!attente && ++etat.ouvertureMonteeEssais >= CoaAreneOuvertureMonteeEssaisMax)
+                return Descendre(etat, "rien_pret", dist);
+            return true;
+        }
+
+        // Galoper vers lui : un point a 15 yd sur la droite adversaire -> bot, le chemin le contournera (MoveTo).
+        float const angle = adv->GetAngle(bot);
+        float const rayon = 15.0f + bot->GetCombatReach() + adv->GetCombatReach();
+        float x = adv->GetPositionX() + std::cos(angle) * rayon;
+        float y = adv->GetPositionY() + std::sin(angle) * rayon;
+        float z = adv->GetPositionZ();
+        if (!bot->GetMap()->CheckCollisionAndGetValidCoords(adv, adv->GetPositionX(), adv->GetPositionY(),
+                                                             adv->GetPositionZ(), x, y, z, false) ||
+            IsDuplicateMove(x, y, z))
+        {
+            x = adv->GetPositionX();
+            y = adv->GetPositionY();
+            z = adv->GetPositionZ();
+        }
+        // Revue lot 19 : MoveTo rend FAUX tant que le deplacement precedent n'a pas fini son delai
+        // (IsWaitingForLastMove, MovementActions.cpp:900, jusqu'a MaxWaitForMove = 5 s) et sur une destination repetee
+        // (IsDuplicateMove). Compte comme un echec, cela faisait descendre le bot trois tours d'IA apres son premier
+        // MoveTo, en plein galop, des que l'adversaire etait a plus de 20 yd aux portes. Un bot qui avance n'echoue pas.
+        if (!MoveTo(bot->GetMapId(), x, y, z, false, false, true, false, MovementPriority::MOVEMENT_COMBAT, true, false) &&
+            !bot->isMoving() && ++etat.ouvertureMonteeEssais >= CoaAreneOuvertureMonteeEssaisMax)
+            return Descendre(etat, "approche_impossible", dist);
+        return true;
+    }
+
+    // Descendre de la monture de classe (le joueur, lui, est descendu par son client des qu'il lance un autre sort).
+    bool Descendre(CoaAreneEtat& etat, char const* raison, float dist)
+    {
+        // Jamais pendant le bond de Hellfire Trample (charge du coeur) : l'arreter le couperait en l'air.
+        if (bot->isMoving() && !bot->HasUnitState(UNIT_STATE_CHARGING))
+            bot->StopMoving();
+        if (SpellInfo const* monture = CoaAreneMontureOuvreur(botAI, bot, etat))
+            bot->RemoveAurasDueToSpell(monture->Id);
+        if (bot->IsMounted())
+            bot->RemoveAurasByType(SPELL_AURA_MOUNTED);
+        etat.ouvertureMonteeEssais = 0;
+        CoaAreneOuvertureRefus(bot, etat, 8, dist, Acore::StringFormat(" detail={}", raison));
         return true;
     }
 };
@@ -5113,6 +5741,7 @@ std::string CoaAreneCausesRatee(PlayerbotAI* botAI, Player* bot, CoaAreneCoupeCa
                 case SPELL_FAILED_TOO_CLOSE: cause = "trop_pres"; break;
                 case SPELL_FAILED_LINE_OF_SIGHT: cause = "vue"; break;
                 case SPELL_FAILED_UNIT_NOT_INFRONT: cause = "dos"; break;
+                case SPELL_FAILED_TARGET_IS_PLAYER: cause = "cible_joueur"; break;  // lot 18 (CoaPreControleCible)
                 default: cause = CoaRefuseEnMouvement(bot, info) ? "en_mouvement" : "refus"; break;
             }
         if (!premiere)
@@ -5262,13 +5891,26 @@ public:
     {
         CoaAreneEtat& etat = CoaAreneEtatDe(botAI);
         etat.prochainePreparationMs = getMSTime() + CoaArenePreparationReessaiMs;
-        // La meme porte d'entree que la traque d'une prime (CoaChasse.h) : une furtivite, jamais canalisee sous
-        // Directeur.Embuscade, distance 0 donc aucune exigence de duree.
-        bool const reussi = CoaChasseEntrerEnFurtivite(botAI, bot, 0.0f);
+        uint8 const quoi = CoaArenePreparationAFaire(botAI, bot, etat);
+        SpellInfo const* parti = nullptr;
+        if (quoi == 1)
+        {
+            // Lot 19 : la monture de classe (Knight of Xoroth : Xorothian Warsteed), portes fermees -- ses piles de Path
+            // of Hellfire montent pendant la preparation (une toutes les 3 s sans degat donne ni recu).
+            SpellInfo const* monture = CoaAreneMontureOuvreur(botAI, bot, etat);
+            if (monture && StrictCheck(bot, monture, bot) == SPELL_CAST_OK && botAI->CastSpell(monture->Id, bot))
+                parti = monture;
+        }
+        else if (quoi == 2)
+            // Lot 19 : toute furtivite du kit, jamais canalisee (CoaAreneEntrerEnFurtivite). Le Ranger prenait deja Elude
+            // par CoaChasseEntrerEnFurtivite (meme filtre de kit, distance 0) : meme sort pour lui.
+            parti = CoaAreneEntrerEnFurtivite(botAI, bot);
         // 11/10 (match id=90) : la preparation n'ecrivait rien -- on ne savait pas si le Ranger etait entre furtif.
         CoaAreneJournal(bot, etat, "preparation", -1.0f, -1.0f,
-                        Acore::StringFormat(" reussi={} furtif={}", reussi ? 1 : 0, bot->HasStealthAura() ? 1 : 0));
-        return reussi;
+                        Acore::StringFormat(" reussi={} quoi={} sort={} furtif={} monte={}", parti ? 1 : 0,
+                                            quoi == 1 ? "monture" : quoi == 2 ? "furtivite" : "rien",
+                                            parti ? parti->Id : 0, bot->HasStealthAura() ? 1 : 0, bot->IsMounted() ? 1 : 0));
+        return parti != nullptr;
     }
 };
 

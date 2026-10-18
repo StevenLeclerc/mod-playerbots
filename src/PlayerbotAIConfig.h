@@ -451,6 +451,16 @@ public:
     uint32 coaHvBilanSecondes;         // periode de la ligne `coa hv:` ; 0 = jamais
     bool coaHvTeleportVisible;         // lot 4 : apres un depot reel, branche ville -> commissaire-priseur
     uint32 coaHvTeleportVisiblePct;    // lot 4 : part (0-100) des bots marques envoyes au commissaire
+    // Ressources d'evenement a l'HV (12/10/2026, CONCEPTION-ressources-rares-evenements.md § 4.2, lot 4). Exigent
+    // Enable. LUES AUSSI DEPUIS LES FILS DE CARTE (RessourceProtegee : DestroyItemsVisitor, ItemUsageValue) : sans
+    // course pour la meme raison que coaHvEnable (Initialize ecrit, fils de carte a l'arret).
+    bool coaHvRessources;              // 0 : rien ne change ; 1 : ressources prioritaires, place reservee, protegees
+    bool coaHvRessourcesVenteAnticipee; // 1 : ProcessBot depose les ressources sans attendre le vidage des sacs
+    float coaHvRessourcesCoefMin;      // prix = SellPrice x [min ; max] (plafond BuyPrice x n - 1 inchange)
+    float coaHvRessourcesCoefMax;
+    uint32 coaHvRessourcesMaxParMaison;  // encheres de ressources de BOTS par maison, EN PLUS de MaxParMaison
+    uint32 coaHvRessourcesMaxParModele;  // encheres de bots par ressource et par maison
+    uint32 coaHvRessourcesGarderMaxPiles; // piles gardees au plus par vidage de sacs (au-dela : detruites)
 
     // Directeur, lot D2a (Ai/Coa/CoaDirecteur.cpp, SPEC-directeur-D2.md § 2.3).
     // TOUT EST ETEINT PAR DEFAUT : absentes de la conf en service, ces options
@@ -511,6 +521,13 @@ public:
     // arrive au lieu (sejour), REJOINT le groupe de ce joueur (cree, joueur chef, s'il n'en a pas ; ajoute s'il en
     // mene un qui a de la place) et le quitte a la fin de l'evenement. Eteint par defaut : rien ne change.
     bool directeurEvenementGroupe;
+    // Fin d'evenement (13/10/2026, remontee R-20261013-1757) : a la fin de l'evenement, les inscrits RESTENT dans
+    // le groupe du joueur au plus ce nombre de secondes, pour qu'il pille les corps tapes par le groupe (le droit
+    // de butin d'un corps tape en groupe est attache au GROUPE : Player::isAllowedToLoot). Ils le quittent avant si
+    // le joueur quitte le groupe (bouton natif), se deconnecte, s'eloigne au-dela de ...AttenteYd, ou si un nouvel
+    // evenement du joueur commence sans eux. 0 : comportement d'avant (sortie a la fin).
+    uint32 directeurEvenementGroupeAttenteS;
+    uint32 directeurEvenementGroupeAttenteYd;
     // Lot D4c (coa-project/docs/SPEC-directeur-D4.md § 3.3, § 3.4) : inertes tant
     // que `prime` et `chasser` ne sont pas dans directeurVerbes ; TracerMorts
     // eteint par defaut (les crochets de mort rendent la main au premier test).
@@ -557,6 +574,31 @@ public:
     // forme, aucun objet) et plafond d'argent d'UNE commande, en cuivres.
     std::string directeurRecompenseObjets;
     uint32 directeurRecompenseMaxCuivre;
+    // Traqueur de contrat, lot T1 (12/10/2026, coa-project/docs/CONCEPTION-primes-traqueur-bots.md) :
+    // l'addon CoABounty demande `COABH\tTRAQUE` (chuchotement d'addon a soi) ; le serveur repond
+    // (prefixe COABT) la distance et la direction de la cible du contrat ACTIF du joueur. Faux
+    // (defaut) : la demande est consommee sans reponse, l'addon n'affiche rien.
+    bool directeurTraqueur;
+    uint32 directeurTraqueurIntervalleMs;     // une lecture par joueur au plus toutes les N ms (1000-60000)
+    // Lot T3 (12/10/2026) : lignes `W` (avis de recherche, table coa_dir_avis ecrite par contrats.py) dans
+    // l'onglet. Faux (defaut) : aucune requete sur la table (elle peut ne pas exister).
+    bool directeurAvis;
+    // Lots T4-T5 (12/10/2026) : REACTIONS des cibles de contrat (params.reaction de l'arc `contrat`, tiree par
+    // contrats.py) : `defense` (engage le chasseur a vue), `fuite_gardes` (fuit une fois, ses gardes l'engagent).
+    // Faux (defaut) : aucune lecture, la cible reste passive (C1).
+    bool directeurReactions;
+    // Lot T6 (13/10/2026) : `fuite_monture` (monte, fuit loin, descend et attend ; deux fuites), `soudoiement` (offre
+    // un pot-de-vin au chasseur), et la seconde fuite de `fuite_gardes`. Faux (defaut) : ces deux noms sont inconnus
+    // (cible passive, journalise une fois) et `fuite_gardes` fuit une seule fois, comme T5.
+    bool directeurReactionsT6;
+    // Lot D5 « l'imprevu », partie jeu (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md § 3.1, § 3.2 ;
+    // code dans Ai/Coa/CoaDirecteurImprevu.inc). Faux (defaut) : les verbes `attirer` et `soigner` sont refuses
+    // `attirer_eteint` / `soigner_eteint` (meme listes dans Directeur.Verbes), le registre se vide a la seconde.
+    bool directeurAttirer;
+    bool directeurSoigneurs;
+    // Banc D5 avec les bots (15/10/2026) : `attirer` admet un bot aleatoire comme `joueur`, `soigner` comme patient
+    // (lignes marquees `banc=1`). Faux (defaut) : un humain est exige, a l'identique.
+    bool directeurImprevuBanc;
     // Lot C des evenements (04/10/2026, coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.1-2.3) :
     // inertes tant que `evenement` n'est pas dans directeurVerbes. LISTES BLANCHES FERMEES des ids
     // qu'une commande `evenement` peut jouer (« id,id », lecture stricte : un morceau mal forme et
@@ -587,6 +629,12 @@ public:
     // decision D4a) : au tirage du butin d'une creature, une ressource 9100100-9100149 n'est gardee que si sa tranche
     // est celle du NIVEAU DE LA CREATURE (CoaDirecteurRessources.inc). Faux (defaut) : rien n'est touche.
     bool directeurRessourcesNiveauMonstre;
+    // Butin des bots aux evenements (12/10/2026, CONCEPTION-ressources-rares-evenements.md § 4.1, lot 3, D2 et D6).
+    // directeurButinObjets : les ressources d'evenement (ids d'item_template), lues par le ramassage, la trace ET
+    // l'HV des bots (coaHvRessources). Lues depuis les fils de carte ; ecrites par Initialize seul (fils a l'arret).
+    std::vector<uint32> directeurButinObjets;
+    bool directeurButinBots;    // 1 : un bot d'un groupe en butin libre ramasse SA part des ressources d'un corps d'evenement
+    bool directeurButinTrace;   // 1 : ligne `coa directeur butin:` a chaque ressource ramassee (humain ou bot)
     uint32 directeurEvenementInvoquesParJoueur;       // invoques vivants par joueur (1-24)
     uint32 directeurEvenementInvocationDistanceYd;    // point d'apparition a au plus N yd du joueur (20-250)
     // Banc d'essai de prime (03/10/2026, coa-project/outils/banc-prime.py) : guids bas
@@ -730,6 +778,24 @@ public:
     bool coaAreneIaPiliers;      // L2 : Ranger en ARENE, casser la ligne de vue derriere un obstacle (defaut faux)
     bool coaAreneIaSurvie;       // survie d'arene 1v1 et duel (11/10) : paliers, soins sur soi, dissipation rentable (defaut vrai)
     // --- fin CoaArene IA
+    // --- IA soins/survie des bots CoA (16/10/2026, docs/DIAG-banc-soins-*-20261016.md, Ai/Class/Coa/CoaAiObjectContext.cpp).
+    // Chaque option garde un changement de comportement ; toutes VRAIES par defaut, a 0 l'ancien comportement revient.
+    bool coaIaClassement;        // lot 1 : classement des sorts (boucliers sur allie, surcharges, soin d'autrui, Babify)
+    bool coaIaPostureRole;       // lot 2 : une specialisation tank prend la posture qui ouvre ses defensifs
+    bool coaIaSurvie;            // lot 3 : survie de tous les roles (paliers 65/45/30 %, perte rapide, soin sur soi, vol de vie)
+    bool coaIaSurviePotion;      // lot 3 : potion de soin des 45 % de vie quand aucun defensif n'est pret
+    bool coaIaReserveSoigneur;   // lot 4 : un soigneur en groupe n'attaque en mana que groupe plein et mana haute
+    uint32 coaIaReserveSoigneurMana; // lot 4 : seuil de mana (%) de la reserve ci-dessus
+    bool coaIaHotUnique;         // lot 4 : un HoT a cible unique n'est pas deplace s'il tient ailleurs, sauf urgence
+    bool coaIaAuraSurLanceur;    // lot 4 : « deja pose » lu sur le lanceur quand l'aura du sort est sur le lanceur
+    bool coaIaTriSoins;          // lot 4 : soins tries par deficit de la cible et rendement en mana
+    bool coaIaUtiliteAlignee;    // lot 4 : isUseful des soins et defensifs aligne sur ce que CastFirst refusera
+    bool coaIaFormeMaudite;      // lot 5 : Bloodmage sous lowHealth en combat -> forme maudite, puis ses defensifs de forme
+    bool coaIaVenomancerSoin;    // lot 5 : Venomancer sous 35 % en combat -> quitte sa forme, se soigne, la reprend
+    bool coaIaSoigneurResteEnCombat; // C1 (16/10) : soigneur en combat, cible invalide effacee sans quitter le moteur de combat
+    bool coaIaLeverServiteur;    // I7 (17/10) : Necromancer a Life Force sans serviteur en leve un hors combat (en plus de Survie)
+    bool coaIaReserveDefensif;   // I8 (17/10) : sous MediumHealth, mana du defensif et d'un soin gardee (en plus de Survie)
+    // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;
     bool enableNewRpgStrategy;

@@ -66,6 +66,9 @@ namespace
 
     // Le seul compteur touche hors du fil monde : atomique.
     std::atomic<uint64> horsFilMonde{ 0 };
+    // Ressources d'evenement gardees / detruites au vidage des sacs (DestroyItemsVisitor, tout fil) : atomiques.
+    std::atomic<uint64> ressGardees{ 0 };
+    std::atomic<uint64> ressDetruites{ 0 };
 
     // Tout le reste n'est lu et ecrit que sous tlFilMonde, donc par le fil
     // monde seul : pas de verrou.
@@ -119,6 +122,11 @@ namespace
         uint64 visibleTirageNon = 0;       // marque consommee, tirage TeleportVisiblePct perdu
         uint64 visibleSansCommissaire = 0; // marque consommee, aucun commissaire pour ce camp / niveau
         uint64 visibleNonConsommes = 0;    // marques effacees en fin de passe sans branche ville
+        // Ressources d'evenement (12/10/2026, option Ressources).
+        uint64 ressPostes = 0;             // ressources retenues (simulees ou deposees), deja comptees dans postes/deposes
+        uint64 ressRejetMaison = 0;        // au-dela de Ressources.MaxParMaison
+        uint64 ressRejetModele = 0;        // au-dela de Ressources.MaxParModele
+        uint64 ressAnticipees = 0;         // ESSAIS de vente anticipee (bot libre porteur, au plus 1 / 300 s / bot), pas des ventes
     };
 
     Compteurs c;
@@ -186,6 +194,10 @@ namespace
     {
         bool bati = false;
         uint32 encheresBots = 0;
+        // Ressources d'evenement (option Ressources) : comptees dans encheresBots ET ici ; les autres objets
+        // voient encheresBots - encheresRessources (la place reservee ne leur prend rien), et parProprietaire
+        // ne les compte pas (MaxActivesParBot ne s'applique pas a elles).
+        uint32 encheresRessources = 0;
         std::unordered_map<uint32, Modele> parModele;       // item_template -> modele
         std::unordered_map<uint32, uint32> parProprietaire; // guid bas -> encheres
     };
@@ -199,6 +211,11 @@ namespace
     // vide a la fermeture de la passe la plus externe : aucune marque ne
     // survit a sa passe. Fil monde seul (sous tlFilMonde).
     std::unordered_set<uint32> deposeCettePasse;
+
+    // Ressources d'evenement, vente anticipee (revue du 12/10) : prochain essai permis par bot (guid bas). Fil monde
+    // seul (VendreRessources, sous tlFilMonde).
+    constexpr time_t RESSOURCES_REESSAI_S = 300;
+    std::unordered_map<uint32, time_t> ressourcesProchainEssai;
 
     // Lot 4. Commissaires-priseurs par camp (0 Alliance, 1 Horde), sur le
     // modele du cache des banquiers (TravelMgr::PrepareDestinationCache).
@@ -294,7 +311,10 @@ namespace
                 continue;
 
             ++idx.encheresBots;
-            ++idx.parProprietaire[proprio];
+            if (sPlayerbotAIConfig.coaHvRessources && CoaDirecteur::EstRessourceDEvenement(a->item_template))
+                ++idx.encheresRessources;
+            else
+                ++idx.parProprietaire[proprio];
 
             Modele& m = idx.parModele[a->item_template];
             ++m.encheresBots;
@@ -349,11 +369,15 @@ namespace
         ArtisanatVertBleu,  // class 7, qualite 2-3
         EquipementVert,     // class 2/4, qualite 2
         EquipementBleu,     // class 2/4, qualite 3
-        Recette             // class 9, qualite 1-3 (ajout du 10/10, commanditaire)
+        Recette,            // class 9, qualite 1-3 (ajout du 10/10, commanditaire)
+        Ressource           // ressource d'evenement (Directeur.ButinObjets), toute qualite ; option Ressources
     };
 
     Categorie Classer(ItemTemplate const* t)
     {
+        // Ressources d'evenement d'abord (12/10/2026) : la qualite 4 n'est vendue que par cette voie.
+        if (sPlayerbotAIConfig.coaHvRessources && CoaDirecteur::EstRessourceDEvenement(t->ItemId))
+            return Categorie::Ressource;
         if (t->Class == ITEM_CLASS_TRADE_GOODS)
         {
             if (t->Quality == ITEM_QUALITY_NORMAL)
@@ -387,6 +411,7 @@ namespace
             case Categorie::EquipementVert:    mini = k.coaHvCoefEquipVertMin;    maxi = k.coaHvCoefEquipVertMax;    break;
             case Categorie::EquipementBleu:    mini = k.coaHvCoefEquipBleuMin;    maxi = k.coaHvCoefEquipBleuMax;    break;
             case Categorie::Recette:           mini = k.coaHvCoefRecetteMin;      maxi = k.coaHvCoefRecetteMax;      break;
+            case Categorie::Ressource:         mini = k.coaHvRessourcesCoefMin;   maxi = k.coaHvRessourcesCoefMax;   break;
             default:                           mini = 0.0f; maxi = 0.0f; break;
         }
     }
@@ -467,9 +492,13 @@ namespace
         Regle regle = Regle::Grille;
     };
 
-    void VisiterObjet(Item* item, std::vector<Candidat>& sortie)
+    void VisiterObjet(Item* item, std::vector<Candidat>& sortie, bool ressourcesSeules)
     {
         if (!item)
+            return;
+
+        // Vente anticipee : seules les ressources sont vues (et comptees) ; le reste attend le vidage des sacs.
+        if (ressourcesSeules && (!item->GetTemplate() || !CoaDirecteur::EstRessourceDEvenement(item->GetEntry())))
             return;
 
         ++c.objetsVus;
@@ -717,7 +746,9 @@ namespace
                  "refus_par_maison={} refus_par_modele={} refus_budget={} refus_par_minute={} "
                  "courrier_releves={} courrier_or={} courrier_objets={} courrier_refus_or={} courrier_ignores={} "
                  "courrier_reportes={} visible_marques={} visible_proposes={} visible_tirage_non={} "
-                 "visible_sans_commissaire={} visible_non_consommes={}",
+                 "visible_sans_commissaire={} visible_non_consommes={} ressources_postes={} "
+                 "refus_ressources_maison={} refus_ressources_modele={} ressources_anticipees={} "
+                 "ressources_gardees={} ressources_detruites={}",
                  sPlayerbotAIConfig.coaHvSimulation ? "simulation" : "reel",
                  c.passes, c.appels, hors, c.postes, c.deposes, c.echecs, c.unites,
                  c.valeurRachat, c.valeurMarchand, c.sousEnchere, c.plafonne, c.plancher,
@@ -728,7 +759,9 @@ namespace
                  c.rejetModele, c.rejetBudget, c.rejetMinute,
                  c.courrierReleves, c.courrierOr, c.courrierObjets, c.courrierRefusOr, c.courrierIgnores,
                  c.courrierReportes, c.visibleMarques, c.visibleProposes, c.visibleTirageNon,
-                 c.visibleSansCommissaire, c.visibleNonConsommes);
+                 c.visibleSansCommissaire, c.visibleNonConsommes, c.ressPostes, c.ressRejetMaison,
+                 c.ressRejetModele, c.ressAnticipees, ressGardees.load(std::memory_order_relaxed),
+                 ressDetruites.load(std::memory_order_relaxed));
     }
 }
 
@@ -775,7 +808,9 @@ namespace CoaHotelDesVentes
         tlFilMonde = _precedent;
     }
 
-    void AvantDestruction(Player* bot, char const* motif)
+    // Le corps commun d'AvantDestruction (tout ce qui est vendable) et de VendreRessources (ressources
+    // d'evenement seules, `ressourcesSeules`). Memes gardes, memes plafonds, meme depot.
+    static void Vendre(Player* bot, char const* motif, bool ressourcesSeules)
     {
         PlayerbotAIConfig const& cfg = sPlayerbotAIConfig;
         if (!cfg.coaHvEnable)
@@ -790,7 +825,8 @@ namespace CoaHotelDesVentes
 
         bool const reel = !cfg.coaHvSimulation;
 
-        ++c.appels;
+        if (!ressourcesSeules)
+            ++c.appels;
         if (!motif)
             motif = "?";
 
@@ -850,19 +886,20 @@ namespace CoaHotelDesVentes
         // (leur contenu ; le sac lui-meme est porte, donc ignore).
         std::vector<Candidat> candidats;
         for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
-            VisiterObjet(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot), candidats);
+            VisiterObjet(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot), candidats, ressourcesSeules);
         for (uint8 sac = INVENTORY_SLOT_BAG_START; sac < INVENTORY_SLOT_BAG_END; ++sac)
         {
             Bag* b = bot->GetBagByPos(sac);
             if (!b)
                 continue;
             for (uint32 j = 0; j < b->GetBagSize(); ++j)
-                VisiterObjet(b->GetItemByPos(uint8(j)), candidats);
+                VisiterObjet(b->GetItemByPos(uint8(j)), candidats, ressourcesSeules);
         }
 
         if (candidats.empty())
         {
-            ++c.sacsSansCandidat;
+            if (!ressourcesSeules)
+                ++c.sacsSansCandidat;
             return;
         }
 
@@ -879,10 +916,17 @@ namespace CoaHotelDesVentes
                 chiffres.push_back(k);
         }
 
-        // Les plus chers d'abord : ce que les plafonds laissent passer, autant
-        // que ce soit ce qui vaut la peine.
+        // Les ressources d'evenement d'abord (12/10/2026 : vente EN PRIORITE), puis les plus chers : ce que les
+        // plafonds laissent passer, autant que ce soit ce qui vaut la peine.
         std::sort(chiffres.begin(), chiffres.end(),
-                  [](Candidat const& a, Candidat const& b) { return a.rachat > b.rachat; });
+                  [](Candidat const& a, Candidat const& b)
+                  {
+                      bool const ra = a.cat == Categorie::Ressource;
+                      bool const rb = b.cat == Categorie::Ressource;
+                      if (ra != rb)
+                          return ra;
+                      return a.rachat > b.rachat;
+                  });
 
         // Fenetre glissante d'une minute pour MaxParMinute (D3) : bornee en
         // duree, pas seulement par passe (la cadence des passes varie).
@@ -915,21 +959,41 @@ namespace CoaHotelDesVentes
                 ++c.rejetMinute;
                 continue;
             }
-            if (idx.parProprietaire[botLow] >= cfg.coaHvMaxActivesParBot)
-            {
-                ++c.rejetActivesBot;
-                continue;
-            }
-            if (idx.encheresBots >= cfg.coaHvMaxParMaison)
-            {
-                ++c.rejetMaison;
-                continue;
-            }
+            // Ressource d'evenement : PLACE RESERVEE (Ressources.MaxParMaison / MaxParModele), hors de
+            // MaxParMaison, MaxParModele et MaxActivesParBot. Les autres objets ne voient pas les encheres de
+            // ressources dans MaxParMaison : la reserve s'ajoute, elle ne prend rien.
+            bool const ressource = k.cat == Categorie::Ressource;
             Modele& m = idx.parModele[k.tpl->ItemId];
-            if (m.encheresBots >= cfg.coaHvMaxParModele)
+            if (ressource)
             {
-                ++c.rejetModele;
-                continue;
+                if (idx.encheresRessources >= cfg.coaHvRessourcesMaxParMaison)
+                {
+                    ++c.ressRejetMaison;
+                    continue;
+                }
+                if (m.encheresBots >= cfg.coaHvRessourcesMaxParModele)
+                {
+                    ++c.ressRejetModele;
+                    continue;
+                }
+            }
+            else
+            {
+                if (idx.parProprietaire[botLow] >= cfg.coaHvMaxActivesParBot)
+                {
+                    ++c.rejetActivesBot;
+                    continue;
+                }
+                if (idx.encheresBots - std::min(idx.encheresBots, idx.encheresRessources) >= cfg.coaHvMaxParMaison)
+                {
+                    ++c.rejetMaison;
+                    continue;
+                }
+                if (m.encheresBots >= cfg.coaHvMaxParModele)
+                {
+                    ++c.rejetModele;
+                    continue;
+                }
             }
 
             uint32 idEnchere = 0;
@@ -950,7 +1014,13 @@ namespace CoaHotelDesVentes
             ++postesBot;
             --budgetPasse;
             ++depotsFenetre;
-            ++idx.parProprietaire[botLow];
+            if (ressource)
+            {
+                ++idx.encheresRessources;
+                ++c.ressPostes;
+            }
+            else
+                ++idx.parProprietaire[botLow];
             ++idx.encheresBots;
             ++m.encheresBots;
             m.Noter(std::max<uint64>(1, k.rachat / k.n), botLow);
@@ -981,6 +1051,16 @@ namespace CoaHotelDesVentes
                          "coa hv simu: bot={} objet={} ({}) n={} mise={} rachat={} maison={} motif={} regle={}",
                          bot->GetName(), k.tpl->Name1, k.tpl->ItemId, k.n, k.mise, k.rachat, entree->houseId, motif,
                          NomRegle(k.regle));
+
+            // Ressource d'evenement : une ligne de plus, a elle (12/10/2026). Les lignes `coa hv depot:` et
+            // `coa hv simu:` ci-dessus gardent leur format.
+            if (ressource)
+                LOG_INFO("playerbots.coa",
+                         "coa hv ressource: mode={} bot={} guid={} objet={} qualite={} n={} mise={} rachat={} "
+                         "marchand={} maison={} motif={} regle={} enchere={} duree={} reserve={}/{}",
+                         reel ? "reel" : "simulation", bot->GetName(), botLow, k.tpl->ItemId, uint32(k.tpl->Quality),
+                         k.n, k.mise, k.rachat, uint64(k.tpl->SellPrice) * k.n, entree->houseId, motif,
+                         NomRegle(k.regle), idEnchere, duree, idx.encheresRessources, cfg.coaHvRessourcesMaxParMaison);
         }
 
         if (trans && postesBot)
@@ -993,9 +1073,86 @@ namespace CoaHotelDesVentes
             // Lot 4 : depot REEL fait (trans n'est ouverte qu'en reel). Le
             // teleport qui suit dans ProcessBot (RandomTeleportForLevel) lira
             // la marque ; sinon elle meurt avec la passe.
-            if (cfg.coaHvTeleportVisible && deposeCettePasse.insert(botLow).second)
+            // Pas pour la vente anticipee : aucun teleport ne la suit, la marque mourrait en fin de passe.
+            if (!ressourcesSeules && cfg.coaHvTeleportVisible && deposeCettePasse.insert(botLow).second)
                 ++c.visibleMarques;
         }
+    }
+
+    void AvantDestruction(Player* bot, char const* motif)
+    {
+        Vendre(bot, motif, false);
+    }
+
+    void VendreRessources(Player* bot)
+    {
+        PlayerbotAIConfig const& cfg = sPlayerbotAIConfig;
+        if (!cfg.coaHvEnable || !cfg.coaHvRessources || !cfg.coaHvRessourcesVenteAnticipee || !bot || !bot->IsAlive())
+            return;
+        // ProcessBot(Player*) tourne aussi sur un fil de carte (RandomBotUpdateAction) : ici on sort SANS compter
+        // (hors_fil_monde compterait chaque passage, sans rien dire de plus que ReleverCourrier).
+        if (!tlFilMonde)
+            return;
+
+        // Les gardes de Vendre, refaites ici SANS compteur : un bot inscrit ou groupe qui porte ses ressources
+        // repasse a chaque passe, et gonflerait ecarte_bot / ecarte_directeur / ecarte_lieu du bilan. Ici on se
+        // tait ; Vendre les refait (et compte) pour les seuls bots qui les passent deja.
+        PlayerbotAI* ai = GET_PLAYERBOT_AI(bot);
+        if (!ai || !bot->IsInWorld() || !sRandomPlayerbotMgr.IsRandomBot(bot) || bot->GetGroup())
+            return;
+        if (Player* maitre = ai->GetMaster())
+            if (IsRealPlayer(maitre))
+                return;
+        Map* carte = bot->GetMap();
+        if (!carte || bot->InBattleground() || bot->InBattlegroundQueue() || carte->Instanceable())
+            return;
+        uint32 const botLow = bot->GetGUID().GetCounter();
+        if (CoaDirecteur::AffectationDe(botLow, nullptr) || CoaDirecteur::CibleDeBanc(botLow))
+            return;
+
+        // Garde bon marche AVANT toute lecture de l'HV : le bot porte-t-il au moins une ressource ? (sacs seuls,
+        // comme Vendre ; HasItemCount parcourt aussi la banque, d'ou ce parcours a la main.)
+        bool porte = false;
+        auto voir = [&porte](Item* it)
+        {
+            if (it && !porte && CoaDirecteur::EstRessourceDEvenement(it->GetEntry()))
+                porte = true;
+        };
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END && !porte; ++slot)
+            voir(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
+        for (uint8 sac = INVENTORY_SLOT_BAG_START; sac < INVENTORY_SLOT_BAG_END && !porte; ++sac)
+            if (Bag* b = bot->GetBagByPos(sac))
+                for (uint32 j = 0; j < b->GetBagSize() && !porte; ++j)
+                    voir(b->GetItemByPos(uint8(j)));
+        if (!porte)
+            return;
+
+        // Revue du 12/10 : un bot dont la ressource est refusee (reserve pleine, budget, minute) ne reessaie pas a
+        // chaque passe : au plus un essai par bot toutes les RESSOURCES_REESSAI_S. La carte ne vit que sur le fil
+        // monde ; elle est purgee de ses echeances passees quand elle grossit (un bot par entree au plus).
+        time_t const maintenant = GameTime::GetGameTime().count();
+        auto prochain = ressourcesProchainEssai.find(botLow);
+        if (prochain != ressourcesProchainEssai.end() && maintenant < prochain->second)
+            return;
+        if (ressourcesProchainEssai.size() > 4096)
+            for (auto it = ressourcesProchainEssai.begin(); it != ressourcesProchainEssai.end();)
+                it = it->second <= maintenant ? ressourcesProchainEssai.erase(it) : std::next(it);
+        ressourcesProchainEssai[botLow] = maintenant + RESSOURCES_REESSAI_S;
+
+        ++c.ressAnticipees;
+        Vendre(bot, "ressources", true);
+    }
+
+    bool RessourceProtegee(uint32 itemId)
+    {
+        PlayerbotAIConfig const& cfg = sPlayerbotAIConfig;
+        return cfg.coaHvEnable && !cfg.coaHvSimulation && cfg.coaHvRessources &&
+               CoaDirecteur::EstRessourceDEvenement(itemId);
+    }
+
+    void NoterRessourceAuVidage(bool gardee)
+    {
+        (gardee ? ressGardees : ressDetruites).fetch_add(1, std::memory_order_relaxed);
     }
 
     void ReleverCourrier(Player* bot)

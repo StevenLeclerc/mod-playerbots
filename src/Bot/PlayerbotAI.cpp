@@ -8,6 +8,7 @@
 #include "CoaGelBanc.h"
 #include "PlayerbotAI.h"
 #include "CoaSpecialization.h"
+#include "CoaBancSoin.h"
 #include "AiFactory.h"
 #include "BudgetValues.h"
 #include "ChannelMgr.h"
@@ -4881,6 +4882,11 @@ bool PlayerbotAI::AllowActive(ActivityType activityType)
 
     // always allow packet handling (e.g. group invites, trade, loot, friend requests etc)
     if (activityType == PACKET_ACTIVITY)
+        return true;
+
+    // CoA banc des soins (13/10/2026) : un membre d'essai en cours est toujours actif (l'enclos est isole, sans
+    // humain : sans ce garde, son IA serait ralentie hors combat). Sans essai : un chargement atomique.
+    if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
         return true;
 
     // all bots forced active, no rotation or scaling needed

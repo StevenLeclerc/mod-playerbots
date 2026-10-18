@@ -5,19 +5,26 @@
 #include "CoaDirecteur.h"
 #include "CoaArene1v1.h"   // Arene1v1 : GladiateurEngage, garde du bus
 #include "CoaDirecteurSource.h"
+#include "CheckMountStateAction.h"   // lot T6 : MountData (CollectMountData)
 
 #include "Channel.h"
 #include "ChannelMgr.h"
+#include "CellImpl.h"   // lot D5 : creatures autour du joueur (attirer)
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "Corpse.h"
 #include "CreatureTextMgr.h"
 #include "DatabaseEnv.h"
+#include "DBCStores.h"
 #include "GameTime.h"
 #include "GridDefines.h"
+#include "GridNotifiers.h"       // lot D5
+#include "GridNotifiersImpl.h"   // lot D5
 #include "GridTerrainData.h"
 #include "Group.h"
 #include "GroupMgr.h"
+#include "LastMovementValue.h"
+#include "PositionValue.h"
 #include "LFGMgr.h"
 #include "Item.h"
 #include "Log.h"
@@ -30,6 +37,7 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Opcodes.h"
+#include "PathGenerator.h"   // lot D5 : chemin de la creature attiree
 #include "Player.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
@@ -57,6 +65,7 @@
 #include <deque>
 #include <future>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -64,6 +73,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// Lot T6 (13/10/2026) : les sorts de monture que connait un bot, lus comme l'action « check mount state »
+// (definie sans `static` dans Ai/Base/Actions/CheckMountStateAction.cpp, non declaree dans son en-tete).
+MountData CollectMountData(Player const* bot);
 
 namespace
 {
@@ -592,6 +605,7 @@ void CommencerRetraite(uint32 bot, uint32 prime, uint32 joueur, char const* caus
 bool LeverRetraite(uint32 bot, char const* motif);
 void SuivreRetraites();
 void SuivreImmobiles();   // 04/10 : cibles de contrat immobiles (section « repos de la reserve »)
+void SuivreReactions();   // 12/10 (lots T4-T5) : reactions des cibles de contrat (apres le repos de la reserve)
 
 // Lot D4c : auras des DEFIS BLOQUANTS (PVE_ONLY, a vies, sans resurrection),
 // lues UNE fois au demarrage (DemarrerBus, requete synchrone sur acore_world),
@@ -600,6 +614,12 @@ void SuivreImmobiles();   // 04/10 : cibles de contrat immobiles (section « rep
 // `defi` -- on ne pose pas une menace qu'on ne sait pas borner.
 std::unordered_set<uint32> aurasDefiBloquant;
 bool defisLus = false;
+
+// Lot D5 (15/10/2026) : onglet CoABounty, ligne `^A|audace|optin`. GARDE DE PRESENCE des deux tables, lue UNE fois
+// au demarrage (DemarrerBus, requete synchrone sur information_schema, comme la garde de colonnes) : aucune requete
+// n'est jamais envoyee vers une table absente. Fil monde seul a l'ecriture ; relue au prochain demarrage.
+bool tableAudaceLue = false;   // acore_characters.coa_dir_audace (migration D4a, 2026_09_27_01_coa_dir_memoire.sql)
+bool tableOptinLue = false;    // acore_characters.coa_dir_imprevu_optin (2026_10_15_01_coa_dir_imprevu_optin.sql)
 
 // Lot D4c (SPEC-directeur-D4.md § 3.3) : MORTS D'HUMAINS. Les crochets de mort
 // tournent sur un FIL DE CARTE (Unit::Kill) : ils n'ecrivent que cette file, par
@@ -690,6 +710,8 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Chasser:             return "chasser";
         case CoaDirVerbe::Recompenser:         return "recompenser";
         case CoaDirVerbe::Evenement:           return "evenement";
+        case CoaDirVerbe::Attirer:             return "attirer";
+        case CoaDirVerbe::Soigner:             return "soigner";
         default:                               return "inconnu";
     }
 }
@@ -710,6 +732,8 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "chasser")              return CoaDirVerbe::Chasser;
     if (nom == "recompenser")          return CoaDirVerbe::Recompenser;
     if (nom == "evenement")            return CoaDirVerbe::Evenement;
+    if (nom == "attirer")              return CoaDirVerbe::Attirer;
+    if (nom == "soigner")              return CoaDirVerbe::Soigner;
     return CoaDirVerbe::Inconnu;
 }
 
@@ -743,6 +767,13 @@ bool VerbeEv(CoaDirVerbe v)
     return v == CoaDirVerbe::Evenement;
 }
 
+// Lot D5 « l'imprevu » (15/10/2026) : `attirer` et `soigner` exigent l'ENUM R3 en tete ET les valeurs
+// 'attirer' et 'soigner' (controle « contient », ColonnesImprevu) ; ils lisent `texte` et `valeur` (colonnes D3).
+bool VerbeImprevu(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Attirer || v == CoaDirVerbe::Soigner;
+}
+
 CoaDirCanal CanalDe(std::string const& nom)
 {
     if (nom.empty())       return CoaDirCanal::Aucun;
@@ -774,7 +805,7 @@ char const* NomCanal(CoaDirCanal c)
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v);
+           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v) || VerbeImprevu(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -856,6 +887,7 @@ public:
         _colonnesD4 = false;
         _colonnesR = false;
         _colonnesEv = false;
+        _colonnesImprevu = false;
         QueryResult colonnes = CharacterDatabase.Query(
             "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
@@ -889,6 +921,10 @@ public:
         // soigner, evenement : un chantier livre dans le desordre n'eteint pas les autres).
         // Entre apostrophes : 'evenement_x' ne la contient pas.
         _colonnesEv = _colonnesR && typeVerbe.find(",'evenement'") != std::string::npos;
+        // Lot D5 (15/10/2026) : meme regle « contient », les deux valeurs (lues en base le 15/10 :
+        // ...,'recompenser','pister','attirer','soigner','evenement').
+        _colonnesImprevu = _colonnesR && typeVerbe.find(",'attirer'") != std::string::npos &&
+                           typeVerbe.find(",'soigner'") != std::string::npos;
         if (_colonnesD3)
             LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
         else
@@ -907,6 +943,10 @@ public:
             LOG_INFO("playerbots", "coa directeur : colonnes evenement presentes, verbe evenement lisible");
         else
             LOG_INFO("playerbots", "coa directeur : colonnes evenement absentes, verbe evenement inerte");
+        if (_colonnesImprevu)
+            LOG_INFO("playerbots", "coa directeur : colonnes imprevu presentes, verbes attirer et soigner lisibles");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes imprevu absentes, verbes attirer et soigner inertes");
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -1027,6 +1067,7 @@ public:
     bool ColonnesD4() const override { return _colonnesD4; }
     bool ColonnesRecompense() const override { return _colonnesR; }
     bool ColonnesEvenement() const override { return _colonnesEv; }
+    bool ColonnesImprevu() const override { return _colonnesImprevu; }
 
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
@@ -1076,6 +1117,7 @@ private:
     bool _colonnesD4 = false;
     bool _colonnesR = false;
     bool _colonnesEv = false;
+    bool _colonnesImprevu = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -1090,20 +1132,30 @@ constexpr uint32 BILAN_MS = 5 * MINUTE * IN_MILLISECONDS;
 // Seau a jetons, MaxCommandesParMinute. Fil monde seul.
 double jetons = -1.0;
 uint32 jetonsMs = 0;
+// Revue 16/10 : seau PROPRE a `recompenser`, de meme capacite. Une part gagnee ne dispute plus ses jetons aux verbes de
+// mise en scene (un gros evenement vidait le seau commun : la part etait refusee `budget` puis reemise des minutes plus
+// tard), mais une boucle d'emission du service reste bornee (pas de paiement sans limite de debit).
+double jetonsRecompense = -1.0;
+uint32 jetonsRecompenseMs = 0;
 
-bool PrendreJeton()
+bool PrendreJetonDe(double& seau, uint32& seauMs)
 {
     double const capacite = sPlayerbotAIConfig.directeurMaxCommandesParMinute;
     uint32 const maintenant = getMSTime();
-    if (jetons < 0.0)
-        jetons = capacite;
+    if (seau < 0.0)
+        seau = capacite;
     else
-        jetons = std::min(capacite, jetons + getMSTimeDiff(jetonsMs, maintenant) * capacite / 60000.0);
-    jetonsMs = maintenant;
-    if (jetons < 1.0)
+        seau = std::min(capacite, seau + getMSTimeDiff(seauMs, maintenant) * capacite / 60000.0);
+    seauMs = maintenant;
+    if (seau < 1.0)
         return false;
-    jetons -= 1.0;
+    seau -= 1.0;
     return true;
+}
+
+bool PrendreJeton()
+{
+    return PrendreJetonDe(jetons, jetonsMs);
 }
 
 void Journaliser(CoaDirCommande const& c, char const* statut, char const* raison)
@@ -3070,11 +3122,24 @@ void ExecuterRecompense(CoaDirCommande const& c)
     // 06/10 : `intensite` = 1 marque une part de la Faille d'orage (service : recompenses.MARQUE_FAILLE).
     // 09/10 : `intensite` = 2, une part de la Nuit des morts (recompenses.MARQUE_NUIT ; versee a la victoire, sans
     // objet a cliquer). Toute autre valeur : la prime, comme avant.
+    // 12/10 (lot T2, coa-project/docs/CONCEPTION-primes-traqueur-bots.md) : `intensite` = 3, la prime d'un CONTRAT
+    // sur un bot rempli (service : contrats.py, source `contrat_bot`). Aucun service ne l'envoie avant T2.
     bool const faille = c.intensite == 1.0f;
     bool const nuit = c.intensite == 2.0f;
-    char const* const titre = faille ? "La faille d'orage" : nuit ? "La nuit des morts" : "Votre prime";
+    bool const contrat = c.intensite == 3.0f;
+    // 13/10 (lot V, CoaDirecteurConvoi.inc) : `intensite` = 4, une part du CONVOI de bandits (recompenses.MARQUE_CONVOI).
+    bool const convoi = c.intensite == 4.0f;
+    // 13/10 (lot T6, coa-project/docs/CONCEPTION-primes-traqueur-bots.md § 10) : `intensite` = 5, un POT-DE-VIN accepte
+    // (service : contrats.py, source `contrat_bot`, motif `pot_de_vin` ; recompenses.MARQUE_SOUDOIEMENT).
+    bool const soudoiement = c.intensite == 5.0f;
+    char const* const titre = faille ? "La faille d'orage" : nuit ? "La nuit des morts" : contrat ? "Contrat rempli"
+                              : convoi ? "Le convoi des Sept Routes" : soudoiement ? "Un arrangement discret"
+                              : "Votre prime";
     char const* const corps = faille ? "Vous avez aidé à refermer la faille. Voici votre part. Le Directeur."
                               : nuit ? "Vous avez tenu jusqu'à l'aube. Voici votre part. Le Directeur."
+                              : contrat ? "Votre cible est tombée. Voici la prime du contrat. Le Directeur."
+                              : convoi ? "Le convoi est arrivé. Voici votre part. La Compagnie des Sept Routes."
+                              : soudoiement ? "Comme convenu. Vous ne m'avez jamais vu."
                                      : "Le contrat sur votre tête est soldé. Le Directeur.";
     // 08/10 : en jeu, dans les sacs et la bourse ; le reste (et tout, hors ligne) par courrier (VerserRecompense).
     RemiseRecompense const r =
@@ -3090,6 +3155,8 @@ void ExecuterRecompense(CoaDirCommande const& c)
     CharacterDatabase.CommitTransaction(trans);
     DireRemise(p, r, faille ? "Votre part de la faille d'orage"
                      : nuit ? "Votre part de la nuit des morts"
+                     : contrat ? "La prime de votre contrat"
+                     : soudoiement ? "Le prix de votre silence"
                             : "Votre prime");
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     Journaliser(c, "execute", nullptr);
@@ -3796,8 +3863,8 @@ constexpr uint32 EV_SORT_DUREE_MIN_S = 5;
 constexpr uint32 EV_DECLENCHEUR_KIT_MS = 10 * IN_MILLISECONDS;   // vie d'un declencheur de kit ou de son
 constexpr uint32 EV_ENVOI_DIFFERE_MS = 1000;       // le client doit connaitre le declencheur avant le paquet
 constexpr float EV_SOL_ECART_MAX_YD = 15.0f;       // z du service et sol lu : au-dela, refus `sol`
-constexpr size_t EV_DECLENCHEURS_MAX = 64;          // tout le royaume
-constexpr size_t EV_ENVOIS_MAX = 128;
+constexpr size_t EV_DECLENCHEURS_MAX = 256;         // tout le royaume (64 jusqu'au 18/10 : 8 evenements simultanes)
+constexpr size_t EV_ENVOIS_MAX = 512;               // 128 jusqu'au 18/10
 
 enum class EvSous : uint8 { Aucune, Ambiance, Son, Musique, Effet, Annoncer };
 enum class EvLieu : uint8 { Joueur, Point, Haut };
@@ -4064,6 +4131,15 @@ bool EstObjectif(std::string const& t);
 void ExecuterObjectif(CoaDirCommande const& c);
 template <typename Predicat>
 size_t LeverObjectifsSi(Predicat lever, char const* raison);
+// Convoi v2 (13/10/2026) : la barricade, definie dans CoaDirecteurConvoi.inc.
+bool EstBarricade(std::string const& t);
+void ExecuterBarricade(CoaDirCommande const& c);
+template <typename Predicat>
+size_t LeverBarricadesSi(Predicat lever, char const* raison);
+// Lot D5 (15/10/2026) : creatures attirees et soigneurs, definis dans CoaDirecteurImprevu.inc. Leves avec les
+// evenements (memes trois appelants : `lever`, `.directeur stop`, bus eteint), predicat (id, joueur).
+template <typename Predicat>
+size_t LeverImprevuSi(Predicat lever, char const* raison);
 
 void ExecuterEvenement(CoaDirCommande const& c)
 {
@@ -4086,6 +4162,11 @@ void ExecuterEvenement(CoaDirCommande const& c)
     if (EstObjectif(c.texte))  // 10/10/2026 : objectifs d'evenement (etats du monde)
     {
         ExecuterObjectif(c);
+        return;
+    }
+    if (EstBarricade(c.texte))  // 13/10/2026 : convoi v2, la barricade (CoaDirecteurConvoi.inc)
+    {
+        ExecuterBarricade(c);
         return;
     }
     EvLu lu;
@@ -4338,7 +4419,9 @@ size_t LeverEvenementsSi(Predicat lever, char const* raison)
     // Lot D : les invoques d'abord (retrait immediat, ligne `tues=` par lot).
     size_t const invoques = LeverInvoquesSi(lever, raison) + LeverPortailsSi(lever, raison) +   // + lot P
                             LeverCoffresSi(lever, raison) +                                      // + lot G
-                            LeverObjectifsSi(lever, raison);                                     // + objectifs
+                            LeverObjectifsSi(lever, raison) +                                    // + objectifs
+                            LeverBarricadesSi(lever, raison) +                                   // + convoi v2
+                            LeverImprevuSi(lever, raison);                                       // + lot D5
     if (evAmbiances.empty() && evMusiques.empty() && evDeclencheurs.empty() && evEnvois.empty())
         return invoques;
     std::vector<EvAmbiance> ambiances;
@@ -4561,7 +4644,7 @@ constexpr float EV_ERRER_MIN_YD = 3.0f;
 constexpr float EV_ERRER_MAX_YD = 30.0f;
 constexpr uint32 EV_RETRAIT_HORS_VUE_MAX_S = 300;    // au-dela, retire meme vu
 constexpr float EV_VU_MARGE_YD = 10.0f;
-constexpr size_t EV_INVOQUES_MAX = 64;               // tout le royaume
+constexpr size_t EV_INVOQUES_MAX = 256;              // tout le royaume (64 jusqu'au 18/10 : 8 evenements simultanes)
 constexpr uint32 EV_SORT_NAISSANCE = 7398;           // « Birth », effet 46, le monstre sur lui-meme
 // Arrivee `ciel` (10/10/2026, retours du 09/10 : « je pensais les voir surgir d'en haut ») : hauteur de pose au-dessus
 // du sol du point, et duree au bout de laquelle la gravite revient meme si la descente n'est pas finie.
@@ -4608,7 +4691,8 @@ std::vector<EvRenfortVu> evRenfortsVus;               // sous evRenfortsVerrou
 uint32 evRenfortsPerdus = 0;                          // sous evRenfortsVerrou : file pleine
 
 enum class EvApp : uint8 { Aucune, Invoquer, Ordre, Retirer };
-enum class EvOrdre : uint8 { Aucun, Attaquer, Tenir, Errer, ChargerVers };
+// 13/10 (lot V, convoi de bandits, CoaDirecteurConvoi.inc) : Escorter et Assaillir.
+enum class EvOrdre : uint8 { Aucun, Attaquer, Tenir, Errer, ChargerVers, Escorter, Assaillir };
 
 struct EvAppLu
 {
@@ -4628,12 +4712,19 @@ struct EvAppLu
     // Chefs a mecaniques (10/10/2026, CoaDirecteurBoss.inc) : 7e morceau `meca1` | `meca2` | `meca3` (palier du public,
     // seul / 2 a 5 / 5 et plus). 0 : absent.
     uint8 meca = 0;
+    // Lot V (13/10/2026, CoaDirecteurConvoi.inc) : `ordre:assaillir:<protege>` -- la commande `invoquer` du protege.
+    uint32 protege = 0;
+    // Convoi v2 (13/10/2026) : `ordre:escorter:<vitesse>` -- % de la course de base ; 0 : la marche du lot V.
+    uint16 vitesse = 0;
 };
 
 // Lot G des evenements (08/10/2026) : definis dans CoaDirecteurGardien.inc, inclus apres le lot P.
 bool LireMorceauxGardien(std::string const& pv, std::string const& degats, std::string const& renfort, EvAppLu& lu);
 // Chefs a mecaniques (10/10/2026) : definis dans CoaDirecteurBoss.inc, inclus apres le lot G.
 bool LireMeca(std::string const& m, EvAppLu& lu);
+// Convoi de bandits (13/10/2026) : definie dans CoaDirecteurConvoi.inc, incluse apres les chefs a mecaniques. Grammaire
+// A PART de celle du lot D (son epreuve la compare au service : SOUS_ACTIONS_EV_D).
+bool LireOrdreConvoi(std::string const& t, EvAppLu& lu);
 
 char const* NomEvOrdre(EvOrdre o)
 {
@@ -4643,6 +4734,8 @@ char const* NomEvOrdre(EvOrdre o)
         case EvOrdre::Tenir:       return "tenir";
         case EvOrdre::Errer:       return "errer";
         case EvOrdre::ChargerVers: return "charger_vers";
+        case EvOrdre::Escorter:    return "escorter";
+        case EvOrdre::Assaillir:   return "assaillir";
         default:                   return "-";
     }
 }
@@ -4669,6 +4762,8 @@ bool LireApparition(std::string const& t, EvAppLu& lu)
     if (t == "ordre:tenir")        { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::Tenir; return true; }
     if (t == "ordre:errer")        { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::Errer; return true; }
     if (t == "ordre:charger_vers") { lu.sous = EvApp::Ordre; lu.ordre = EvOrdre::ChargerVers; return true; }
+    if (LireOrdreConvoi(t, lu))      // 13/10 : lot V (escorter, assaillir:<protege>)
+        return true;
     static constexpr char const PREFIXE[] = "invoquer:";
     size_t const n = sizeof(PREFIXE) - 1;
     if (t.size() <= n || t.compare(0, n, PREFIXE) != 0)
@@ -4739,7 +4834,14 @@ struct EvInvoque
     bool bouclierActif = false;  // chef : bouclier lie aux renforts du palier 50 pose par le C++, pas encore juge fini
     uint32 bouclierDepuisS = 0;  // chef : Maintenant() de la pose du bouclier
     ObjectGuid chefGuid;         // renfort de palier : son chef
+    // Convoi de bandits (13/10/2026, CoaDirecteurConvoi.inc).
+    bool protege = false;        // gabarit de EV_CONVOI_PROTEGES : passif, jamais cible publiee, jamais egare
+    uint32 etatConvoiS = 0;      // protege : Maintenant() de la derniere ligne `sous_action=convoi motif=etat`
+    bool rapide = false;         // convoi v2 : protege lance au trot (`escorter:<vitesse>`) : etat toutes les 2 s
     uint8 palier = 0;            // renfort de palier : 75, 50 ou 25 ; 0 : autre
+    // Revue 16/10 : assaillant du convoi (ordre `assaillir`) -- le protege vise. IMMUNE_TO_NPC lui est rendu quand ce
+    // protege est mort ou parti, ou au retrait (SuivreAssaillant, CoaDirecteurConvoi.inc). Vide : pas assaillant.
+    ObjectGuid assailli;
 };
 std::vector<EvInvoque> evInvoques;                    // fil monde seul
 
@@ -4986,6 +5088,15 @@ void DeclencherPaliers();
 void SuivreBoucliers();
 bool PctMeca(Unit const* attaquant, uint32 sort, bool tic, uint8& pct);
 bool Insensible(Unit const* u);
+// Convoi de bandits (CoaDirecteurConvoi.inc) : garde de la pose d'un protege, armement, ordres escorter/assaillir,
+// etat du protege, et l'exemption de la garde des egares.
+char const* RefusConvoi(EvAppLu const& lu, uint32 entree);
+void ArmerProtege(Creature* cr, EvInvoque& v);
+void ExecuterOrdreConvoi(CoaDirCommande const& c, EvAppLu const& lu, Player* p);
+void JournaliserProtege(EvInvoque const& v, Creature* cr, char const* motif);
+void SuivreProtege(EvInvoque& v, Creature* cr, uint32 maintenant);
+void SuivreAssaillant(EvInvoque& v, Creature* cr);
+bool EstProtegeDe(Unit const* u, uint32 joueur);
 
 void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 {
@@ -5012,6 +5123,11 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
     if (char const* refusM = RefusMeca(lu, entree))      // 10/10 : `meca<k>` (option, chef de la table, nombre 1)
     {
         RefuserApparition(c, lu, refusM);
+        return;
+    }
+    if (char const* refusV = RefusConvoi(lu, entree))    // 13/10 : protege du convoi (option, nombre 1)
+    {
+        RefuserApparition(c, lu, refusV);
         return;
     }
     float sol = 0.0f;
@@ -5123,6 +5239,7 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
             break;
         }
         DoserInvoque(s, lu.pv, lu.degats);   // lot G : rien sans la forme etendue
+        ArmerProtege(s, poses.back());       // 13/10 : protege du convoi (passif, au pas, sans IMMUNE_TO_NPC)
         if (lu.meca)
             ArmerMeca(s, lu.meca);           // 10/10 : marque des degats en % et palier du public au SmartAI (SetData)
         if (lu.naissance)
@@ -5154,6 +5271,11 @@ void ExecuterInvoquer(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 
 void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
 {
+    if (lu.ordre == EvOrdre::Escorter || lu.ordre == EvOrdre::Assaillir)
+    {
+        ExecuterOrdreConvoi(c, lu, p);   // 13/10 : lot V (CoaDirecteurConvoi.inc)
+        return;
+    }
     uint32 const vise = static_cast<uint32>(c.valeur);   // 0 : tous les invoques du joueur
     float sol = 0.0f;
     if (lu.ordre == EvOrdre::Errer &&
@@ -5180,7 +5302,8 @@ void ExecuterOrdre(CoaDirCommande const& c, EvAppLu const& lu, Player* p)
     uint32 const maintenant = std::max<uint32>(Maintenant(), 1);
     for (EvInvoque& v : evInvoques)
     {
-        if (v.joueur != c.cible || v.mort || (vise && v.id != vise))
+        // 13/10 : un protege du convoi n'obeit qu'a `escorter` (jamais attaquer, tenir, errer, charger_vers).
+        if (v.joueur != c.cible || v.mort || v.protege || (vise && v.id != vise))
             continue;
         ++vises;
         Creature* cr = CreatureInvoquee(v);
@@ -5352,7 +5475,9 @@ bool SuivreEgare(EvInvoque& v, Creature* cr, uint32 maintenant)
         return false;
     }
     Unit* victime = cr->GetVictim();
-    bool const pnj = cr->IsInCombat() && victime && !victime->HasUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
+    // 13/10 : aux prises avec un PROTEGE du convoi de son joueur, il fait ce qu'on lui a dit (`assaillir`) : pas un PNJ.
+    bool const pnj = cr->IsInCombat() && victime && !victime->HasUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED) &&
+                     !EstProtegeDe(victime, v.joueur);
     float const d = cr->GetExactDist2d(p);
     if (!pnj && (cr->IsInCombat() || d <= EV_EGARE_YD))
     {
@@ -5428,11 +5553,17 @@ void SuivreInvoques()
             auto l = evLots.find(v.id);
             if (!v.mort && l != evLots.end())
                 ++l->second.disparus;
+            if (v.protege && !v.mort)
+                JournaliserProtege(v, nullptr, "disparu");   // 13/10 : le convoi perdu sans mort vue (grille, echeance)
             it = evInvoques.erase(it);
             continue;
         }
         if (!v.mort && !cr->IsAlive())
+        {
             NoterMort(v, cr);
+            if (v.protege)
+                JournaliserProtege(v, cr, "mort");             // 13/10 : tout de suite (le lot finit a la passe)
+        }
         else if (!v.mort && cr->GetLevel() != v.niveau)
         {
             // Niveau reecrit apres la pose : le coeur ne porte pas l'exclusion CanScale de la plage
@@ -5462,6 +5593,10 @@ void SuivreInvoques()
                 cr->SetDisableGravity(false);
             v.cielDepuisS = 0;
         }
+        // 13/10 : protege du convoi -- reaction passive, et son etat toutes les EV_CONVOI_ETAT_S secondes.
+        SuivreProtege(v, cr, maintenant);
+        // Revue 16/10 : assaillant dont le protege n'est plus -- l'immunite aux PNJ lui est rendue.
+        SuivreAssaillant(v, cr);
         // 10/10 : garde des egares (relance, puis retrait compte).
         if (!v.mort && v.attaqueS && !v.retraitDepuisS && SuivreEgare(v, cr, maintenant))
         {
@@ -5517,6 +5652,8 @@ void SuivreInvoques()
 #include "CoaDirecteurObjectifs.inc"
 // Chefs a mecaniques (10/10/2026) : paliers, bouclier lie, degats en % (fragment a part, meme espace).
 #include "CoaDirecteurBoss.inc"
+// Convoi de bandits (13/10/2026, lot V) : protege, escorter, assaillir, etat du protege (fragment a part, meme espace).
+#include "CoaDirecteurConvoi.inc"
 // Ressources rares des evenements (11/10/2026) : la tranche suit le niveau du MONSTRE (fragment a part).
 #include "CoaDirecteurRessources.inc"
 
@@ -6448,6 +6585,9 @@ void TracerMortEntrePactes(Player* victime, Player* tueur, Creature* familier)
 }
 
 // Lot S des evenements (08/10/2026) : le soin des bots envers le joueur (fragment a part, meme espace de noms).
+// Lot D5 « l'imprevu » (15/10/2026) : verbes `attirer` et `soigner` (fragment a part, meme espace ; AVANT le lot S,
+// dont JoueurASoigner consulte le patient impose).
+#include "CoaDirecteurImprevu.inc"
 #include "CoaDirecteurSoin.inc"
 // Vrai groupe (09/10/2026) : les inscrits rejoignent le groupe du joueur servi (fragment a part, meme espace de noms).
 #include "CoaDirecteurGroupe.inc"
@@ -6527,7 +6667,8 @@ void PublierCiblesEvenement()
     std::unordered_map<uint32, std::vector<ObjectGuid>> neuf;
     if (sPlayerbotAIConfig.directeurEvenementBots)
         for (EvInvoque const& v : evInvoques)
-            if (!v.mort && !v.retraitDepuisS)   // relecture : un invoque en cours de retrait n'est plus une cible
+            // relecture : un invoque en cours de retrait n'est plus une cible ; 13/10 : un protege du convoi jamais.
+            if (!v.mort && !v.retraitDepuisS && !v.protege)
             {
                 neuf[v.joueur].push_back(v.guid);
                 // Bots reactifs (08/10) : engagement reel, lu ici (fil monde, cartes a l'arret, P-137).
@@ -6849,6 +6990,9 @@ void Entretien(uint32 diff)
     TracerBanc();
     // Retraite des chasseurs de reserve (03/10/2026). Sans retraite : un chargement.
     SuivreRetraites();
+    // Lots T4-T5 (12/10/2026) : reactions des cibles de contrat. Option eteinte : un test. AVANT Reconstruire
+    // (fin d'Entretien) : une cible ou un garde sorti de l'immobilite est recompose dans la meme seconde.
+    SuivreReactions();
     LeverEchues();
     LeverSuspensionsEchues();
     LeverSuspensionsMaitreHumain();
@@ -6869,10 +7013,16 @@ void Entretien(uint32 diff)
     // Lot S des evenements : inscrits, lieux (gardes des soins), reliquat. AVANT PublierCiblesEvenement, qui lit et
     // remet a zero ses compteurs ; place loin de l'appel du lot P pour ne pas heurter le lot G a la fusion.
     SuivreSoinsEvenement();
+    // Lot D5 (15/10/2026) : creatures attirees (course, engagement, laisse, borne anti-traine, retour), puis soigneurs
+    // (echeances, assistance, publication pour les fils de carte). Sans registre : un test chacun.
+    SuivreAttires();
+    SuivreSoigneurs();
     // Lot D des evenements : invoques (morts, retraits hors de vue, joueur parti, fins de lot).
     SuivreInvoques();
     // Lot P des evenements : portails a refermer (clics, echeances).
     SuivrePortails();
+    // Convoi v2 (13/10) : barricades (clics, demolitions humaines ou par un bot, echeances). APRES les invoques (la garde).
+    SuivreBarricades();
     // Lot G des evenements : coffres de la faille (pilles, echeances).
     SuivreCoffres();
     // Objectifs d'evenement (10/10) : APRES les invoques (ennemis restants de cette seconde).
@@ -7477,6 +7627,868 @@ void ViderRepos()
     std::unique_lock<std::shared_mutex> garde(verrouConsignes);
     reposReserve.clear();
     nbRepos.store(0, std::memory_order_relaxed);
+}
+
+// ================================================================== reactions des cibles de contrat (T4, T5, T6)
+//
+// 12/10/2026, coa-project/docs/CONCEPTION-primes-traqueur-bots.md (decision du commanditaire : la cible TIRE une
+// reaction au hasard a chaque contrat, table extensible). Le service (contrats.py) tire la reaction et l'ecrit dans
+// params de l'arc `contrat` : `reaction` (nom) et `gardes` (guids PRETS, prepares par `chasser P-0` au niveau du
+// chasseur). Le jeu ne fait que LIRE l'arc (P-134), toutes les REACTIONS_RELIRE_S, et agit chaque seconde au fil
+// monde (Entretien, cartes a l'arret, P-137). Une reaction = une branche de SuivreReactions ; un nom que ce binaire
+// ne connait pas est journalise une fois et la cible reste passive (C1). Option AiPlayerbot.Directeur.Reactions.
+//   defense      : le chasseur a 40 yd et en ligne de vue (ou deja aux prises avec lui) : elle sort du repos et de
+//                  l'immobilite et l'engage la premiere (AttackAction recopie : cible courante, moteur de combat).
+//   fuite_gardes : tant que le chasseur est loin (> 250 yd, ou autre carte) et qu'aucun humain n'est a 150 yd du
+//                  depart ni de l'arrivee, chaque garde PRET (au niveau du chasseur a 3 pres) qui s'est eloigne de
+//                  plus de 35 yd rejoint la cible par un saut cache (6-12 yd d'elle, sol sec), 15 s au plus souvent ;
+//                  puis, le chasseur a 60 yd en vue (ou aux prises avec elle a 100 yd), elle fuit UNE fois a 120 yd
+//                  (mouvement FORCE : le moteur ne le reprend pas avant son terme) et chaque garde a 100 yd du
+//                  chasseur l'engage.
+// Lot T6 (13/10/2026, meme document § 10 ; option AiPlayerbot.Directeur.ReactionsT6, eteinte) :
+//   fuite_monture : le chasseur a 60 yd en vue (ou aux prises), elle MONTE (sorts de monture terrestre qu'elle
+//                  connait, lus comme l'action « check mount state » : CollectMountData) puis fuit a 200 yd ; sans
+//                  monture possible (interieur, combat, aucun sort, incantation ratee), a pied a 120 yd. A l'arrivee
+//                  elle DESCEND et redevient immobile (elle riposte) : un chasseur a pied la rattrape. Apres
+//                  REACTION_SOUFFLE_S, le chasseur de nouveau a 60 yd en vue : une SECONDE fuite, a pied, a 120 yd,
+//                  dans une autre direction que la premiere si le sol le permet (`etape=fuite2`). Jamais trois.
+//   fuite_gardes  : la meme seconde fuite (apres la fin de la premiere et le souffle), ses gardes a 100 yd l'engagent.
+//   soudoiement   : le chasseur a 40 yd en vue, hors combat avec lui : elle s'arrete, se tourne vers lui, ne
+//                  l'attaque pas (elle garde son repos) et lui CHUCHOTE un pot-de-vin (params.pot_de_vin_c, ecrit
+//                  par le service). Le traqueur (CorpsTraqueur) montre l'offre a l'addon, qui offre deux boutons. Le
+//                  SERVICE tranche (ligne `etape=offre`, lue dans CoaBots.log) : accepte -> l'arc est clos, et la
+//                  cible REPART (immobilite levee, quelques pas loin du chasseur) ; refus ou 30 s -> il reecrit la
+//                  reaction en `defense`. Le chasseur qui la frappe : elle se defend tout de suite (`etape=frappe`),
+//                  et le service, qui lit la ligne, fait de meme. Sans decision du service en
+//                  REACTION_SOUDOIEMENT_ABANDON_S, elle se defend (le service ne peut plus accepter, borne a 35 s).
+constexpr uint32 REACTIONS_RELIRE_S = 5;
+constexpr uint32 REACTIONS_MAX = 16;
+constexpr float REACTION_DEFENSE_YD = 40.0f;
+constexpr float REACTION_FUITE_YD = 60.0f;
+constexpr float REACTION_FUITE_PAS_YD = 120.0f;
+constexpr float REACTION_FUITE_ECART_Z = 15.0f;
+constexpr uint32 REACTION_FUITE_MIN_MS = 4000;
+constexpr uint32 REACTION_FUITE_MAX_MS = 20000;
+constexpr float REACTION_GARDE_PROCHE_YD = 35.0f;
+constexpr float REACTION_CHASSEUR_LOIN_YD = 250.0f;
+constexpr float REACTION_SAUT_HUMAIN_YD = 150.0f;
+constexpr float REACTION_ENGAGE_YD = 100.0f;
+constexpr uint32 REACTION_SAUT_INTERVALLE_S = 15;
+constexpr int32 REACTION_GARDE_NIVEAU_ECART = 3;
+constexpr size_t REACTION_GARDES_MAX = 4;
+// Lot T6.
+constexpr float REACTION_FUITE_MONTEE_PAS_YD = 200.0f;
+constexpr uint32 REACTION_FUITE_MONTEE_MAX_MS = 25000;   // 200 yd a la vitesse d'une monture lente (~10 yd/s) : 20 s
+constexpr uint32 REACTION_MONTE_MAX_S = 3;               // incantation d'une monture : 1,5 s ; au-dela, a pied
+constexpr uint32 REACTION_MONTE_MIN_S = 2;               // une incantation finie sans monture : a pied
+constexpr uint32 REACTION_SOUFFLE_S = 6;                 // apres une fuite, pas de seconde avant ce delai
+constexpr float REACTION_ARRIVEE_YD = 6.0f;
+constexpr float REACTION_AUTRE_DIRECTION_RAD = 0.52f;    // 30 degres
+constexpr float REACTION_REPART_PAS_YD = 60.0f;
+constexpr float REACTION_SOUDOIEMENT_YD = 40.0f;
+constexpr uint32 REACTION_SOUDOIEMENT_S = 30;            // = contrats.SOUDOIEMENT_S (offre montree au joueur)
+constexpr uint32 REACTION_SOUDOIEMENT_ABANDON_S = 45;    // > contrats.SOUDOIEMENT_S + SOUDOIEMENT_GRACE_S (35)
+constexpr uint32 REACTION_IMMOBILE_APRES_S = 30 * MINUTE;   // = REPOS_RESERVE_S : immobile apres son arrivee
+
+enum PhaseFuite : uint8
+{
+    FUITE_ATTENTE = 0,   // pas encore partie
+    FUITE_MONTE   = 1,   // incantation de la monture (fuite_monture)
+    FUITE_COURT   = 2,   // en route vers le point
+    FUITE_ARRIVEE = 3,   // arrivee, a pied, immobile (fuite_monture)
+};
+
+struct ReactionContrat
+{
+    uint32 arc = 0;
+    uint32 joueur = 0;
+    uint32 cible = 0;
+    std::string reaction;
+    std::vector<uint32> gardes;
+    bool declenchee = false;
+    bool inconnueDite = false;
+    std::unordered_map<uint32, uint32> sautGarde;   // garde -> Maintenant() du dernier saut
+    // Lot T6 : fuites (fuite_monture, fuite_gardes) et soudoiement. Remis a zero quand la reaction change (le service
+    // reecrit `soudoiement` en `defense` apres un refus).
+    uint32 potDeVinC = 0;            // params.pot_de_vin_c (soudoiement)
+    uint8 fuites = 0;                // fuites parties (0, 1, 2)
+    uint8 phase = FUITE_ATTENTE;
+    uint32 phaseS = 0;               // Maintenant() au debut de la phase
+    uint32 finFuiteS = 0;            // terme du mouvement en cours
+    float pointX = 0.0f, pointY = 0.0f, pointZ = 0.0f;
+    float cap = 0.0f;                // direction de la premiere fuite (radians)
+    bool montee = false;             // fuite en cours a monture
+    bool offre = false;              // soudoiement : offre chuchotee
+    uint32 offreS = 0;
+    bool frappe = false;             // le chasseur l'a frappee (avant ou pendant l'offre)
+    bool defenseLocale = false;      // sans decision du service : elle se defend
+    bool defenseFaite = false;
+    bool sansMontantDit = false;
+};
+std::unordered_map<uint32, ReactionContrat> reactionsContrat;   // arc -> etat ; fil monde seul
+uint32 reactionsLuesS = 0;
+// Lot T6 : arcs dont l'offre est deja faite (arc -> Maintenant() de l'offre). Survit a l'oubli d'un arc par
+// LireReactions (requete en echec un instant) : une offre n'est jamais chuchotee deux fois. Fil monde seul.
+std::unordered_map<uint32, uint32> offresFaites;
+
+// Les guids d'un texte JSON (« 123 » ou « [12, 34] ») : suites de chiffres (10 au plus, <= UINT32_MAX), `max` au plus.
+std::vector<uint32> GuidsTexte(std::string const& v, size_t max)
+{
+    std::vector<uint32> out;
+    uint64 n = 0;
+    size_t chiffres = 0;
+    auto fin = [&]()
+    {
+        if (chiffres && chiffres <= 10 && n && n <= std::numeric_limits<uint32>::max() && out.size() < max)
+            out.push_back(static_cast<uint32>(n));
+        n = 0;
+        chiffres = 0;
+    };
+    for (char ch : v)
+    {
+        if (ch >= '0' && ch <= '9')
+        {
+            if (++chiffres <= 10)
+                n = n * 10 + static_cast<uint64>(ch - '0');
+        }
+        else
+            fin();
+    }
+    fin();
+    return out;
+}
+
+void JournaliserReaction(ReactionContrat const& e, char const* etape, std::string const& detail)
+{
+    LOG_INFO("playerbots", "coa directeur reaction: arc={} joueur={} cible={} reaction={} etape={}{}", e.arc,
+             e.joueur, e.cible, e.reaction, etape, detail);
+}
+
+struct Fuite
+{
+    float pas = 0.0f;                // 0 : aucun point de fuite
+    float cap = 0.0f;
+    uint32 delaiMs = 0;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    bool autreDirection = true;      // seconde fuite : la direction s'ecarte de la premiere d'au moins 30 degres
+};
+
+// Fuite : un point a `pas` yd, a l'oppose du chasseur, sol sec, puis un mouvement de priorite FORCEE (LastMovement) :
+// MovementAction::IsWaitingForLastMove refuse tout mouvement de priorite inferieure (errance, combat) jusqu'a son
+// terme. Premiere fuite : ecarts de 0, +-35, +-70 degres. `capEvite` (seconde fuite) : d'abord les directions a plus
+// de 30 degres de la premiere (+-70, +-35, +-100, puis 0), puis, s'il n'y a de sol sec que la, n'importe laquelle.
+// `garderMonture` (fuite_monture) : la monture reste ; sinon elle est otee. -> la fuite (pas = 0 : aucun point).
+Fuite FuirChasseur(Player* bot, Player* chasseur, float pas = REACTION_FUITE_PAS_YD, bool garderMonture = false,
+                   float const* capEvite = nullptr)
+{
+    Fuite f;
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
+    Map* map = bot->GetMap();
+    if (!ia || !map)
+        return f;
+    float const bx = bot->GetPositionX();
+    float const by = bot->GetPositionY();
+    float const bz = bot->GetPositionZ();
+    float const dx = bx - chasseur->GetPositionX();
+    float const dy = by - chasseur->GetPositionY();
+    float const cap = (dx * dx + dy * dy) > 0.01f ? std::atan2(dy, dx) : bot->GetOrientation();
+    static constexpr float ECARTS[] = {0.0f, 0.61f, -0.61f, 1.22f, -1.22f};
+    static constexpr float ECARTS_AUTRE[] = {1.22f, -1.22f, 0.61f, -0.61f, 1.75f, -1.75f, 0.0f};
+    float const* const ecarts = capEvite ? ECARTS_AUTRE : ECARTS;
+    size_t const n = capEvite ? sizeof(ECARTS_AUTRE) / sizeof(ECARTS_AUTRE[0]) : sizeof(ECARTS) / sizeof(ECARTS[0]);
+    for (int passe = 0; passe < (capEvite ? 2 : 1); ++passe)
+    {
+        for (size_t i = 0; i < n; ++i)
+        {
+            float const c = cap + ecarts[i];
+            bool const autre = !capEvite || std::fabs(std::remainder(c - *capEvite, 2.0f * float(M_PI))) >=
+                                                REACTION_AUTRE_DIRECTION_RAD;
+            if (passe == 0 && !autre)
+                continue;
+            float const px = bx + pas * std::cos(c);
+            float const py = by + pas * std::sin(c);
+            float sol = 0.0f;
+            if (!SolSec(map, px, py, bz + REACTION_FUITE_ECART_Z, sol) || std::fabs(sol - bz) > REACTION_FUITE_ECART_Z)
+                continue;
+            if (bot->IsMounted() && !garderMonture)
+                bot->RemoveAurasByType(SPELL_AURA_MOUNTED);
+            // Relecture (M3) : aux prises, le moteur de COMBAT poursuivrait le chasseur (ChaseTo ne consulte pas la
+            // priorite du dernier mouvement) et Reconstruire saute un bot en combat (« stay » resterait). On le sort
+            // du combat : il fuit, et ne riposte que si le chasseur le rattrape.
+            if (bot->IsInCombat())
+            {
+                bot->AttackStop();
+                bot->CombatStop(true);
+                ia->GetAiObjectContext()->GetValue<Unit*>("current target")->Set(nullptr);
+                bot->SetSelection(ObjectGuid::Empty);
+                ia->ChangeEngine(BOT_STATE_NON_COMBAT);
+            }
+            bot->GetMotionMaster()->MovePoint(0, px, py, sol, FORCED_MOVEMENT_RUN);
+            float const vitesse = std::max(1.0f, bot->GetSpeed(MOVE_RUN));
+            uint32 const plafond = garderMonture ? REACTION_FUITE_MONTEE_MAX_MS : REACTION_FUITE_MAX_MS;
+            uint32 const delai = std::min(plafond, std::max(REACTION_FUITE_MIN_MS,
+                                          static_cast<uint32>(pas / vitesse * 1000.0f)));
+            ia->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().Set(
+                map->GetId(), px, py, sol, bot->GetOrientation(), static_cast<float>(delai),
+                MovementPriority::MOVEMENT_FORCED);
+            f.pas = pas;
+            f.cap = c;
+            f.delaiMs = delai;
+            f.x = px;
+            f.y = py;
+            f.z = sol;
+            f.autreDirection = autre;
+            return f;
+        }
+    }
+    return f;
+}
+
+// Lot T6 : immobile JUSQU'A `finS` au moins -- PoserImmobile ecrase l'echeance, et raccourcirait celle de la
+// preparation (REPOS_RESERVE_S). Fil monde seul (ecriture), comme PoserImmobile.
+void PoserImmobileAuMoins(uint32 guid, uint32 finS)
+{
+    if (nbImmobiles.load(std::memory_order_relaxed))
+    {
+        std::shared_lock<std::shared_mutex> garde(verrouImmobiles);
+        auto const it = immobiles.find(guid);
+        if (it != immobiles.end() && it->second >= finS)
+            return;
+    }
+    PoserImmobile(guid, finS);
+}
+
+// Lot T6 : une fuite partie, gardee dans l'etat (point, terme, cap de la premiere).
+void NoterFuite(ReactionContrat& e, Fuite const& f, uint32 maintenant, bool montee)
+{
+    if (!e.fuites)
+        e.cap = f.cap;
+    ++e.fuites;
+    e.phase = FUITE_COURT;
+    e.phaseS = maintenant;
+    e.finFuiteS = maintenant + (f.delaiMs + 999) / 1000;
+    e.pointX = f.x;
+    e.pointY = f.y;
+    e.pointZ = f.z;
+    e.montee = montee;
+}
+
+// Lot T6 : en route, la fuyarde a pu etre arretee (une monture lancee par sa propre IA, qui arrete le mouvement ; un
+// sort) : le mouvement vers le point est relance, avec le temps qui reste. Jamais en combat (le moteur de combat la
+// tient : elle riposte) ni pendant une incantation.
+void RelancerFuite(Player* bot, ReactionContrat const& e, uint32 maintenant)
+{
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
+    if (!ia || bot->isMoving() || bot->IsInCombat() || bot->IsNonMeleeSpellCast(false) || maintenant >= e.finFuiteS ||
+        bot->GetExactDist2d(e.pointX, e.pointY) <= REACTION_ARRIVEE_YD)
+        return;
+    bot->GetMotionMaster()->MovePoint(0, e.pointX, e.pointY, e.pointZ, FORCED_MOVEMENT_RUN);
+    ia->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().Set(
+        bot->GetMapId(), e.pointX, e.pointY, e.pointZ, bot->GetOrientation(),
+        static_cast<float>((e.finFuiteS - maintenant) * IN_MILLISECONDS), MovementPriority::MOVEMENT_FORCED);
+}
+
+// Lot T6 : monter pour fuir. Les sorts de monture TERRESTRE (indice 0) que le bot connait, lus par CollectMountData
+// (CheckMountStateAction.cpp, la lecture de l'action « check mount state »), du plus rapide au plus lent ; le premier
+// que l'IA peut lancer (PlayerbotAI::CanCastSpell, comme TryRandomMountFiltered) est INCANTE (1,5 s : le chasseur
+// peut l'interrompre). Jamais en interieur, en combat, sous le niveau des montures de la conf. -> vrai si
+// l'incantation est partie (ou si elle est deja montee).
+bool MonterPourFuir(Player* bot, PlayerbotAI* ia)
+{
+    if (bot->IsMounted())
+        return true;
+    if (!ia || !bot->IsOutdoors() || bot->IsInCombat() || bot->IsInWater() ||
+        bot->GetLevel() < sPlayerbotAIConfig.useGroundMountAtMinLevel)
+        return false;
+    MountData const donnees = CollectMountData(bot);
+    auto const terrestres = donnees.allSpells.find(0);
+    if (terrestres == donnees.allSpells.end())
+        return false;
+    for (auto vitesse = terrestres->second.rbegin(); vitesse != terrestres->second.rend(); ++vitesse)
+        for (uint32 const sort : vitesse->second)
+        {
+            if (!ia->CanCastSpell(sort, bot, true))
+                continue;
+            if (bot->isMoving())
+                bot->StopMoving();
+            if (bot->CastSpell(bot, sort, false) == SPELL_CAST_OK)
+                return true;
+        }
+    return false;
+}
+
+void LireReactions();
+
+// Lot T6 : l'arc a quitte les arcs actifs en `piste` (contrat fini). Soudoiement accepte -- l'arc est CLOS avec la raison
+// `soudoye` (relu ici, une requete, rare) -- : la cible REPART : immobilite levee (son IA reprend), quelques pas loin du
+// chasseur ; elle GARDE son repos : elle ne l'attaque pas. Fuite montee finie (relecture m1) : l'immobilite posee a son
+// arrivee est levee (sinon « stay » jusqu'a 30 min hors contrat).
+void RepartirApresSoudoiement(ReactionContrat const& e)
+{
+    if (e.reaction == "fuite_monture" && e.fuites)
+    {
+        LeverImmobile(e.cible);
+        return;
+    }
+    if (e.reaction != "soudoiement" || !e.offre || e.frappe || e.defenseLocale)
+        return;
+    QueryResult clos = CharacterDatabase.Query(
+        "SELECT 1 FROM coa_dir_arc WHERE id = {} AND genre = 'contrat' AND statut = 'clos' AND raison = 'soudoye'", e.arc);
+    if (!clos)
+        return;   // fini autrement (expire, abandon, joueur parti...) : elle reste ou elle est
+    Player* cible = JoueurConnecte(e.cible);
+    if (!cible || !cible->IsInWorld() || cible->IsBeingTeleported() || !cible->IsAlive() ||
+        !sRandomPlayerbotMgr.IsRandomBot(cible))
+        return;
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(cible);
+    if (!ia || ia->HasGameClientMaster())
+        return;
+    LeverImmobile(e.cible);
+    Player* chasseur = JoueurConnecte(e.joueur);
+    float pas = 0.0f;
+    if (chasseur && chasseur->IsInWorld() && chasseur->GetMapId() == cible->GetMapId() &&
+        chasseur->GetInstanceId() == cible->GetInstanceId() && !cible->IsInCombat())
+        pas = FuirChasseur(cible, chasseur, REACTION_REPART_PAS_YD).pas;
+    JournaliserReaction(e, "repart", Acore::StringFormat(" pas_yd={:.0f}", pas));
+}
+
+void LireReactions()
+{
+    QueryResult r = CharacterDatabase.Query(
+        "SELECT id, joueur, IFNULL(CAST(JSON_EXTRACT(params, '$.cible') AS CHAR), ''),"
+        " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.reaction')), ''),"
+        " IFNULL(CAST(JSON_EXTRACT(params, '$.gardes') AS CHAR), ''),"
+        " IFNULL(CAST(JSON_EXTRACT(params, '$.pot_de_vin_c') AS CHAR), '')"
+        " FROM coa_dir_arc WHERE genre = 'contrat' AND statut = 'actif' AND etape = 'piste'"
+        // Revue 16/10 : un arc echu que le service n'a pas clos (service arrete) ne fait plus reagir sa cible.
+        " AND (fin_prevue IS NULL OR fin_prevue > UTC_TIMESTAMP())"
+        " AND JSON_EXTRACT(params, '$.reaction') IS NOT NULL ORDER BY id LIMIT {}",
+        REACTIONS_MAX);
+    // Relecture T6 (M2) : `nullptr` dit aussi bien « aucun contrat » que « requete en echec ». Une requete temoin
+    // tranche : en echec, rien n'est oublie (sinon une cible perdrait ses fuites, ou repartirait sans marche conclu).
+    if (!r && !reactionsContrat.empty() && !CharacterDatabase.Query("SELECT 1"))
+        return;
+    std::unordered_set<uint32> vus;
+    if (r)
+    {
+        do
+        {
+            Field* f = r->Fetch();
+            uint32 const arc = f[0].Get<uint32>();
+            std::vector<uint32> const cible = GuidsTexte(f[2].Get<std::string>(), 1);
+            std::string const reaction = f[3].Get<std::string>();
+            if (cible.empty() || reaction.empty() || reaction.size() > 24)
+                continue;
+            vus.insert(arc);
+            ReactionContrat& e = reactionsContrat[arc];
+            // Lot T6 : une reaction qui CHANGE (soudoiement refuse -> defense) repart de zero.
+            if ((!e.reaction.empty() && e.reaction != reaction) || (e.cible && e.cible != cible[0]))
+                e = ReactionContrat();
+            e.arc = arc;
+            e.joueur = f[1].Get<uint32>();
+            e.cible = cible[0];
+            e.reaction = reaction;
+            e.gardes = GuidsTexte(f[4].Get<std::string>(), REACTION_GARDES_MAX);
+            std::vector<uint32> const pot = GuidsTexte(f[5].Get<std::string>(), 1);
+            e.potDeVinC = pot.empty() ? 0 : pot[0];
+        } while (r->NextRow());
+    }
+    for (auto it = reactionsContrat.begin(); it != reactionsContrat.end();)
+    {
+        if (vus.count(it->first))
+        {
+            ++it;
+            continue;
+        }
+        RepartirApresSoudoiement(it->second);
+        it = reactionsContrat.erase(it);
+    }
+    if (offresFaites.size() > 256)
+        for (auto it = offresFaites.begin(); it != offresFaites.end();)
+            it = (Maintenant() - it->second > HOUR) ? offresFaites.erase(it) : std::next(it);
+}
+
+// La cible (ou un garde) engage le chasseur : ce que fait AttackAction::Attack (AttackAction.cpp:185-215),
+// au fil monde. -> faux si l'attaque n'est pas permise (lieu sans PvP, faction, maitre humain).
+bool EngagerChasseur(Player* bot, Player* chasseur)
+{
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(bot);
+    if (!ia || ia->HasGameClientMaster() || !bot->IsAlive() || !chasseur->IsAlive() ||
+        !bot->IsValidAttackTarget(chasseur))
+        return false;
+    if (bot->IsMounted())
+        bot->RemoveAurasByType(SPELL_AURA_MOUNTED);
+    bot->SetSelection(chasseur->GetGUID());
+    ia->GetAiObjectContext()->GetValue<Unit*>("current target")->Set(chasseur);
+    ia->ChangeEngine(BOT_STATE_COMBAT);
+    bot->Attack(chasseur, !PlayerbotAI::IsRanged(bot));
+    return true;
+}
+
+// Un garde utilisable : bot aleatoire sans maitre humain, vivant, dans le monde, sur la carte de la cible, au niveau
+// du chasseur a REACTION_GARDE_NIVEAU_ECART pres (sinon sa preparation a echoue : on ne l'amene pas).
+Player* GardeValide(uint32 g, Player* cible, Player* chasseur)
+{
+    Player* p = JoueurConnecte(g);
+    if (!p || p == cible || !p->IsInWorld() || p->IsBeingTeleported() || !p->IsAlive() || p->IsInFlight() ||
+        p->InBattleground() || !sRandomPlayerbotMgr.IsRandomBot(p))
+        return nullptr;
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(p);
+    if (!ia || ia->HasGameClientMaster())
+        return nullptr;
+    if (p->GetMapId() != cible->GetMapId() || p->GetInstanceId() != cible->GetInstanceId())
+        return nullptr;
+    if (std::abs(static_cast<int32>(p->GetLevel()) - static_cast<int32>(chasseur->GetLevel())) >
+        REACTION_GARDE_NIVEAU_ECART)
+        return nullptr;
+    return p;
+}
+
+// Saut cache d'un garde pres de la cible : 6-12 yd, sol sec a TIRAGE_ECART_Z pres, aucun humain a 150 yd du depart ni
+// de l'arrivee (le chasseur compris). -> vrai si le saut est parti.
+bool SauterGardePres(Player* garde, Player* cible)
+{
+    Map* map = cible->GetMap();
+    if (!map || garde->IsInCombat())
+        return false;
+    uint32 const carte = cible->GetMapId();
+    if (HumainProcheSauf(WorldPosition(garde), carte, REACTION_SAUT_HUMAIN_YD, 0))
+        return false;
+    for (int essai = 0; essai < 4; ++essai)
+    {
+        float const a = frand(0.0f, 2.0f * float(M_PI));
+        float const r = frand(6.0f, 12.0f);
+        float const px = cible->GetPositionX() + r * std::cos(a);
+        float const py = cible->GetPositionY() + r * std::sin(a);
+        float sol = 0.0f;
+        if (!SolSec(map, px, py, cible->GetPositionZ() + Z_OFFSET_FIND_HEIGHT, sol) ||
+            std::fabs(sol - cible->GetPositionZ()) > TIRAGE_ECART_Z)
+            continue;
+        if (HumainProcheSauf(WorldPosition(carte, px, py, sol), carte, REACTION_SAUT_HUMAIN_YD, 0))
+            return false;
+        // Relecture (M4) : une position « stay » posee (commande de chat) ramenerait le garde a son ancien point
+        // (ReturnToStayPositionTrigger) : oubliee. +0,5 yd au-dessus du sol, comme les autres sauts du fichier.
+        if (PlayerbotAI* ia = GET_PLAYERBOT_AI(garde))
+            ia->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get()["stay"].Reset();
+        return CoaDirecteur::Sauter(garde, WorldLocation(carte, px, py, sol + 0.5f, a + float(M_PI)));
+    }
+    return false;
+}
+
+// Lot T6 : ce que la cible voit du chasseur, cette seconde.
+struct VueChasseur
+{
+    bool memeCarte = false;
+    float d = -1.0f;
+    bool vu = false;          // a `vuYd` au plus et en ligne de vue (calculee de pres seulement : couteuse)
+    bool auxPrises = false;   // en combat AVEC le chasseur, a REACTION_ENGAGE_YD au plus
+};
+
+VueChasseur Regarder(Player* cible, Player* chasseur, float vuYd)
+{
+    VueChasseur v;
+    v.memeCarte = chasseur->GetMapId() == cible->GetMapId() && chasseur->GetInstanceId() == cible->GetInstanceId();
+    if (!v.memeCarte || !chasseur->IsAlive())
+        return v;
+    v.d = chasseur->GetExactDist2d(cible);
+    v.vu = v.d <= vuYd && cible->IsWithinLOSInMap(chasseur);
+    v.auxPrises = v.d <= REACTION_ENGAGE_YD && cible->IsInCombatWith(chasseur);
+    return v;
+}
+
+// Lot T6 : chaque garde PRET a 100 yd du chasseur, pas deja en combat, l'engage. -> gardes engages.
+uint32 EngagerGardes(ReactionContrat const& e, Player* cible, Player* chasseur, bool seulementLibres)
+{
+    uint32 engages = 0;
+    for (uint32 g : e.gardes)
+    {
+        Player* garde = GardeValide(g, cible, chasseur);
+        if (!garde || garde->GetExactDist2d(chasseur) > REACTION_ENGAGE_YD || (seulementLibres && garde->IsInCombat()))
+            continue;
+        LeverImmobile(g);
+        LeverRepos(g);
+        if (EngagerChasseur(garde, chasseur))
+            ++engages;
+    }
+    return engages;
+}
+
+// Lot T6 : la SECONDE fuite (fuite_monture, fuite_gardes), a pied, ailleurs que la premiere si le sol le permet. Le
+// chasseur doit etre de nouveau a 60 yd en vue (ou aux prises), REACTION_SOUFFLE_S apres le terme de la premiere.
+// -> vrai si elle est partie (ou si un garde a engage le chasseur, fuite_gardes : la reaction est consommee).
+bool SecondeFuite(ReactionContrat& e, Player* cible, Player* chasseur, uint32 maintenant)
+{
+    // Le souffle court depuis l'arrivee (fuite_monture : elle s'arrete au point) ou depuis le terme du mouvement.
+    uint32 const depuis = e.phase == FUITE_ARRIVEE && e.reaction == "fuite_monture" ? e.phaseS : e.finFuiteS;
+    if (e.fuites != 1 || maintenant < depuis + REACTION_SOUFFLE_S)
+        return false;
+    VueChasseur const v = Regarder(cible, chasseur, REACTION_FUITE_YD);
+    if (!(v.vu || v.auxPrises))
+        return false;
+    Fuite const f = FuirChasseur(cible, chasseur, REACTION_FUITE_PAS_YD, false, &e.cap);
+    uint32 const engages = e.reaction == "fuite_gardes" ? EngagerGardes(e, cible, chasseur, true) : 0;
+    if (f.pas <= 0.0f && !engages)
+        return false;   // aucun sol sec ou fuir, aucun garde : reessai la seconde suivante, immobilite gardee
+    // Apres le mouvement (meme seconde, Reconstruire passe plus tard dans Entretien) : « stay » ne l'arrete pas.
+    LeverImmobile(e.cible);
+    float const cap1 = e.cap;
+    if (f.pas > 0.0f)
+        NoterFuite(e, f, maintenant, false);
+    else
+        e.fuites = 2;
+    JournaliserReaction(e, "fuite2", Acore::StringFormat(" fuite_yd={:.0f} autre_direction={} ecart_deg={:.0f}"
+                                                         " gardes_engages={} distance={:.0f}",
+                                                         f.pas, f.autreDirection ? 1 : 0,
+                                                         f.pas > 0.0f ? std::fabs(std::remainder(f.cap - cap1,
+                                                             2.0f * float(M_PI))) * 180.0f / float(M_PI) : 0.0f,
+                                                         engages, v.d));
+    return true;
+}
+
+// Lot T6 : fuite_monture, une seconde de la machine a etats (voir l'en-tete de la section).
+void SuivreFuiteMontee(ReactionContrat& e, Player* cible, Player* chasseur, PlayerbotAI* ia, uint32 maintenant)
+{
+    switch (e.phase)
+    {
+        case FUITE_ATTENTE:
+        {
+            VueChasseur const v = Regarder(cible, chasseur, REACTION_FUITE_YD);
+            if (!(v.vu || v.auxPrises))
+                return;
+            // Aux prises : pas d'incantation (la monture est interdite en combat) : a pied, tout de suite.
+            if (!v.auxPrises && MonterPourFuir(cible, ia))
+            {
+                e.phase = FUITE_MONTE;
+                e.phaseS = maintenant;
+                JournaliserReaction(e, "monte", Acore::StringFormat(" deja_montee={} distance={:.0f}",
+                                                                    cible->IsMounted() ? 1 : 0, v.d));
+                return;
+            }
+            Fuite const f = FuirChasseur(cible, chasseur);
+            if (f.pas <= 0.0f)
+                return;   // aucun sol sec : reessai la seconde suivante, immobile
+            LeverImmobile(e.cible);
+            NoterFuite(e, f, maintenant, false);
+            JournaliserReaction(e, "fuite", Acore::StringFormat(" fuite_yd={:.0f} monture=0 raison={} distance={:.0f}",
+                                                                f.pas, v.auxPrises ? "aux_prises" : "sans_monture", v.d));
+            return;
+        }
+        case FUITE_MONTE:
+        {
+            bool const memeCarte = chasseur->GetMapId() == cible->GetMapId() &&
+                                   chasseur->GetInstanceId() == cible->GetInstanceId();
+            uint32 const ecoule = maintenant - e.phaseS;
+            if (!memeCarte)
+            {
+                if (ecoule >= REACTION_MONTE_MAX_S)
+                    e.phase = FUITE_ATTENTE;   // le chasseur est parti : elle attend, montee ou non
+                return;
+            }
+            if (cible->IsMounted())
+            {
+                // Relecture T6 (M4) : sans sol sec a 200 yd, 120 yd montee, puis (3 s plus tard) a pied.
+                Fuite f = FuirChasseur(cible, chasseur, REACTION_FUITE_MONTEE_PAS_YD, true);
+                if (f.pas <= 0.0f)
+                    f = FuirChasseur(cible, chasseur, REACTION_FUITE_PAS_YD, ecoule < REACTION_MONTE_MAX_S + 3);
+                if (f.pas <= 0.0f)
+                {
+                    if (ecoule >= REACTION_MONTE_MAX_S + 6)
+                        e.phase = FUITE_ATTENTE;   // aucun sol sec : tout reprend (elle descend a sa prochaine fuite)
+                    return;
+                }
+                bool const montee = cible->IsMounted();
+                LeverImmobile(e.cible);
+                NoterFuite(e, f, maintenant, montee);
+                JournaliserReaction(e, "fuite", Acore::StringFormat(" fuite_yd={:.0f} monture={} incantation_s={}"
+                                                                    " distance={:.0f}",
+                                                                    f.pas, montee ? 1 : 0, ecoule,
+                                                                    chasseur->GetExactDist2d(cible)));
+                return;
+            }
+            bool const rate = cible->IsInCombat() || ecoule >= REACTION_MONTE_MAX_S ||
+                              (ecoule >= REACTION_MONTE_MIN_S && !cible->IsNonMeleeSpellCast(false));
+            if (!rate)
+                return;
+            cible->InterruptNonMeleeSpells(false);
+            Fuite const f = FuirChasseur(cible, chasseur);
+            if (f.pas <= 0.0f)
+            {
+                e.phase = FUITE_ATTENTE;   // ni monture ni sol sec : tout reprend, la seconde suivante
+                return;
+            }
+            LeverImmobile(e.cible);
+            NoterFuite(e, f, maintenant, false);
+            JournaliserReaction(e, "fuite", Acore::StringFormat(" fuite_yd={:.0f} monture=0 raison=incantation"
+                                                                " incantation_s={} distance={:.0f}",
+                                                                f.pas, ecoule, chasseur->GetExactDist2d(cible)));
+            return;
+        }
+        case FUITE_COURT:
+        {
+            // Un `P-0` de renouvellement (contrats.py) la remettrait immobile en route.
+            LeverImmobile(e.cible);
+            bool const arrivee = maintenant >= e.finFuiteS ||
+                                 cible->GetExactDist2d(e.pointX, e.pointY) <= REACTION_ARRIVEE_YD;
+            if (!arrivee)
+            {
+                RelancerFuite(cible, e, maintenant);
+                return;
+            }
+            // Arrivee : elle descend et reste sur place (immobile, elle riposte) : un chasseur a pied la rattrape.
+            bool const etaitMontee = cible->IsMounted();
+            if (etaitMontee)
+                cible->RemoveAurasByType(SPELL_AURA_MOUNTED);
+            if (!cible->IsInCombat())
+                cible->StopMoving();
+            PoserImmobileAuMoins(e.cible, maintenant + REACTION_IMMOBILE_APRES_S);
+            e.phase = FUITE_ARRIVEE;
+            e.phaseS = maintenant;
+            JournaliserReaction(e, "arrivee", Acore::StringFormat(" fuite={} descendue={} ecart_point_yd={:.0f}",
+                                                                  e.fuites, etaitMontee ? 1 : 0,
+                                                                  cible->GetExactDist2d(e.pointX, e.pointY)));
+            return;
+        }
+        case FUITE_ARRIVEE:
+        default:
+            if (e.fuites < 2)
+                SecondeFuite(e, cible, chasseur, maintenant);
+            return;
+    }
+}
+
+// Lot T6 : soudoiement, une seconde (voir l'en-tete de la section).
+void SuivreSoudoiement(ReactionContrat& e, Player* cible, Player* chasseur, uint32 maintenant)
+{
+    if (e.frappe || e.defenseLocale)
+    {
+        // Elle se defend : hors du repos et de l'immobilite (un `P-0` de renouvellement les reposerait).
+        LeverImmobile(e.cible);
+        LeverRepos(e.cible);
+        if (e.defenseFaite)
+            return;
+        VueChasseur const v = Regarder(cible, chasseur, REACTION_DEFENSE_YD);
+        if (!(v.auxPrises || (v.vu && cible->IsValidAttackTarget(chasseur))))
+            return;
+        bool const engage = !v.auxPrises && EngagerChasseur(cible, chasseur);
+        e.defenseFaite = true;
+        JournaliserReaction(e, "defense", Acore::StringFormat(" engage={} deja_en_combat={} cause={} distance={:.0f}",
+                                                              engage ? 1 : 0, v.auxPrises ? 1 : 0,
+                                                              e.frappe ? "frappe" : "offre_echue", v.d));
+        return;
+    }
+    VueChasseur const v = Regarder(cible, chasseur, REACTION_SOUDOIEMENT_YD);
+    if (!v.memeCarte || !chasseur->IsAlive())
+        return;
+    if (v.auxPrises)
+    {
+        // Le chasseur l'a frappee (avant ou pendant l'offre) : elle se defend ; le service lit la ligne.
+        e.frappe = true;
+        e.defenseFaite = true;   // deja en combat avec lui : le moteur de combat riposte
+        LeverImmobile(e.cible);
+        LeverRepos(e.cible);
+        JournaliserReaction(e, "frappe", Acore::StringFormat(" offre={} t={} distance={:.0f}", e.offre ? 1 : 0,
+                                                             maintenant, v.d));
+        return;
+    }
+    if (!e.offre)
+    {
+        auto const deja = offresFaites.find(e.arc);
+        if (deja != offresFaites.end())
+        {
+            e.offre = true;   // arc oublie puis relu (LireReactions) : l'offre est deja faite, jamais deux fois
+            e.offreS = deja->second;
+            return;
+        }
+        if (!e.potDeVinC)
+        {
+            if (!e.sansMontantDit)
+            {
+                e.sansMontantDit = true;
+                JournaliserReaction(e, "sans_montant", " (params.pot_de_vin_c absent : aucune offre, cible passive)");
+            }
+            return;
+        }
+        if (!v.vu || cible->IsInCombat())
+            return;
+        if (cible->isMoving())
+            cible->StopMoving();
+        // Elle attend la reponse sur place (« stay » : elle riposte), meme si son immobilite de preparation a cesse.
+        PoserImmobileAuMoins(e.cible, maintenant + REACTION_SOUDOIEMENT_ABANDON_S + REACTIONS_RELIRE_S);
+        cible->SetFacingToObject(chasseur);
+        std::string const texte = Acore::StringFormat(
+            "Pas si vite, chasseur. {} pour oublier que tu m'as trouvé ? Personne n'en saura rien.",
+            TexteCuivre(e.potDeVinC));
+        cible->Whisper(texte, LANG_UNIVERSAL, chasseur);
+        e.offre = true;
+        e.offreS = maintenant;
+        offresFaites[e.arc] = maintenant;
+        JournaliserReaction(e, "offre", Acore::StringFormat(" offre_c={} t={} distance={:.0f}", e.potDeVinC, maintenant,
+                                                            v.d));
+        return;
+    }
+    // Offre faite : le service tranche. Sans decision dans le delai (service arrete, ligne non lue) : elle se defend.
+    if (maintenant - e.offreS >= REACTION_SOUDOIEMENT_ABANDON_S)
+    {
+        e.defenseLocale = true;
+        JournaliserReaction(e, "offre_echue", Acore::StringFormat(" depuis_s={}", maintenant - e.offreS));
+        return;
+    }
+}
+
+// Lot T6 : l'offre de soudoiement en cours pour cet arc, a montrer au joueur (traqueur) : montant en cuivres et
+// secondes restantes. -> faux sans offre ouverte. Fil monde (CorpsTraqueur est appele au fil monde, comme Entretien).
+bool OffreOuverte(uint32 arc, uint32& cuivre, uint32& resteS)
+{
+    auto const it = reactionsContrat.find(arc);
+    if (it == reactionsContrat.end())
+        return false;
+    ReactionContrat const& e = it->second;
+    uint32 const maintenant = Maintenant();
+    if (e.reaction != "soudoiement" || !e.offre || e.frappe || e.defenseLocale || !e.potDeVinC ||
+        maintenant < e.offreS || maintenant - e.offreS >= REACTION_SOUDOIEMENT_S)
+        return false;
+    cuivre = e.potDeVinC;
+    resteS = REACTION_SOUDOIEMENT_S - (maintenant - e.offreS);
+    return true;
+}
+
+// Revue 16/10 : option Reactions coupee ou bus eteint. Les reactions sont oubliees ET l'immobilite qu'elles ont posee
+// (fuite montee arrivee : 30 min ; offre de soudoiement : 50 s) est levee, sinon la cible reste en « stay » hors contrat.
+// Bus eteint : ViderRepos a deja tout leve, LeverImmobile n'y fait rien (garde nbImmobiles).
+void OublierReactions()
+{
+    if (reactionsContrat.empty())
+        return;
+    for (auto const& [arc, e] : reactionsContrat)
+        if ((e.reaction == "fuite_monture" && e.fuites) || (e.reaction == "soudoiement" && e.offre))
+            LeverImmobile(e.cible);
+    reactionsContrat.clear();
+    reactionsLuesS = 0;   // relecture immediate au rallumage
+}
+
+void SuivreReactions()
+{
+    // Revue 16/10 : bus eteint = inertie. Avant, les cibles de contrat continuaient de reagir (gardes sautes, chasseur
+    // engage) bus coupe, et ViderRepos defaisait a chaque tick l'immobilite que PoserImmobileAuMoins reposait.
+    if (!sPlayerbotAIConfig.directeurReactions || !sPlayerbotAIConfig.directeurBus)
+    {
+        OublierReactions();
+        return;
+    }
+    uint32 const maintenant = Maintenant();
+    if (maintenant < reactionsLuesS || maintenant - reactionsLuesS >= REACTIONS_RELIRE_S)
+    {
+        reactionsLuesS = maintenant;
+        LireReactions();
+    }
+    bool const t6 = sPlayerbotAIConfig.directeurReactionsT6;
+    for (auto& [arc, e] : reactionsContrat)
+    {
+        bool const defense = e.reaction == "defense";
+        bool const fuite = e.reaction == "fuite_gardes";
+        bool const monture = t6 && e.reaction == "fuite_monture";
+        bool const soudoiement = t6 && e.reaction == "soudoiement";
+        if (!defense && !fuite && !monture && !soudoiement)
+        {
+            if (!e.inconnueDite)
+            {
+                e.inconnueDite = true;
+                JournaliserReaction(e, "inconnue", " (reaction que ce binaire ne connait pas : cible passive)");
+            }
+            continue;
+        }
+        // Revue 16/10 : `.directeur stop` du chasseur : sa cible ne reagit plus (le service clot l'arc ensuite).
+        if (CoaDirecteur::EstArrete(e.joueur))
+            continue;
+        Player* chasseur = JoueurConnecte(e.joueur);
+        Player* cible = JoueurConnecte(e.cible);
+        if (!chasseur || !cible || !Humain(chasseur) || !chasseur->IsInWorld() || !cible->IsInWorld() ||
+            cible->IsBeingTeleported() || !cible->IsAlive() || !sRandomPlayerbotMgr.IsRandomBot(cible))
+            continue;
+        PlayerbotAI* ia = GET_PLAYERBOT_AI(cible);
+        if (!ia || ia->HasGameClientMaster())
+            continue;
+        if (monture)
+        {
+            SuivreFuiteMontee(e, cible, chasseur, ia, maintenant);
+            continue;
+        }
+        if (soudoiement)
+        {
+            SuivreSoudoiement(e, cible, chasseur, maintenant);
+            continue;
+        }
+        if (e.declenchee)
+        {
+            // Une preparation `P-0` de renouvellement (contrats.py, repos echu) la remettrait immobile (et, pour la
+            // defense, au repos). La fuyarde GARDE son repos (relecture M2) : elle ne vise aucun joueur, elle riposte.
+            LeverImmobile(e.cible);
+            if (defense)
+                LeverRepos(e.cible);
+            else if (t6)
+            {
+                if (e.phase == FUITE_COURT && maintenant < e.finFuiteS)
+                    RelancerFuite(cible, e, maintenant);
+                else if (e.phase == FUITE_COURT)
+                    e.phase = FUITE_ARRIVEE;   // fuite_gardes : libre apres sa fuite (T5), sans immobilite
+                SecondeFuite(e, cible, chasseur, maintenant);
+            }
+            continue;
+        }
+        bool const memeCarte = chasseur->GetMapId() == cible->GetMapId() &&
+                               chasseur->GetInstanceId() == cible->GetInstanceId();
+        float const d = memeCarte ? chasseur->GetExactDist2d(cible) : -1.0f;
+        if (fuite && (!memeCarte || d > REACTION_CHASSEUR_LOIN_YD))
+        {
+            for (uint32 g : e.gardes)
+            {
+                Player* garde = GardeValide(g, cible, chasseur);
+                if (!garde || garde->GetExactDist2d(cible) <= REACTION_GARDE_PROCHE_YD)
+                    continue;
+                auto const s = e.sautGarde.find(g);
+                if (s != e.sautGarde.end() && maintenant - s->second < REACTION_SAUT_INTERVALLE_S)
+                    continue;
+                e.sautGarde[g] = maintenant;
+                if (SauterGardePres(garde, cible))
+                    JournaliserReaction(e, "garde_saut", Acore::StringFormat(" garde={}", g));
+            }
+        }
+        if (!memeCarte || !chasseur->IsAlive())
+            continue;
+        bool const vu = d <= REACTION_FUITE_YD && cible->IsWithinLOSInMap(chasseur);   // de pres seulement : couteux
+        // « Deja aux prises » : en combat AVEC le chasseur (il a tire le premier, de loin) -- jamais un combat contre
+        // une creature, qui declencherait la reaction le chasseur a l'autre bout de la carte.
+        bool const auxPrises = d <= REACTION_ENGAGE_YD && cible->IsInCombatWith(chasseur);
+        // Defense : rien tant que l'attaque n'est pas permise (lieu sans PvP, sanctuaire) : la reaction attend, elle
+        // n'est pas consommee pour rien.
+        if (defense && (auxPrises || (d <= REACTION_DEFENSE_YD && vu && cible->IsValidAttackTarget(chasseur))))
+        {
+            bool const dejaEnCombat = auxPrises;
+            LeverImmobile(e.cible);
+            LeverRepos(e.cible);
+            bool const engage = !dejaEnCombat && EngagerChasseur(cible, chasseur);
+            e.declenchee = true;
+            JournaliserReaction(e, "defense", Acore::StringFormat(" engage={} deja_en_combat={} distance={:.0f}",
+                                                                  engage ? 1 : 0, dejaEnCombat ? 1 : 0, d));
+        }
+        else if (fuite && ((d <= REACTION_FUITE_YD && vu) || auxPrises))
+        {
+            // Relecture (M2) : la fuyarde GARDE son repos (PossibleTargetsValue : elle ne vise aucun joueur).
+            Fuite const f = FuirChasseur(cible, chasseur);
+            uint32 const engages = EngagerGardes(e, cible, chasseur, false);
+            if (f.pas <= 0.0f && !engages)
+                continue;   // aucun sol sec ou fuir, aucun garde a portee : reessai la seconde suivante, immobile
+            // Lot T6 : l'immobilite levee APRES le mouvement (avant, une fuite sans point la laissait libre, sans fuir).
+            LeverImmobile(e.cible);
+            e.declenchee = true;
+            if (f.pas > 0.0f)
+                NoterFuite(e, f, maintenant, false);   // lot T6 : la seconde fuite part de la premiere
+            else
+                e.fuites = 2;                          // aucune fuite : pas de « seconde »
+            JournaliserReaction(e, "fuite", Acore::StringFormat(" fuite_yd={:.0f} gardes={} gardes_engages={} distance={:.0f}",
+                                                                f.pas, e.gardes.size(), engages, d));
+        }
+    }
 }
 
 bool PrepareDepuisMoinsDe(uint32 guid, uint32 secondes)
@@ -8856,8 +9868,24 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     WorldPosition centre(c.carte, c.x, c.y, sol);
     // `peupler` exempte le joueur qui demande, et lui seul (§ 4.2) ; `chasser`
     // exempte le joueur prime, et lui seul (SPEC-directeur-D4.md § 6.3).
-    if ((presence || chasseur) ? HumainProcheSauf(centre, c.carte, AFFECTATION_HUMAIN_YD, c.joueur)
-                 : ia->HasPlayerNearby(&centre, AFFECTATION_HUMAIN_YD))
+    // 18/10 (convoi entre bots, revue B1) : l'ATTACHE de l'ancre bot d'un convoi (inscription `Q-` dont le `joueur` est
+    // un autre bot d'evenement) est exemptee du controle des humains si l'ancre est DEJA a moins de
+    // AFFECTATION_HUMAIN_YD du centre et sans saut : elle ne fait que marcher a cote du convoi, rien n'apparait a l'ecran.
+    // Sans cela, un humain venu escorter le convoi d'un bot ferait lacher l'ancre, puis abandonner le convoi.
+    // Portee (revue du 18/10, m1, assumee) : TOUTE presence `Q-` sans saut d'un porteur ancre bot -- inscriptions des
+    // failles, nuits et rares entre bots comprises : un bot deja a moins de 200 yd, qui ne fait que marcher, rejoint
+    // l'evenement meme si un humain est la (conception de l'autonomie : « un humain qui arrive peut participer »).
+    bool attacheSurPlace = false;
+    if (presence && !saut && c.action.size() > 2 && c.action[0] == 'Q' && c.action[1] == '-' && bot &&
+        bot->GetMapId() == c.carte &&
+        centre.sqDistance(WorldPosition(bot)) < AFFECTATION_HUMAIN_YD * AFFECTATION_HUMAIN_YD)
+    {
+        Player* porteur = c.joueur ? ObjectAccessor::FindPlayerByLowGUID(c.joueur) : nullptr;
+        attacheSurPlace = porteur && !Humain(porteur) && AncreDEvenement(porteur);
+    }
+    if (!attacheSurPlace &&
+        ((presence || chasseur) ? HumainProcheSauf(centre, c.carte, AFFECTATION_HUMAIN_YD, c.joueur)
+                                : ia->HasPlayerNearby(&centre, AFFECTATION_HUMAIN_YD)))
     {
         Refuser(c, "humain_proche");
         return;
@@ -9171,6 +10199,12 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "colonnes_evenement");
         return;
     }
+    // 3 sexies (lot D5, 15/10/2026). `attirer` / `soigner` sans les valeurs d'ENUM au demarrage.
+    if (VerbeImprevu(c.verbe) && (!source || !source->ColonnesImprevu() || !source->ColonnesD3()))
+    {
+        Refuser(c, "colonnes_imprevu");
+        return;
+    }
     // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
     // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
     // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
@@ -9196,8 +10230,10 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "arene");
         return;
     }
-    // 5. budget (`retirer` du lot D en est exempt : `menage`, plus haut)
-    if (!menage && !PrendreJeton())
+    // 5. budget (`retirer` du lot D en est exempt : `menage`, plus haut). Revue 16/10 : `recompenser` puise dans son
+    // seau propre (PrendreJetonDe), pas dans le seau commun : une part gagnee n'attend plus la fin d'un gros evenement.
+    bool const recompense = c.verbe == CoaDirVerbe::Recompenser;
+    if (!menage && !(recompense ? PrendreJetonDe(jetonsRecompense, jetonsRecompenseMs) : PrendreJeton()))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REFUS_BUDGET);
         Refuser(c, "budget");
@@ -9246,6 +10282,12 @@ void Recevoir(CoaDirCommande const& c)
         case CoaDirVerbe::Evenement:
             ExecuterEvenement(c);
             break;
+        case CoaDirVerbe::Attirer:
+            ExecuterAttirer(c);
+            break;
+        case CoaDirVerbe::Soigner:
+            ExecuterSoigner(c);
+            break;
         default:
             Refuser(c, "verbe_eteint");   // inatteignable : VerbeImplemente l'a filtre
             break;
@@ -9284,7 +10326,7 @@ void Bilan()
              " primes_echues={} primes_levees={} proies_imposees={} traques_prime={} meute_permise={}"
              " morts_tracees={} morts_perdues={} primes_actives={} chasseurs_actifs={} teleports_lointains={}"
              " paroles_hors_vue={} missions={} missions_ignorees={} missions_degradees={} patrouilles={}"
-             " bandes_recalees={} bandes_rejointes={} ecartes_pacte_bots={} morts_entre_pactes={}",
+             " bandes_recalees={} bandes_rejointes={} ecartes_pacte_bots={} morts_entre_pactes={}{}",
              EpoqueMonde(), Lire(COA_DIR_RECUES), Lire(COA_DIR_EXECUTEES), Lire(COA_DIR_REFUSEES),
              Lire(COA_DIR_EXPIREES), Lire(COA_DIR_LEVEES), Lire(COA_DIR_REMPLACEES),
              nbTreves.load(std::memory_order_relaxed),
@@ -9313,7 +10355,8 @@ void Bilan()
              nbChasseurs.load(std::memory_order_relaxed), Lire(COA_DIR_TELEPORTS_LOINTAINS),
              Lire(COA_DIR_PAROLES_HORS_VUE), Lire(COA_DIR_MISSIONS), Lire(COA_DIR_MISSIONS_IGNOREES),
              Lire(COA_DIR_MISSIONS_DEGRADEES), Lire(COA_DIR_PATROUILLES), Lire(COA_DIR_BANDES_RECALEES),
-             Lire(COA_DIR_BANDES_REJOINTES), Lire(COA_DIR_ECARTE_PACTE_BOTS), Lire(COA_DIR_MORTS_ENTRE_PACTES));
+             Lire(COA_DIR_BANDES_REJOINTES), Lire(COA_DIR_ECARTE_PACTE_BOTS), Lire(COA_DIR_MORTS_ENTRE_PACTES),
+             BilanImprevu());   // lot D5 : ` attires= engages= rentres= attires_actifs= ...`, EN FIN de ligne
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -9555,6 +10598,11 @@ std::string Joueur(std::string const& texte)
     // Reserve de chasseurs (02/10) : 15e champ, EN FIN de ligne (un lecteur qui
     // s'arrete au 14e ne voit rien changer) : 1 si le joueur est AFK.
     out << ',' << (p->isAFK() ? 1 : 0);
+    // Lot D5 (15/10/2026, etude § 3.2) : 16e champ `soin`, EN FIN de ligne. PlayerbotAI::IsHeal(p) (bySpec faux),
+    // EXACTEMENT le test du refus `pas_soigneur` de `soigner` : pour un BOT, une strategie de type soin dans un de ses
+    // moteurs (« coa heal », « heal » : ce sont elles qui lisent « party member to heal », donc JoueurASoigner) ; pour
+    // un humain (sans moteur), sa specialisation. Les 15 premiers champs sont inchanges.
+    out << ',' << (PlayerbotAI::IsHeal(p) ? 1 : 0);
     return out.str();
 }
 }  // namespace
@@ -9644,6 +10692,24 @@ bool CoaDirecteur::EstArrete(uint32 guidLow)
 
 void CoaDirecteur::DemarrerBus()
 {
+    // Lot D5 : presence des tables de l'onglet (audace, opt-in), independamment du bus.
+    {
+        tableAudaceLue = false;
+        tableOptinLue = false;
+        QueryResult t = CharacterDatabase.Query(
+            "SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+            " AND TABLE_NAME = 'coa_dir_audace'),"
+            " (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"
+            " AND TABLE_NAME = 'coa_dir_imprevu_optin')");
+        if (t)
+        {
+            Field* f = t->Fetch();
+            tableAudaceLue = f[0].Get<uint64>() != 0;
+            tableOptinLue = f[1].Get<uint64>() != 0;
+        }
+        LOG_INFO("playerbots", "coa directeur : onglet, table audace {}, table opt-in {}",
+                 tableAudaceLue ? "presente" : "absente", tableOptinLue ? "presente" : "absente");
+    }
     bool const bus = sPlayerbotAIConfig.directeurBus;
     dernierEtatBus = bus;
     source = sourceMysql.Demarrer(EpoqueMonde(), bus) ? &sourceMysql : nullptr;
@@ -10395,13 +11461,15 @@ public:
 //     (gain : 03/10 (lot R4), EN FIN : cuivres encaisses, `params.resultat.recompense.encaisse_cuivre`
 //     -- 0 pour une prime perdue --, vide sans recompense.)
 //   R|bot|nom|score|morts_du_joueur|morts_du_bot           rivaux, 4 au plus
+//   W|rang|nom|niveau|zone|prime_c|reste_s|rival         avis de recherche, 3 au plus (lot T3, option Directeur.Avis)
 // (4 : la fenetre PvP n'en tient pas plus ; `simulee` vaut 1 sauf `false` explicite, comme primes.py)
 //   F                                           fin
 // Une demande par joueur toutes les ONGLET_INTERVALLE_MS au plus (le reste est
 // ignore, sans reponse). Requetes synchrones bornees (LIMIT), au fil du joueur,
 // sur des tables de quelques lignes : seulement a l'ouverture de l'onglet et a
-// son rafraichissement (10 s, addon). Aucun objet de jeu n'est lu, hors le
-// joueur lui-meme (son propre fil).
+// son rafraichissement (10 s, addon). `TOUT` ne lit aucun objet de jeu, hors le
+// joueur lui-meme ; `TRAQUE` (lot T1, plus bas) lit aussi la position du bot cible,
+// au fil monde (cartes a l'arret).
 namespace
 {
 constexpr char ONGLET_PREFIXE[] = "COABH\t";
@@ -10427,7 +11495,54 @@ std::string ChampOnglet(Field const& f)
     return f.IsNull() ? std::string() : ChampOnglet(f.Get<std::string>());
 }
 
-std::string CorpsOnglet(uint32 guid)
+// Lot D5 (15/10/2026) : derniere audace / opt-in lus pour l'onglet, par guid, SOUS verrouOnglet. Remplis par une
+// requete ASYNCHRONE (processeur de la session du joueur) posee a chaque demande `TOUT` : le fil monde n'attend
+// jamais MySQL pour cette ligne. La valeur disponible est celle lue pour la demande precedente ; elle n'est servie
+// que si elle a moins de IMPREVU_ONGLET_AGE_MS. Sinon (premiere demande, onglet rouvert apres une pause) la ligne `^A`
+// est OMISE : l'addon retombe sur son dernier envoi au lieu de montrer un etat perime comme celui du serveur.
+constexpr uint32 IMPREVU_ONGLET_AGE_MS = 3000;
+struct ImprevuOnglet
+{
+    std::string audace;   // coa_dir_audace.niveau du COMPTE, vide sans ligne
+    std::string optin;    // coa_dir_imprevu_optin.optin du personnage, "1"/"0", vide sans ligne
+    uint32 luMs = 0;      // getMSTime() a la reception du resultat
+};
+std::unordered_map<uint32, ImprevuOnglet> imprevuOnglet;
+
+void RelireImprevuOnglet(uint32 guid, WorldSession* session)
+{
+    if (!session || (!tableAudaceLue && !tableOptinLue))
+        return;
+    std::string const sql = Acore::StringFormat(
+        "SELECT {}, {}",
+        tableAudaceLue ? Acore::StringFormat("(SELECT CAST(a.niveau AS CHAR) FROM coa_dir_audace a JOIN characters c"
+                                             " ON c.account = a.compte WHERE c.guid = {})", guid)
+                       : std::string("NULL"),
+        tableOptinLue ? Acore::StringFormat("(SELECT CAST(o.optin AS CHAR) FROM coa_dir_imprevu_optin o WHERE o.guid = {})",
+                                            guid)
+                      : std::string("NULL"));
+    // Rappel : traite par le processeur de la session (WorldSession::Update), qui meurt avec elle -- une session
+    // fermee entre-temps ne rappelle jamais. Ne capture que le guid ; n'ecrit que le cache, sous son verrou.
+    session->GetQueryProcessor().AddCallback(CharacterDatabase.AsyncQuery(sql).WithCallback(
+        [guid](QueryResult r)
+        {
+            ImprevuOnglet e;
+            e.luMs = getMSTime();
+            if (r)
+            {
+                Field* f = r->Fetch();
+                e.audace = ChampOnglet(f[0]);
+                std::string const o = ChampOnglet(f[1]);
+                e.optin = o.empty() ? std::string() : (o == "0" ? "0" : "1");
+            }
+            std::lock_guard<std::mutex> garde(verrouOnglet);
+            if (imprevuOnglet.size() > 512)
+                imprevuOnglet.clear();
+            imprevuOnglet[guid] = e;
+        }));
+}
+
+std::string CorpsOnglet(uint32 guid, WorldSession* session)
 {
     std::string corps = "V|1";
     // Prime en cours (demande ou active).
@@ -10503,9 +11618,252 @@ std::string CorpsOnglet(uint32 guid)
                                          f[3].Get<uint32>(), f[4].Get<uint32>());
         } while (r->NextRow());
     }
+    // Lot T3 (12/10/2026) : les avis de recherche du joueur (coa_dir_avis, ecrite par contrats.py), si l'option
+    // le permet (la table n'existe qu'apres sa migration). EN FIN, avant `F` : un addon d'avant ignore la ligne.
+    if (sPlayerbotAIConfig.directeurAvis)
+    {
+        if (QueryResult w = CharacterDatabase.Query(
+                "SELECT rang, nom, niveau, zone, montant_c,"
+                " CAST(GREATEST(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin), 0) AS CHAR), rival"
+                " FROM coa_dir_avis WHERE joueur = {} AND fin > UTC_TIMESTAMP() ORDER BY rang LIMIT 3", guid))
+        {
+            do
+            {
+                Field* f = w->Fetch();
+                corps += Acore::StringFormat("^W|{}|{}|{}|{}|{}|{}|{}", uint32(f[0].Get<uint8>()), ChampOnglet(f[1]),
+                                             uint32(f[2].Get<uint8>()), ChampOnglet(f[3]), f[4].Get<uint32>(),
+                                             ChampOnglet(f[5]), uint32(f[6].Get<uint8>()));
+            } while (w->NextRow());
+        }
+    }
+    // Lot D5 (15/10/2026) : `^A|audace|optin` (CoABounty 1.7, Lire : c[1] == "A"), EN FIN avant `F` : un addon
+    // d'avant ignore la ligne. Valeurs du cache (requete asynchrone de la demande precedente), vides si la ligne
+    // manque en base ; ligne OMISE si le cache est absent ou a IMPREVU_ONGLET_AGE_MS ou plus (revue de 154446f).
+    {
+        bool frais = false;
+        ImprevuOnglet e;
+        {
+            std::lock_guard<std::mutex> garde(verrouOnglet);
+            auto it = imprevuOnglet.find(guid);
+            if (it != imprevuOnglet.end() && getMSTimeDiff(it->second.luMs, getMSTime()) < IMPREVU_ONGLET_AGE_MS)
+            {
+                e = it->second;
+                frais = true;
+            }
+        }
+        if (frais)
+            corps += Acore::StringFormat("^A|{}|{}", e.audace, e.optin);
+        RelireImprevuOnglet(guid, session);
+    }
     corps += "^F";
     return corps;
 }
+
+// ---- traqueur de contrat, lot T1 (12/10/2026, coa-project/docs/CONCEPTION-primes-traqueur-bots.md)
+//
+// L'addon chuchote `COABH\tTRAQUE` a soi-meme ; le serveur repond UN chuchotement d'addon
+// `COABT\t<ligne>` (prefixe distinct de COABH : jamais melange au reassemblage des morceaux de TOUT) :
+//   T|-                                                    aucun contrat actif
+//   T|arc|etat|nom|distance_yd|angle_deg|zone|reste_s|intervalle_ms
+//     etat : `prep` (contrat en preparation, cible pas encore confirmee), `piste` (meme carte, vivante),
+//            `refuge` (meme carte, sans drapeau FFA : lieu sans PvP), `carte` (autre carte : zone seule),
+//            `mort`, `absent` (cible hors ligne) ;
+//     distance_yd : 2D, arrondie (5 yd sous 100, 10 sous 500, 50 au-dela) ; angle_deg : 0-359, direction
+//     ABSOLUE du joueur vers la cible (0 = nord, sens trigonometrique, comme GetPlayerFacing du client) ;
+//     vides hors `piste` et `refuge` ; zone : nom de la zone de la cible (vide si `prep`, `absent`) ;
+//     reste_s : fin_prevue - 600 s (ARC_MARGE_S de contrats.py), -1 si illisible.
+//   Lot T6 (13/10/2026), EN FIN (un addon d'avant ne les lit pas) : `|offre_c|offre_reste_s`, l'offre de soudoiement
+//     ouverte de la cible (reactions des cibles, OffreOuverte : cuivres, secondes restantes), vides sans offre.
+// Lecture seule : une requete bornee (LIMIT 1) sur coa_dir_arc (ecrite par contrats.py, P-134), la
+// cible lue par ObjectAccessor. CMSG_MESSAGECHAT est traite par le fil monde (PROCESS_THREADUNSAFE,
+// Opcodes.cpp) : les cartes sont a l'arret, la position du bot se lit sans course (P-137).
+constexpr char TRAQUE_PREFIXE[] = "COABT\t";
+constexpr char TRAQUE_DEMANDE[] = "TRAQUE";
+constexpr uint32 TRAQUE_MARGE_ARC_S = 600;   // contrats.ARC_MARGE_S
+constexpr uint32 TRAQUE_RESTE_MAX_S = 2100;  // contrats.DUREE_S + PREP_MAX_S
+
+std::unordered_map<uint32, uint32> derniereTraque;       // guid -> getMSTime(), sous verrouOnglet
+
+// Revue 16/10 : l'addon sonde toutes les 5 s meme sans contrat ; chaque sondage payait une requete synchrone au fil
+// monde, pour repondre `T|-` presque toujours. Une SEULE requete, au plus toutes les TRAQUE_CONTRATS_RELIRE_MS, dit
+// quels joueurs ont un contrat actif ; les autres recoivent `T|-` sans base. Un contrat accepte se voit au plus 2 s
+// plus tard ; un contrat clos depuis la lecture retombe sur la requete complete, qui repond `T|-` comme avant.
+// Fil monde seul (CorpsTraqueur), sous verrouOnglet par prudence.
+constexpr uint32 TRAQUE_CONTRATS_RELIRE_MS = 2000;
+constexpr uint32 TRAQUE_CONTRATS_MAX = 4096;
+std::unordered_set<uint32> traqueAvecContrat;
+uint32 traqueContratsLusMs = 0;
+bool traqueContratsValides = false;   // faux : lecture en echec ou tronquee -> requete par joueur, comme avant
+
+// -> faux si le joueur n'a surement aucun contrat actif (la requete par joueur est alors inutile).
+bool PeutAvoirContrat(uint32 guid)
+{
+    uint32 const maintenantMs = getMSTime();
+    std::lock_guard<std::mutex> garde(verrouOnglet);
+    if (!traqueContratsLusMs || getMSTimeDiff(traqueContratsLusMs, maintenantMs) >= TRAQUE_CONTRATS_RELIRE_MS)
+    {
+        traqueContratsLusMs = maintenantMs ? maintenantMs : 1;
+        traqueAvecContrat.clear();
+        QueryResult r = CharacterDatabase.Query(
+            "SELECT DISTINCT joueur FROM coa_dir_arc WHERE genre = 'contrat' AND statut = 'actif' LIMIT {}",
+            TRAQUE_CONTRATS_MAX);
+        if (r)
+        {
+            do
+                traqueAvecContrat.insert(r->Fetch()[0].Get<uint32>());
+            while (r->NextRow());
+            traqueContratsValides = traqueAvecContrat.size() < TRAQUE_CONTRATS_MAX;
+        }
+        else
+            // `nullptr` = aucun contrat OU requete en echec : une requete temoin tranche.
+            traqueContratsValides = static_cast<bool>(CharacterDatabase.Query("SELECT 1"));
+    }
+    return !traqueContratsValides || traqueAvecContrat.count(guid) != 0;
+}
+// guid -> (arc, etat) de la derniere ligne journalisee, sous verrouOnglet : une ligne par changement d'etat
+// d'un contrat (prep -> piste, piste <-> refuge, carte, mort...), jamais une par lecture.
+std::unordered_map<uint32, std::pair<uint32, std::string>> traqueJournalisee;
+
+uint32 DistanceTraqueur(float d)
+{
+    if (!std::isfinite(d) || d < 0.0f)
+        return 0;
+    if (d < 100.0f)
+        return static_cast<uint32>(std::lround(d / 5.0f)) * 5;
+    if (d < 500.0f)
+        return static_cast<uint32>(std::lround(d / 10.0f)) * 10;
+    return static_cast<uint32>(std::lround(d / 50.0f)) * 50;
+}
+
+std::string NomZoneTraqueur(uint32 zoneId)
+{
+    AreaTableEntry const* zone = sAreaTableStore.LookupEntry(zoneId);
+    return zone ? ChampOnglet(PlayerbotAI::GetLocalizedAreaName(zone)) : std::string();
+}
+
+// Un guid lu en texte (JSON) : chiffres seuls, 1 a 10, <= UINT32_MAX ; sinon 0.
+uint32 GuidTraqueur(std::string const& v)
+{
+    if (v.empty() || v.size() > 10 || !std::all_of(v.begin(), v.end(), [](char ch) { return ch >= '0' && ch <= '9'; }))
+        return 0;
+    uint64 const n = std::stoull(v);
+    return n <= std::numeric_limits<uint32>::max() ? static_cast<uint32>(n) : 0;
+}
+
+// La ligne du traqueur pour `joueur`. Sorties, pour le journal : arc et cible lus, etat, distance.
+std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, uint32& cibleLue, std::string& etatLu,
+                          uint32& distanceLue)
+{
+    arcLu = cibleLue = distanceLue = 0;
+    etatLu = "-";
+    uint32 const guid = joueur->GetGUID().GetCounter();
+    if (!PeutAvoirContrat(guid))
+        return "T|-";
+    QueryResult a = CharacterDatabase.Query(
+        "SELECT id, IFNULL(etape, ''),"
+        " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.cible')), 'null'), ''),"
+        " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.cible_nom')), 'null'), ''),"
+        " CAST(IFNULL(GREATEST(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue) - {}, 0), -1) AS CHAR)"
+        " FROM coa_dir_arc WHERE joueur = {} AND genre = 'contrat' AND statut = 'actif'"
+        " ORDER BY id DESC LIMIT 1",
+        TRAQUE_MARGE_ARC_S, guid);
+    if (!a)
+        return "T|-";
+    Field* f = a->Fetch();
+    arcLu = f[0].Get<uint32>();
+    std::string const etape = ChampOnglet(f[1]);
+    uint32 const cible = GuidTraqueur(f[2].IsNull() ? std::string() : f[2].Get<std::string>());
+    std::string const nom = ChampOnglet(f[3]);
+    // Pendant une pause en donjon, contrats.py repousse fin_prevue d'une heure de plus (PAUSE_MAX_S) : au-dela de
+    // la duree d'un contrat (30 min + 5 min de preparation), l'echeance n'est pas lisible ici, `-1`.
+    std::string reste = ChampOnglet(f[4]);
+    if (uint32 const r = GuidTraqueur(reste); r > TRAQUE_RESTE_MAX_S)
+        reste = "-1";
+    std::string etat;
+    std::string distance;
+    std::string angle;
+    std::string zone;
+    Player* bot = cible ? JoueurConnecte(cible) : nullptr;
+    cibleLue = cible;
+    if (etape != "piste")
+        etat = "prep";   // preparation (`chasser P-0`) : la cible n'est pas encore confirmee hors de vue
+    else if (!bot || !bot->IsInWorld() || bot == joueur || !sRandomPlayerbotMgr.IsRandomBot(bot))
+        etat = "absent";   // jamais la position d'un humain ni d'un altbot : la cible est un bot aleatoire de la reserve
+    else
+    {
+        zone = NomZoneTraqueur(bot->GetZoneId());
+        if (bot->GetMapId() != joueur->GetMapId() || bot->GetInstanceId() != joueur->GetInstanceId())
+            etat = "carte";
+        else if (!bot->IsAlive())
+            etat = "mort";
+        else
+        {
+            etat = bot->IsFFAPvP() ? "piste" : "refuge";
+            uint32 const d = DistanceTraqueur(joueur->GetExactDist2d(bot));
+            float const rad = joueur->GetAbsoluteAngle(bot);   // [0, 2 pi[, 0 = nord (+x), sens trigonometrique
+            uint32 const deg = static_cast<uint32>(std::lround(rad * 180.0f / static_cast<float>(M_PI))) % 360;
+            distanceLue = d;
+            distance = std::to_string(d);
+            angle = std::to_string(deg);
+        }
+    }
+    etatLu = etat;
+    // Lot T6 : l'offre de soudoiement (reactionsContrat, ecrit et lu au fil monde seul).
+    uint32 offreC = 0;
+    uint32 offreResteS = 0;
+    bool const offre = OffreOuverte(arcLu, offreC, offreResteS);
+    return Acore::StringFormat("T|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", arcLu, etat, nom, distance, angle, zone, reste,
+                               intervalleMs, offre ? std::to_string(offreC) : std::string(),
+                               offre ? std::to_string(offreResteS) : std::string());
+}
+
+// Repond a `COABH\tTRAQUE`. Option eteinte, ou demande trop rapprochee : rien n'est envoye.
+void RepondreTraqueur(Player* player)
+{
+    if (!sPlayerbotAIConfig.directeurTraqueur)
+        return;
+    uint32 const guid = player->GetGUID().GetCounter();
+    uint32 const intervalleMs = sPlayerbotAIConfig.directeurTraqueurIntervalleMs;
+    uint32 const maintenantMs = getMSTime();
+    {
+        std::lock_guard<std::mutex> garde(verrouOnglet);
+        auto it = derniereTraque.find(guid);
+        // Tolerance d'un quart : le minuteur de l'addon (OnUpdate) arrive parfois quelques ms avant.
+        if (it != derniereTraque.end() && getMSTimeDiff(it->second, maintenantMs) < intervalleMs - intervalleMs / 4)
+            return;
+        if (derniereTraque.size() > 512)
+            derniereTraque.clear();
+        derniereTraque[guid] = maintenantMs;
+    }
+    uint32 arc = 0;
+    uint32 cible = 0;
+    uint32 distance = 0;
+    std::string etat;
+    std::string const ligne = CorpsTraqueur(player, intervalleMs, arc, cible, etat, distance);
+    if (arc)
+    {
+        bool change = false;
+        {
+            std::lock_guard<std::mutex> garde(verrouOnglet);
+            if (traqueJournalisee.size() > 512)
+                traqueJournalisee.clear();
+            auto [it, neuf] = traqueJournalisee.try_emplace(guid, arc, etat);
+            change = neuf || it->second.first != arc || it->second.second != etat;
+            it->second = {arc, etat};
+        }
+        if (change)
+            LOG_INFO("playerbots", "coa directeur traqueur: joueur={} arc={} cible={} etat={} distance={} intervalle_ms={}",
+                     guid, arc, cible, etat, distance, intervalleMs);
+    }
+    std::string const texte = std::string(TRAQUE_PREFIXE) + ligne;
+    WorldPacket paquet;
+    ChatHandler::BuildChatPacket(paquet, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(), texte, 0,
+                                 player->GetName(), player->GetName(), 0, false);
+    player->SendDirectMessage(&paquet);
+}
+
+// Carte des evenements (17/10/2026) : prefixe COAEV, addon CoAMonde. Option AiPlayerbot.Directeur.CarteEvenements.
+#include "CoaDirecteurCarte.inc"
 }  // namespace
 
 class coa_directeur_onglet_playerscript : public PlayerScript
@@ -10521,13 +11879,27 @@ public:
     bool OnPlayerCanUseChat(Player* player, uint32 type, uint32 language, std::string& message,
                             Player* receiver) override
     {
-        if (type != CHAT_MSG_WHISPER || language != LANG_ADDON || !player ||
-            message.compare(0, sizeof(ONGLET_PREFIXE) - 1, ONGLET_PREFIXE) != 0)
+        if (type != CHAT_MSG_WHISPER || language != LANG_ADDON || !player)
+            return true;
+        // Carte des evenements (COAEV, CoaDirecteurCarte.inc) : consommee dans tous les cas, jamais transmise.
+        if (message.compare(0, sizeof(CARTE_PREFIXE) - 1, CARTE_PREFIXE) == 0)
+        {
+            if (receiver == player && message.size() <= 255)
+                RepondreCarte(player, message.substr(sizeof(CARTE_PREFIXE) - 1));
+            return false;
+        }
+        if (message.compare(0, sizeof(ONGLET_PREFIXE) - 1, ONGLET_PREFIXE) != 0)
             return true;
         // Le protocole est consomme dans tous les cas : jamais transmis a un autre joueur.
         if (receiver != player || message.size() > 255)
             return false;
-        if (message.substr(sizeof(ONGLET_PREFIXE) - 1) != "TOUT")
+        std::string const demande = message.substr(sizeof(ONGLET_PREFIXE) - 1);
+        if (demande == TRAQUE_DEMANDE)
+        {
+            RepondreTraqueur(player);   // lot T1 : traqueur de contrat (option Directeur.Traqueur)
+            return false;
+        }
+        if (demande != "TOUT")
             return false;
         uint32 const guid = player->GetGUID().GetCounter();
         uint32 const maintenantMs = getMSTime();
@@ -10540,7 +11912,7 @@ public:
                 derniereDemandeOnglet.clear();
             derniereDemandeOnglet[guid] = maintenantMs;
         }
-        std::string const corps = CorpsOnglet(guid);
+        std::string const corps = CorpsOnglet(guid, player->GetSession());
         // Morceaux de ONGLET_MORCEAU octets au plus, jamais au milieu d'un caractere
         // UTF-8 (revue m3) : la coupe recule sur un octet de continuation 10xxxxxx.
         std::vector<std::string> morceaux;
@@ -10614,11 +11986,15 @@ public:
     }
 };
 
+// Butin des bots aux evenements (12/10/2026) : fonctions publiques, hors de l'espace de noms anonyme.
+#include "CoaDirecteurButin.inc"
+
 void AddSC_coa_directeur()
 {
     new coa_directeur_niveau_creaturescript();
     new coa_directeur_soin_unitscript();    // lot S des evenements (crochet OnHeal : compteur `soins`)
     new coa_directeur_portail_goscript();   // lot P des evenements
+    new coa_directeur_barricade_goscript(); // convoi v2 : la barricade a demolir
     new coa_directeur_dose_unitscript();       // lot G : degats doses
     new coa_directeur_coffre_globalscript();   // lot G : qui ouvre le coffre
     new coa_directeur_coffre_playerscript();   // lot G : chacun sa tranche au coffre

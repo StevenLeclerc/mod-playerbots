@@ -55,6 +55,7 @@
 
 #include "CoaArene1v1.h"
 #include "CoaAiObjectContext.h"
+#include "CoaBancSoin.h"
 
 #include "ArenaTeam.h"
 #include "BattleGroundJoinAction.h"
@@ -481,6 +482,9 @@ char const* RefusGladiateur(uint32 guid, Player* b)
         return "instance";
     if (DejaEngage(guid))
         return "deja_engage";
+    // Banc des soins (13/10/2026, CoaBancSoin.cpp) : un membre d'essai en cours n'est jamais gladiateur.
+    if (CoaBancSoin::MembreEngage(guid))
+        return "banc_soin";
     return nullptr;
 }
 

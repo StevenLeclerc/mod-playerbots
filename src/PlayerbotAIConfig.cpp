@@ -799,6 +799,19 @@ bool PlayerbotAIConfig::Initialize()
         coaHvTeleportVisible = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.TeleportVisible", false);
         coaHvTeleportVisiblePct =
             std::min<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.TeleportVisiblePct", 100));
+
+        // Ressources d'evenement (12/10/2026) : eteint par defaut. Liste des objets : AiPlayerbot.Directeur.ButinObjets.
+        coaHvRessources = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.Ressources", false);
+        coaHvRessourcesVenteAnticipee =
+            sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.HotelDesVentes.Ressources.VenteAnticipee", false);
+        lireBornes("AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMin", "AiPlayerbot.Coa.HotelDesVentes.Ressources.CoefMax",
+                   3.0f, 5.0f, coaHvRessourcesCoefMin, coaHvRessourcesCoefMax);
+        coaHvRessourcesMaxParMaison =
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParMaison", 60);
+        coaHvRessourcesMaxParModele =
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.Ressources.MaxParModele", 15);
+        coaHvRessourcesGarderMaxPiles =
+            sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.HotelDesVentes.Ressources.GarderMaxPiles", 12);
     }
 
     // Directeur, lot D2a : inerte par defaut (SPEC-directeur-D2.md § 2.3).
@@ -831,6 +844,17 @@ bool PlayerbotAIConfig::Initialize()
     directeurEvenementSoins = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementSoins", false);
     // Vrai groupe (09/10/2026) : eteint par defaut.
     directeurEvenementGroupe = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.EvenementGroupe", false);
+    // Fin d'evenement (13/10/2026) : 0 par defaut, rien ne change (les inscrits quittent le groupe a la fin).
+    directeurEvenementGroupeAttenteS =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementGroupeAttenteS", 0);
+    directeurEvenementGroupeAttenteYd =
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementGroupeAttenteYd", 200);
+    // Plus court que la laisse d'evenement (110 yd), un bot qui suit en retard sortirait du groupe a la fin.
+    if (directeurEvenementGroupeAttenteYd < 120)
+        directeurEvenementGroupeAttenteYd = 120;
+    // Pendant l'attente, le filet `sans_evenement` ne joue pas : borne haute, un bot ne reste pas groupe sans fin.
+    if (directeurEvenementGroupeAttenteS > 1800)
+        directeurEvenementGroupeAttenteS = 1800;
     // Sous 5 s, un joueur recevrait un paquet meteo presque a chaque seconde.
     if (directeurMeteoReaffirmationSecondes < 5)
         directeurMeteoReaffirmationSecondes = 5;
@@ -862,6 +886,20 @@ bool PlayerbotAIConfig::Initialize()
     // Lot R3 (03/10/2026) : Adventurer's Cache (1397885) seulement ; 20 po par commande au plus.
     directeurRecompenseObjets = sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.RecompenseObjets", "1397885");
     directeurRecompenseMaxCuivre = sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.RecompenseMaxCuivre", 200000);
+    // Lot T1 (12/10/2026) : traqueur de contrat, eteint par defaut ; cadence bornee a [1 s, 60 s].
+    directeurTraqueur = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Traqueur", false);
+    directeurTraqueurIntervalleMs = std::max<uint32>(
+        1000, std::min<uint32>(60000, sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.TraqueurIntervalleMs", 2000)));
+    // Lots T3, T4-T5 (12/10/2026) : avis de recherche dans l'onglet, reactions des cibles. Eteints par defaut.
+    directeurAvis = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Avis", false);
+    directeurReactions = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Reactions", false);
+    // Lot T6 (13/10/2026) : fuite montee, seconde fuite, soudoiement. Eteint par defaut (sans effet sans Reactions).
+    directeurReactionsT6 = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ReactionsT6", false);
+    // Lot D5 (15/10/2026) : verbes `attirer` (creatures existantes attirees, mode patrouille) et `soigner` (patient
+    // impose a un bot soigneur deja present). Eteints par defaut.
+    directeurAttirer = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Attirer", false);
+    directeurSoigneurs = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Soigneurs", false);
+    directeurImprevuBanc = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ImprevuBanc", false);
     // Lot C des evenements (04/10/2026) : defauts = ids notes ✔ au banc du 04/10 (verdicts :
     // coa-project/docs/EVENEMENTS-banc-rendu-verdicts.md), sauf 10008 (« rien » au banc, volume
     // 0,12 au DBC). 45213 (nuage d'orage, ✘ au banc pose sur le joueur) n'est dans AUCUN defaut :
@@ -915,6 +953,22 @@ bool PlayerbotAIConfig::Initialize()
     // Preuve lisible de la valeur CHARGEE (prerequis de la migration du butin 2026_10_11_11) : une ligne par lecture.
     LOG_INFO("playerbots", "coa directeur ressources: sous_action=config niveau_monstre={}",
              directeurRessourcesNiveauMonstre ? 1 : 0);
+    // Butin des bots aux evenements (12/10/2026) : eteint par defaut. La liste est VIDEE avant relecture (LoadList
+    // ajoute) ; un id nul ou illisible (atoi -> 0) est ecarte.
+    {
+        std::vector<uint32> objets;
+        LoadList<std::vector<uint32>>(
+            sConfigMgr->GetOption<std::string>("AiPlayerbot.Directeur.ButinObjets",
+                                               "9100101,9100106,9100107,9100111,9100116,9100117"),
+            objets);
+        objets.erase(std::remove(objets.begin(), objets.end(), 0u), objets.end());
+        directeurButinObjets = std::move(objets);
+    }
+    directeurButinBots = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ButinBots", false);
+    directeurButinTrace = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ButinTrace", false);
+    LOG_INFO("playerbots", "coa directeur butin: sous_action=config bots={} trace={} objets={} hv_ressources={}",
+             directeurButinBots ? 1 : 0, directeurButinTrace ? 1 : 0, directeurButinObjets.size(),
+             coaHvRessources ? 1 : 0);
     directeurEvenementInvoquesParJoueur =
         std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Directeur.EvenementInvoquesParJoueur", 12), 1, 24);
     directeurEvenementInvocationDistanceYd = std::clamp<uint32>(
@@ -1011,6 +1065,24 @@ bool PlayerbotAIConfig::Initialize()
     // Survie d'arene (11/10/2026) : VRAIE par defaut, mais n'agit que sous IaCommune (strategie « coa arene » composee).
     coaAreneIaSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaArene.IaSurvie", true);
     // --- fin CoaArene IA
+    // --- IA soins/survie (16/10/2026) : chaque changement de comportement sous sa propre option, VRAIE par defaut.
+    coaIaClassement = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.Classement", true);
+    coaIaPostureRole = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PostureRole", true);
+    coaIaSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.Survie", true);
+    coaIaSurviePotion = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.SurviePotion", true);
+    coaIaReserveSoigneur = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveSoigneur", true);
+    coaIaReserveSoigneurMana =
+        std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaIa.ReserveSoigneurMana", 80), 100);
+    coaIaHotUnique = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.HotUnique", true);
+    coaIaAuraSurLanceur = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.AuraSurLanceur", true);
+    coaIaTriSoins = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.TriSoins", true);
+    coaIaUtiliteAlignee = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.UtiliteAlignee", true);
+    coaIaFormeMaudite = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.FormeMaudite", true);
+    coaIaVenomancerSoin = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.VenomancerSoin", true);
+    coaIaSoigneurResteEnCombat = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.SoigneurResteEnCombat", true);
+    coaIaLeverServiteur = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.LeverServiteur", true);
+    coaIaReserveDefensif = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveDefensif", true);
+    // --- fin IA soins/survie
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
     autoTeleportForLevel = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoTeleportForLevel", false);

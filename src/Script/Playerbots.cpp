@@ -90,8 +90,13 @@ public:
     // its bots wants to know what dropped, not to read every piece of linen cloth. The bar is
     // AiPlayerbot.LootLogMinQuality (3, rare, by default; 4 for epics only).
     // Off unless worldserver.conf points "playerbots.loot" at an appender.
-    void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid /*lootguid*/) override
+    void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid lootguid) override
     {
+        // CoA -- trace `coa directeur butin:` des ressources d'evenement, pour TOUT pilleur (humain ou bot), avant
+        // le filtre « bots seulement » ci-dessous. Option Directeur.ButinTrace eteinte : rend la main aussitot.
+        if (player && item)
+            CoaDirecteur::TracerButin(player, item->GetEntry(), count, lootguid);
+
         if (!player || !item || !GET_PLAYERBOT_AI(player))
             return;
 
@@ -589,6 +594,7 @@ void AddSC_coa_directeur();
 // Ai/Coa/CoaArene1v1.cpp : arene 1 contre 1 contre un gladiateur (Arene1v1, 10/10/2026).
 void AddSC_coa_arene1v1();
 void AddSC_coa_score();
+void AddSC_coa_banc_soin();
 
 void AddPlayerbotsScripts()
 {
@@ -615,4 +621,5 @@ void AddPlayerbotsScripts()
     AddSC_coa_directeur();
     AddSC_coa_arene1v1();
     AddSC_coa_score();
+    AddSC_coa_banc_soin();
 }

@@ -10,6 +10,7 @@
 #include "AiObjectContext.h"
 #include "ArenaTeam.h"
 #include "ArenaTeamMgr.h"
+#include "CoaHotelDesVentes.h"
 #include "CoaSpecLookup.h"
 #include "CoaSpecStatWeights.h"
 #include "CoaSpecialization.h"
@@ -1944,7 +1945,20 @@ public:
     bool Visit(Item* item) override
     {
         uint32 id = item->GetTemplate()->ItemId;
-        if (CanKeep(id))
+
+        // CoA -- ressources d'evenement (12/10/2026, option Coa.HotelDesVentes.Ressources) : gardees pour l'HV des
+        // bots, au plus Ressources.GarderMaxPiles piles par vidage (au-dela : detruites, comme avant).
+        if (CoaHotelDesVentes::RessourceProtegee(id))
+        {
+            bool const garder = ressourcesGardees < sPlayerbotAIConfig.coaHvRessourcesGarderMaxPiles;
+            CoaHotelDesVentes::NoterRessourceAuVidage(garder);
+            if (garder)
+            {
+                ++ressourcesGardees;
+                return true;
+            }
+        }
+        else if (CanKeep(id))
         {
             keep.insert(id);
             return true;
@@ -1968,6 +1982,7 @@ private:
 
     Player* bot;
     std::set<uint32> keep;
+    uint32 ressourcesGardees = 0;
 };
 
 bool PlayerbotFactory::CanEquipArmor(ItemTemplate const* proto)
@@ -2327,15 +2342,23 @@ void PlayerbotFactory::InitEquipment(bool incremental, bool second_chance)
 {
     if (level < 5)
     {
-        // original items
+        // CoA (17/10/2026) : CharStartOutfit.dbc n'a AUCUN objet pour les 21 classes CoA (12-32) ; les joueurs
+        // recoivent leur tenue par `playercreateinfo_item`. Sans repli, un bot CoA refait sous le niveau 5 restait nu.
+        std::vector<uint32> outfit;
         if (CharStartOutfitEntry const* oEntry = GetCharStartOutfitEntry(bot->getRace(), bot->getClass(), bot->getGender()))
-        {
             for (int j = 0; j < MAX_OUTFIT_ITEMS; ++j)
-            {
-                if (oEntry->ItemId[j] <= 0)
-                    continue;
+                if (oEntry->ItemId[j] > 0)
+                    outfit.push_back(uint32(oEntry->ItemId[j]));
 
-                uint32 itemId = oEntry->ItemId[j];
+        if (outfit.empty())
+            if (PlayerInfo const* info = sObjectMgr->GetPlayerInfo(bot->getRace(), bot->getClass()))
+                for (PlayerCreateInfoItem const& createItem : info->item)
+                    outfit.push_back(createItem.item_id);
+
+        // original items
+        {
+            for (uint32 itemId : outfit)
+            {
 
                 // skip hearthstone
                 if (itemId == 6948)
