@@ -472,7 +472,8 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
                 if (permis && sRandomPlayerbotMgr.IsRandomBot(bot))
                     bot->UpdatePvP(true, true);
             }
-            else if (!permis && !bot->IsInCombat() && !bot->InBattleground() && !bot->InArena())
+            else if (!permis && !bot->IsInCombat() && !bot->InBattleground() && !bot->InArena() &&
+                     !bot->HasPlayerFlag(PLAYER_FLAGS_IN_PVP))   // contre-revue : un /pvp d'un humain n'est jamais retire
                 bot->UpdatePvP(true);
         }
     }
