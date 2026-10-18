@@ -3863,8 +3863,8 @@ constexpr uint32 EV_SORT_DUREE_MIN_S = 5;
 constexpr uint32 EV_DECLENCHEUR_KIT_MS = 10 * IN_MILLISECONDS;   // vie d'un declencheur de kit ou de son
 constexpr uint32 EV_ENVOI_DIFFERE_MS = 1000;       // le client doit connaitre le declencheur avant le paquet
 constexpr float EV_SOL_ECART_MAX_YD = 15.0f;       // z du service et sol lu : au-dela, refus `sol`
-constexpr size_t EV_DECLENCHEURS_MAX = 64;          // tout le royaume
-constexpr size_t EV_ENVOIS_MAX = 128;
+constexpr size_t EV_DECLENCHEURS_MAX = 256;         // tout le royaume (64 jusqu'au 18/10 : 8 evenements simultanes)
+constexpr size_t EV_ENVOIS_MAX = 512;               // 128 jusqu'au 18/10
 
 enum class EvSous : uint8 { Aucune, Ambiance, Son, Musique, Effet, Annoncer };
 enum class EvLieu : uint8 { Joueur, Point, Haut };
@@ -4644,7 +4644,7 @@ constexpr float EV_ERRER_MIN_YD = 3.0f;
 constexpr float EV_ERRER_MAX_YD = 30.0f;
 constexpr uint32 EV_RETRAIT_HORS_VUE_MAX_S = 300;    // au-dela, retire meme vu
 constexpr float EV_VU_MARGE_YD = 10.0f;
-constexpr size_t EV_INVOQUES_MAX = 64;               // tout le royaume
+constexpr size_t EV_INVOQUES_MAX = 256;              // tout le royaume (64 jusqu'au 18/10 : 8 evenements simultanes)
 constexpr uint32 EV_SORT_NAISSANCE = 7398;           // « Birth », effet 46, le monstre sur lui-meme
 // Arrivee `ciel` (10/10/2026, retours du 09/10 : « je pensais les voir surgir d'en haut ») : hauteur de pose au-dessus
 // du sol du point, et duree au bout de laquelle la gravite revient meme si la descente n'est pas finie.
