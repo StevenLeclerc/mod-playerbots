@@ -9868,8 +9868,24 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     WorldPosition centre(c.carte, c.x, c.y, sol);
     // `peupler` exempte le joueur qui demande, et lui seul (§ 4.2) ; `chasser`
     // exempte le joueur prime, et lui seul (SPEC-directeur-D4.md § 6.3).
-    if ((presence || chasseur) ? HumainProcheSauf(centre, c.carte, AFFECTATION_HUMAIN_YD, c.joueur)
-                 : ia->HasPlayerNearby(&centre, AFFECTATION_HUMAIN_YD))
+    // 18/10 (convoi entre bots, revue B1) : l'ATTACHE de l'ancre bot d'un convoi (inscription `Q-` dont le `joueur` est
+    // un autre bot d'evenement) est exemptee du controle des humains si l'ancre est DEJA a moins de
+    // AFFECTATION_HUMAIN_YD du centre et sans saut : elle ne fait que marcher a cote du convoi, rien n'apparait a l'ecran.
+    // Sans cela, un humain venu escorter le convoi d'un bot ferait lacher l'ancre, puis abandonner le convoi.
+    // Portee (revue du 18/10, m1, assumee) : TOUTE presence `Q-` sans saut d'un porteur ancre bot -- inscriptions des
+    // failles, nuits et rares entre bots comprises : un bot deja a moins de 200 yd, qui ne fait que marcher, rejoint
+    // l'evenement meme si un humain est la (conception de l'autonomie : « un humain qui arrive peut participer »).
+    bool attacheSurPlace = false;
+    if (presence && !saut && c.action.size() > 2 && c.action[0] == 'Q' && c.action[1] == '-' && bot &&
+        bot->GetMapId() == c.carte &&
+        centre.sqDistance(WorldPosition(bot)) < AFFECTATION_HUMAIN_YD * AFFECTATION_HUMAIN_YD)
+    {
+        Player* porteur = c.joueur ? ObjectAccessor::FindPlayerByLowGUID(c.joueur) : nullptr;
+        attacheSurPlace = porteur && !Humain(porteur) && AncreDEvenement(porteur);
+    }
+    if (!attacheSurPlace &&
+        ((presence || chasseur) ? HumainProcheSauf(centre, c.carte, AFFECTATION_HUMAIN_YD, c.joueur)
+                                : ia->HasPlayerNearby(&centre, AFFECTATION_HUMAIN_YD)))
     {
         Refuser(c, "humain_proche");
         return;
