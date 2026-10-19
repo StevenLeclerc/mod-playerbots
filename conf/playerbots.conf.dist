@@ -4349,6 +4349,18 @@ AiPlayerbot.Directeur.EvenementPortail = 0
 #        Default: 0
 AiPlayerbot.Directeur.EvenementGardien = 0
 
+#    AiPlayerbot.Directeur.EvenementGisement
+#        Description: Gisement d'apres-evenement (19/10/2026, CoaDirecteurGardien.inc, ExecuterGisement ; conception
+#        coa-project/docs/CONCEPTION-artisanat-gisements-evenement.md). Sous-action `gisement:orage` | `gisement:nuit`
+#        du verbe `evenement` : 1 a 8 noeuds de recolte du theme (Veines foudroyees et Fleurs des sommets orageux ;
+#        Ossuaires mineralises et Fleurs de tombe) autour du point, pour 300 a 3600 s, apres un evenement reussi. Les
+#        bots ne les recoltent jamais (LootObjectStack.cpp). Lue a chaque commande (`.reload config` suffit). Le service
+#        ne l'emet que si elle vaut 1 dans le fichier de conf.
+#        Default:     0 - eteint (refus `gisement_eteint`)
+#                     1 - allume
+
+AiPlayerbot.Directeur.EvenementGisement = 0
+
 #    AiPlayerbot.Directeur.EvenementObjectifs
 #        Objectifs d'evenement (10/10/2026, coa-project/docs/CONCEPTION-objectifs-evenement.md) : sous-action
 #        `objectif:<titre>:<etape>[:<n>[:<m>]]` du verbe `evenement` (duree_s 10-3600 ; valeur = lot du chef pour

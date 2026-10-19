@@ -4126,6 +4126,9 @@ bool EstCoffre(std::string const& t);
 void ExecuterCoffre(CoaDirCommande const& c);
 template <typename Predicat>
 size_t LeverCoffresSi(Predicat lever, char const* raison);
+// Gisement d'apres-evenement (19/10/2026) : defini dans CoaDirecteurGardien.inc, apres le coffre.
+bool EstGisement(std::string const& t);
+void ExecuterGisement(CoaDirCommande const& c);
 // Objectifs d'evenement (10/10/2026) : definis dans CoaDirecteurObjectifs.inc, inclus apres le lot G.
 bool EstObjectif(std::string const& t);
 void ExecuterObjectif(CoaDirCommande const& c);
@@ -4157,6 +4160,11 @@ void ExecuterEvenement(CoaDirCommande const& c)
     if (EstCoffre(c.texte))    // lot G (08/10/2026) : le coffre de la faille
     {
         ExecuterCoffre(c);
+        return;
+    }
+    if (EstGisement(c.texte))  // 19/10/2026 : le gisement d'apres-evenement (CoaDirecteurGardien.inc)
+    {
+        ExecuterGisement(c);
         return;
     }
     if (EstObjectif(c.texte))  // 10/10/2026 : objectifs d'evenement (etats du monde)

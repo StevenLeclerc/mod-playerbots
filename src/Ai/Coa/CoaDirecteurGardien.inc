@@ -418,6 +418,137 @@ void ExecuterCoffre(CoaDirCommande const& c)
     Accuser(c, "execute", nullptr);
 }
 
+// ------------------------------------------------------------------ le gisement (19/10/2026)
+//
+// Decision du commanditaire (19/10, coa-project/docs/CONCEPTION-artisanat-gisements-evenement.md) : apres chaque
+// evenement reussi, des noeuds de recolte du theme apparaissent autour du lieu et restent 30 minutes.
+//   gisement:orage   Faille d'orage : Veines foudroyees (9101000) et Fleurs des sommets orageux (9101006), en alternance
+//   gisement:nuit    Nuit des morts : Ossuaires mineralises (9101001) et Fleurs de tombe (9101007), en alternance
+// Forme FERMEE. valeur = nombre de noeuds, 1 a EV_GISEMENT_MAX (dose par le service selon les humains presents) ;
+// duree_s = vie des noeuds, EV_GISEMENT_VIE_MIN_S a EV_GISEMENT_VIE_MAX_S ; carte/x/y/z = le point de l'evenement
+// (PointApparition, comme le coffre) ; jamais de rayon. Cible : l'ANCRE de l'evenement (AncreDEvenement : un humain, ou un
+// bot si EvenementAncreBot ; les humains du public recoltent). Option AiPlayerbot.Directeur.EvenementGisement, lue a
+// chaque commande dans la conf CHARGEE (defaut 0 : refus `gisement_eteint`).
+// Les noeuds sont des gameobjects 9101000-9101099 : les bots ne les visent jamais (LootObject::IsLootPossible,
+// LootObjectStack.cpp) ; leur butin exige l'outil et la competence de metier (donnees de l'artisanat). Ils s'effacent
+// seuls : a l'echeance (Map::SummonGameObject avec respawnTime, objet non « spawnedByDefault » : GO_JUST_DEACTIVATED,
+// GameObject::Update) ou une fois recoltes (coffre consommable invoque). Pas de registre : un gisement n'est pas une
+// menace, `lever` et `.directeur stop` le laissent vivre ses 30 minutes ; un redemarrage l'efface (objet non sauve).
+constexpr char const EV_GISEMENT_OPTION[] = "AiPlayerbot.Directeur.EvenementGisement";
+constexpr uint32 EV_GISEMENT_MAX = 8;
+constexpr uint32 EV_GISEMENT_VIE_MIN_S = 300;
+constexpr uint32 EV_GISEMENT_VIE_MAX_S = 3600;
+constexpr float EV_GISEMENT_RAYON_MIN_YD = 8.0f;     // hors du pied du chef et du coffre (5 yd)
+constexpr float EV_GISEMENT_RAYON_MAX_YD = 28.0f;    // visible depuis le point, a portee de course
+constexpr int EV_GISEMENT_ESSAIS = 5;                // tirages par noeud (sol sec, sans toit, dans la fenetre de hauteur)
+constexpr std::array<uint32, 2> EV_GISEMENT_ORAGE = {9101000, 9101006};
+constexpr std::array<uint32, 2> EV_GISEMENT_NUIT = {9101001, 9101007};
+
+bool EstGisement(std::string const& t)
+{
+    return t == "gisement" || t.rfind("gisement:", 0) == 0;
+}
+
+void RefuserGisement(CoaDirCommande const& c, char const* raison)
+{
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=gisement joueur={} valeur={} motif={}", c.id,
+             c.cible, c.valeur, raison);
+    Refuser(c, raison);
+}
+
+void ExecuterGisement(CoaDirCommande const& c)
+{
+    std::array<uint32, 2> const* noeuds =
+        c.texte == "gisement:orage" ? &EV_GISEMENT_ORAGE : c.texte == "gisement:nuit" ? &EV_GISEMENT_NUIT : nullptr;
+    if (!TexteBusValide(c.texte) || !noeuds)
+    {
+        RefuserGisement(c, "texte");
+        return;
+    }
+    if (!CibleJoueurValide(c) || c.valeur < 1 || c.valeur > int32(EV_GISEMENT_MAX) ||
+        c.dureeS < EV_GISEMENT_VIE_MIN_S || c.dureeS > EV_GISEMENT_VIE_MAX_S)
+    {
+        RefuserGisement(c, "bornes");
+        return;
+    }
+    if (!sConfigMgr->GetOption<bool>(EV_GISEMENT_OPTION, false, false))
+    {
+        RefuserGisement(c, "gisement_eteint");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        RefuserGisement(c, "hors_ligne");
+        return;
+    }
+    if (!AncreDEvenement(p))
+    {
+        RefuserGisement(c, "pas_humain");
+        return;
+    }
+    if (!p->IsInWorld() || p->IsBeingTeleported() || !CarteDeSuspension(p->GetMapId()))
+    {
+        RefuserGisement(c, "carte");
+        return;
+    }
+    for (uint32 e : *noeuds)
+    {
+        GameObjectTemplate const* g = sObjectMgr->GetGameObjectTemplate(e);
+        if (!g || g->type != GAMEOBJECT_TYPE_CHEST)
+        {
+            RefuserGisement(c, "gabarit");   // donnees de l'artisanat absentes
+            return;
+        }
+    }
+    float sol = 0.0f;
+    char const* raison = nullptr;
+    if (!PointApparition(c, p, sol, raison))
+    {
+        RefuserGisement(c, raison);
+        return;
+    }
+    Map* map = p->GetMap();
+    uint32 const n = uint32(c.valeur);
+    float const depart = frand(0.0f, 2.0f * float(M_PI));
+    uint32 poses = 0, rates = 0;
+    for (uint32 k = 0; k < n; ++k)
+    {
+        uint32 const entree = (*noeuds)[k % noeuds->size()];
+        bool pose = false;
+        for (int essai = 0; essai < EV_GISEMENT_ESSAIS && !pose; ++essai)
+        {
+            // Secteurs reguliers (un noeud par secteur, ecartes les uns des autres), un peu de jeu dans chacun.
+            float const angle = depart + 2.0f * float(M_PI) * (float(k) + frand(0.15f, 0.85f)) / float(n);
+            float const r = frand(EV_GISEMENT_RAYON_MIN_YD, EV_GISEMENT_RAYON_MAX_YD);
+            float const px = c.x + r * std::cos(angle);
+            float const py = c.y + r * std::sin(angle);
+            float h = 0.0f;
+            if (!SolSec(map, px, py, sol + Z_OFFSET_FIND_HEIGHT, h) || std::fabs(h - sol) > TIRAGE_ECART_Z ||
+                ToitAuDessus(map, px, py, h, sol) || PointSansPvp(map, px, py, h))
+                continue;
+            float const o = frand(0.0f, 2.0f * float(M_PI));
+            if (map->SummonGameObject(entree, px, py, h, o, 0.0f, 0.0f, std::sin(o / 2.0f), std::cos(o / 2.0f), c.dureeS))
+            {
+                pose = true;
+                ++poses;
+            }
+        }
+        if (!pose)
+            ++rates;
+    }
+    if (!poses)
+    {
+        RefuserGisement(c, "invocation");
+        return;
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=gisement joueur={} valeur={} motif=pose poses={}"
+             " rates={} vie_s={} x={:.1f} y={:.1f} z={:.1f} theme={}", c.id, c.cible, c.valeur, poses, rates, c.dureeS,
+             c.x, c.y, sol, c.texte.substr(9));
+    Accuser(c, "execute", nullptr);
+}
+
 // Fin d'un coffre (le registre l'a deja quitte) : objet retire s'il existe encore, table d'acces videe, accuse.
 void FermerCoffre(EvCoffre const& co, char const* motif)
 {
