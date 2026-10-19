@@ -3297,7 +3297,9 @@ bool CoaIaSoigneurPeutSoigner(PlayerbotAI* botAI, Player* bot, Player* membre)
     bool const hotUnique = sPlayerbotAIConfig.coaIaHotUnique;
     std::vector<Usable> soins = KnownAbilities(botAI, bot, [surSoi](uint16 kind, uint16 marques)
         {
-            return (kind & (KIND_HEAL | KIND_HOT | KIND_GROUP_HEAL)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) &&
+            // Soin de zone PUR ecarte (revue 19/10) : « coa group heal » ne part qu'a 2 blesses ou plus (AoeHealTrigger),
+            // un seul blesse ne le recevrait pas. Un sort qui est aussi soin direct ou periodique reste compte.
+            return (kind & (KIND_HEAL | KIND_HOT)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) &&
                    !(marques & MARQUE_BALISE) &&
                    (surSoi ? !(marques & MARQUE_PAS_SUR_SOI) : CanHealOther(kind, marques));
         });
