@@ -762,10 +762,13 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // D6 du 19/10 (coa-project/docs/SYNTHESE-banc-soins-ia3-20261019.md, sorts du kit jamais lances ; Spell.dbc lu le 19/10).
     //   - Healing Ward 500957 (Witch Doctor, toutes specialisations ; jamais lance au banc n°3, 0 ligne au journal) : un seul
     //     effet, SUMMON (28) d'un totem dont l'aura 500956 declenche le soin de zone 805403 toutes les 2,5 s. Classify ne
-    //     voit ni soin ni aura : kind 0, aucune action ne le prenait -- meme cas que My Greatest Invention! (I1). Soin de zone,
-    //     et soin direct au dernier rang ; MARQUE_BALISE : « Can only have 1 Ward active at a time », pas relance avant la fin
+    //     voit ni soin ni aura : kind 0, aucune action ne le prenait -- meme cas que My Greatest Invention! (I1). Soin de
+    //     zone ; MARQUE_BALISE : « Can only have 1 Ward active at a time », pas relance avant la fin
     //     de sa duree (CastFirst le met au banc).
-    { 500957, KIND_HEAL | KIND_GROUP_HEAL, 0, 0, false, MARQUE_BALISE },
+    //     Relecture de b5 : la cible 78 (TARGET_DEST_DEST_FRONT) pose le totem DEVANT le soigneur, ou qu'il soit et ou que
+    //     soit le blesse. Soin de zone seulement (« coa group heal », plusieurs membres touches ; et, en dernier recours,
+    //     soin sur soi d'un Witch Doctor de degats) : jamais offert par « coa heal » pour un seul blesse peut-etre loin.
+    { 500957, KIND_GROUP_HEAL, 0, 0, false, MARQUE_BALISE },
     //   - Harden 800892 (Venomancer, forme de scarabee ; jamais dans une liste de survie au banc n°3) : le sort pose, par le
     //     script (AscensionVenomancerAbilities.cpp:399-402), des piles de 800960 (aura 87, -3 % chacune, « reducing damage
     //     taken by 45 % » : 15 piles). Classify lit une pile, -3 % : MARQUE_DEFENSIF_FAIBLE, et la survie du lot 3 lui retire
@@ -3247,7 +3250,9 @@ bool CoaIaSoigneurRetient(PlayerbotAI* botAI, Player* bot)
  * (Unit::Attack, hors liste). Hors groupe : rien ne change (« party member to heal » ne rend que lui-meme, et la survie
  * du lot 3 le garde). Bot non soigneur, classes 1 a 11 (GetCoaRole : Dps) : rien ne change.
  */
-bool CoaIaSoigneurNeFrappePas(Player* bot)
+bool CoaIaSoigneurPeutSoigner(PlayerbotAI* botAI, Player* bot);
+
+bool CoaIaSoigneurNeFrappePas(PlayerbotAI* botAI, Player* bot)
 {
     if (!sPlayerbotAIConfig.coaIaSoigneurNeFrappePas || !bot->IsAlive() || GetCoaRole(bot) != CoaRole::Heal ||
         (CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot)))
@@ -3262,7 +3267,33 @@ bool CoaIaSoigneurNeFrappePas(Player* bot)
         if (member && member->IsInWorld() && member->GetMapId() == bot->GetMapId() &&
             (member == bot || bot->IsWithinDistInMap(member, 40.0f)) && member->IsAlive() &&
             member->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth))
-            return true;
+            // Relecture de b5 : seulement si le soigneur PEUT soigner ; sinon il garde ses attaques.
+            return CoaIaSoigneurPeutSoigner(botAI, bot);
+    }
+    return false;
+}
+
+/*
+ * Relecture de b5 (19/10) : D2 ne retire les attaques que si le soigneur a au moins un soin (direct, periodique ou de
+ * zone, ni controle ni hostile) pret et payable : memes filtres du lanceur que CastFirst (forme, arme, aura, ressource,
+ * familier, recharge propre, banc), plus l'etat qui le bloque (etourdi, desoriente, en fuite, reduit au silence ou
+ * pacifie : CoaAreneBloqueParEtat, recopie de Spell::CheckCasterAuras). La recharge globale ne compte pas : elle passe.
+ * A sec, sous silence ou tous soins en recharge, il frappe comme avant D2.
+ */
+bool CoaIaSoigneurPeutSoigner(PlayerbotAI* botAI, Player* bot)
+{
+    auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
+    time_t const now = time(nullptr);
+    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
+             { return (kind & (KIND_HEAL | KIND_HOT | KIND_GROUP_HEAL)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); }))
+    {
+        SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+        if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info) ||
+            CoaExigeFamilierAbsent(bot, info) || CoaAreneBloqueParEtat(bot, info))
+            continue;
+        if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
+            continue;
+        return true;
     }
     return false;
 }
@@ -3290,12 +3321,14 @@ bool CoaIaRendMana(SpellInfo const* info, uint16 marques, uint8 profondeur = 0)
     return false;
 }
 
-// D2 : retire les attaques qui coutent une ressource (toute ressource, vie comprise) ou la recharge globale
-// (Spell::TriggerGlobalCooldown : StartRecoveryTime non nul), sauf celles qui rendent de la mana. Sort effectif
-// (EffectiveSpell), comme CastFirst.
-void CoaIaRetirerFrappesDuSoigneur(Player* bot, std::vector<Usable>& usable)
+// D2 : retire les attaques qui coutent une ressource (toute ressource, vie comprise) ou la recharge globale, sauf celles
+// qui rendent de la mana. Sort effectif (EffectiveSpell), comme CastFirst. Relecture de b5 : recharge globale jugee comme le
+// coeur la pose et la lit -- Spell::TriggerGlobalCooldown la pose si StartRecoveryTime est non nul, sous la categorie
+// StartRecoveryCategory, et GlobalCooldownMgr::HasGlobalCooldown ne bloque que les sorts de la meme categorie : une
+// attaque de categorie 0 ne retarde aucun soin (categorie 133).
+void CoaIaRetirerFrappesDuSoigneur(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
 {
-    if (usable.empty() || !CoaIaSoigneurNeFrappePas(bot))
+    if (usable.empty() || !CoaIaSoigneurNeFrappePas(botAI, bot))
         return;
     usable.erase(std::remove_if(usable.begin(), usable.end(), [bot](Usable const& spell)
         {
@@ -3305,7 +3338,8 @@ void CoaIaRetirerFrappesDuSoigneur(Player* bot, std::vector<Usable>& usable)
             // I17 : une attaque qui soigne un allie reste aussi.
             if (sPlayerbotAIConfig.coaIaAttaqueQuiSoigne && (spell.marques & MARQUE_ATTAQUE_SOIGNE))
                 return false;
-            return info->StartRecoveryTime > 0 || info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
+            return (info->StartRecoveryTime > 0 && info->StartRecoveryCategory > 0) ||
+                   info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
         }), usable.end());
 }
 
@@ -3571,44 +3605,44 @@ constexpr uint32 CoaIaReservePretDansMs = 10 * IN_MILLISECONDS;
  * Seuil (AiPlayerbot.CoaIa.ReserveDefensifSeuil) : 0 = mediumHealth (avant D1) ; 1 a 99 = sous ce pourcentage de vie ;
  * 100 = toujours (« coa attack » et « coa aoe », seuls appelants, ne tournent qu'au combat : des l'engagement).
  */
-bool CoaIaReserveArmee(Player* bot)
+/*
+ * Relecture de b5 (19/10) : la rage et la puissance runique partent de 0 en combat. Armee des l'engagement, la reserve
+ * laissait le Bloodmage (Sanguine Mend 504085, 20 de rage ; Fleshcraft 801952, 50), le Primalist, le Witch Hunter
+ * (Darkfeast 500092) et le Knight of Xoroth (Calamity, 50) aux coups blancs jusqu'a 50 de rage plus le cout du sort.
+ * Pour ces deux ressources, la reserve ne s'arme que sous mediumHealth (ou sous le seuil s'il est plus bas). La mana et
+ * l'energie, qui partent pleines, gardent le seuil. Seuil 0 : mediumHealth pour toutes, comme avant D1.
+ */
+bool CoaIaReserveArmeePour(Player* bot, uint32 type)
 {
     uint32 const seuil = sPlayerbotAIConfig.coaIaReserveDefensifSeuil;
+    float const pv = bot->GetHealthPct();
+    int32 const moyen = sPlayerbotAIConfig.mediumHealth;
     if (!seuil)
-        return bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth);
-    return seuil >= 100 || bot->GetHealthPct() < float(seuil);
+        return pv < float(moyen);
+    if (type == POWER_RAGE || type == POWER_RUNIC_POWER)
+        return pv < float(std::min<int32>(int32(seuil), moyen));
+    return seuil >= 100 || pv < float(seuil);
 }
 
-void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
+// Relecture de b5 : la reserve est mise en cache au plus 1 s par bot (CoaAiObjectContext::reserveSurvie) ; elle parcourait
+// deux listes du kit a chaque passage de « coa attack » et « coa aoe », pour chaque bot CoA de degats en combat.
+constexpr uint32 CoaIaReserveCacheMs = 1000;
+static_assert(MAX_POWERS == 7, "CoaAiObjectContext::CoaReserveCache::reserve compte 7 ressources");
+
+// La reserve par ressource, sans le seuil d'armement (applique par l'appelant). `d1` : regles de D1 et de sa relecture --
+// un sort qui coute plus que le maximum de sa ressource (Grit 805819 : 9 999 d'energie) ne compte pas, et toute reserve,
+// mana comprise, est plafonnee a la moitie du maximum, pour ne jamais retirer toutes les attaques. Sans `d1` (les deux
+// options de D1 a 0) : la regle d'I8, mana seule, sans plafond.
+std::array<int32, MAX_POWERS> CoaIaReserveCalculer(PlayerbotAI* botAI, Player* bot, bool toutes, bool d1)
 {
-    // Revue de I8 : ni soigneur ni tank. Un tank paye en mana vit sous 65 % en donjon ; la reserve lui retirait les
-    // attaques payantes, donc la menace, y compris dans un groupe de joueurs.
-    CoaRole const role = GetCoaRole(bot);
-    if (usable.empty() || !sPlayerbotAIConfig.coaIaReserveDefensif || !CoaIaSurvieActive(bot) || role == CoaRole::Heal ||
-        role == CoaRole::Tank || !CoaIaReserveArmee(bot))
-        return;
-    // D1 : les ressources gardees -- la mana seule (avant D1, AiPlayerbot.CoaIa.ReserveToutesRessources = 0) ou toute
-    // ressource que le bot a (maximum non nul). La vie (POWER_HEALTH) n'en est jamais une : CoaIaPayeEnVieTropCher la garde.
-    bool const toutes = sPlayerbotAIConfig.coaIaReserveToutesRessources;
-    auto gardee = [bot, toutes](uint32 type)
-    {
-        return type < MAX_POWERS && (toutes || type == POWER_MANA) && bot->GetMaxPower(Powers(type)) > 0;
-    };
-    // Rien a retirer (aucune attaque payee dans une ressource gardee) : les deux listes de survie ne sont pas parcourues.
-    // Revient au comportement d'avant D1 (la reserve n'otait alors rien non plus) ; D1 arme la reserve a chaque attaque.
-    if (std::none_of(usable.begin(), usable.end(), [bot, &gardee](Usable const& spell)
-        {
-            SpellInfo const* info = EffectiveSpell(bot, spell.info);
-            return gardee(info->PowerType) && info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
-        }))
-        return;
     bool const sansServiteur = !CoaAreneAServiteur(bot);
     // Cout d'un sort de survie pret dans la fenetre, dans sa ressource (`type`), 0 sinon.
-    auto coutPret = [bot, sansServiteur, &gardee](Usable const& spell, uint32& type) -> int32
+    auto coutPret = [bot, sansServiteur, toutes, d1](Usable const& spell, uint32& type) -> int32
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
         type = info->PowerType;
-        if (!gardee(type) || (spell.marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)))
+        if (type >= MAX_POWERS || !(toutes || type == POWER_MANA) || !bot->GetMaxPower(Powers(type)) ||
+            (spell.marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)))
             return 0;
         if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
             return 0;
@@ -3618,7 +3652,10 @@ void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& us
             return 0;
         if (bot->GetSpellCooldownDelay(info->Id) > CoaIaReservePretDansMs)
             return 0;
-        return std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask()));
+        int32 const cout = std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask()));
+        if (d1 && cout > int32(bot->GetMaxPower(Powers(type))))
+            return 0;
+        return cout;
     };
     // Par ressource : le plus cher des defensifs plus le moins cher des soins sur soi (I8, ressource par ressource).
     std::array<int32, MAX_POWERS> defensif{};
@@ -3632,18 +3669,61 @@ void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& us
         if (int32 const cout = coutPret(spell, type))
             soin[type] = soin[type] ? std::min(soin[type], cout) : cout;
     std::array<int32, MAX_POWERS> reserve{};
-    bool rien = true;
     for (uint32 t = 0; t < MAX_POWERS; ++t)
     {
         reserve[t] = defensif[t] + soin[t];
-        // D1 : hors mana, au plus la moitie du maximum (choix de ce correctif, le diagnostic ne chiffre pas de plafond).
-        // L'energie et la rage remontent au plein : une reserve au-dessus du maximum figerait le bot, plein, sans frapper.
-        // La mana garde la regle d'I8, sans plafond.
-        if (t != POWER_MANA && reserve[t] > 0)
+        // D1 : au plus la moitie du maximum (choix de ce correctif, le diagnostic ne chiffre pas de plafond). L'energie
+        // et la rage remontent au plein : une reserve au-dessus du maximum figerait le bot, plein, sans frapper ; la mana
+        // aussi depuis la relecture de b5 (Embrace 30 % de mana de base plus un soin pouvait tout retirer).
+        if (d1 && reserve[t] > 0)
             reserve[t] = std::min<int32>(reserve[t], int32(bot->GetMaxPower(Powers(t)) / 2));
-        rien = rien && reserve[t] <= 0;
     }
-    if (rien)
+    return reserve;
+}
+
+void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
+{
+    // Revue de I8 : ni soigneur ni tank. Un tank paye en mana vit sous 65 % en donjon ; la reserve lui retirait les
+    // attaques payantes, donc la menace, y compris dans un groupe de joueurs.
+    CoaRole const role = GetCoaRole(bot);
+    if (usable.empty() || !sPlayerbotAIConfig.coaIaReserveDefensif || !CoaIaSurvieActive(bot) || role == CoaRole::Heal ||
+        role == CoaRole::Tank)
+        return;
+    // D1 : les ressources gardees -- la mana seule (avant D1, AiPlayerbot.CoaIa.ReserveToutesRessources = 0) ou toute
+    // ressource que le bot a (maximum non nul), et seulement si la reserve est armee pour elle (CoaIaReserveArmeePour).
+    // La vie (POWER_HEALTH) n'en est jamais une : CoaIaPayeEnVieTropCher la garde.
+    bool const toutes = sPlayerbotAIConfig.coaIaReserveToutesRessources;
+    bool const d1 = toutes || sPlayerbotAIConfig.coaIaReserveDefensifSeuil != 0;
+    auto gardee = [bot, toutes](uint32 type)
+    {
+        return type < MAX_POWERS && (toutes || type == POWER_MANA) && bot->GetMaxPower(Powers(type)) > 0 &&
+               CoaIaReserveArmeePour(bot, type);
+    };
+    // Rien a retirer (aucune attaque payee dans une ressource gardee et armee) : la reserve n'est pas calculee.
+    if (std::none_of(usable.begin(), usable.end(), [bot, &gardee](Usable const& spell)
+        {
+            SpellInfo const* info = EffectiveSpell(bot, spell.info);
+            return gardee(info->PowerType) && info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
+        }))
+        return;
+    std::array<int32, MAX_POWERS> reserve{};
+    if (d1)
+    {
+        CoaAiObjectContext::CoaReserveCache& cache =
+            static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->reserveSurvie;
+        uint32 const maintenant = getMSTime();
+        if (!cache.valide || getMSTimeDiff(cache.ms, maintenant) >= CoaIaReserveCacheMs)
+        {
+            std::array<int32, MAX_POWERS> const calcul = CoaIaReserveCalculer(botAI, bot, toutes, true);
+            std::copy(calcul.begin(), calcul.end(), cache.reserve.begin());
+            cache.ms = maintenant;
+            cache.valide = true;
+        }
+        std::copy(cache.reserve.begin(), cache.reserve.end(), reserve.begin());
+    }
+    else
+        reserve = CoaIaReserveCalculer(botAI, bot, false, false);
+    if (std::all_of(reserve.begin(), reserve.end(), [](int32 r) { return r <= 0; }))
         return;
     usable.erase(std::remove_if(usable.begin(), usable.end(), [bot, &reserve, &gardee](Usable const& spell)
         {
@@ -3783,7 +3863,7 @@ public:
             DropManaSpells(bot, usable, garderSoins);
         // D2 du 19/10 : soigneur en groupe, un membre sous mediumHealth -- ni ressource ni recharge globale depensee en
         // attaque, sauf pour rendre de la mana (CoaIaRetirerFrappesDuSoigneur).
-        CoaIaRetirerFrappesDuSoigneur(bot, usable);
+        CoaIaRetirerFrappesDuSoigneur(botAI, bot, usable);
         // I4 du 17/10 : sous mediumHealth ou en perte rapide, aucun sort paye en vie par seconde (Immolation Aura du Slayer).
         if (CoaIaSurvieActive(bot))
         {
@@ -3893,13 +3973,43 @@ public:
         if (CoaSoigneurEpargneControle(bot, target))
             return false;
 
+        std::vector<Usable> const spells = Liste();
+        return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, spells, target, USAGE_AOE));
+    }
+
+    bool isUseful() override
+    {
+        Unit* target = AI_VALUE(Unit*, "current target");
+        if (!target || !target->IsAlive() || CoaSoigneurEpargneControle(bot, target) || !ClassHas(bot, KIND_AOE))
+            return false;
+        /*
+         * Relecture de b5 (19/10) : Execute retire ce que D1 (reserve de survie) et D2 (soigneur qui ne frappe pas)
+         * ecartent ; ce test n'en savait rien et se disait utile pour une liste vide -- un tour perdu, a ACTION_HIGH + 2,
+         * devant « coa attack ». Sous AiPlayerbot.CoaIa.UtiliteAlignee, et seulement si D1 ou D2 est arme : la liste
+         * d'Execute (Liste), puis les filtres du lanceur de CastFirst (CoaIaUnPret, sans cible : la cible est ennemie).
+         * Sinon, le test d'avant.
+         */
+        bool const d1 = sPlayerbotAIConfig.coaIaReserveDefensif &&
+                        (sPlayerbotAIConfig.coaIaReserveDefensifSeuil != 0 || sPlayerbotAIConfig.coaIaReserveToutesRessources);
+        if (sPlayerbotAIConfig.coaIaUtiliteAlignee && (d1 || sPlayerbotAIConfig.coaIaSoigneurNeFrappePas))
+        {
+            std::vector<Usable> const spells = Liste();
+            return !spells.empty() && CoaIaUnPret(botAI, bot, spells, nullptr);
+        }
+        return HasReadyAbility(botAI, bot,[](uint16 kind) { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
+    }
+
+private:
+    // Les attaques de zone qu'Execute tente, filtrees (sorti d'Execute le 19/10, relecture de b5, pour isUseful).
+    std::vector<Usable> Liste()
+    {
         std::vector<Usable> spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
         bool const economie = SavingManaForHeals(botAI, bot);
         if (economie || CoaIaSoigneurRetient(botAI, bot))
             DropManaSpells(bot, spells, !economie && sPlayerbotAIConfig.coaIaAttaqueQuiSoigne);
         // D2 du 19/10 : comme dans « coa attack ».
-        CoaIaRetirerFrappesDuSoigneur(bot, spells);
+        CoaIaRetirerFrappesDuSoigneur(botAI, bot, spells);
         // I4 du 17/10 : comme dans « coa attack », aucun sort paye en vie par seconde sous mediumHealth ou en perte rapide.
         if (CoaIaSurvieActive(bot))
         {
@@ -3912,15 +4022,7 @@ public:
         // CoaArene, survie (11/10) : comme dans « coa attack », ni etendard ni soutien au sol vise sur l'adversaire.
         CoaAreneRetirerSoutiens(botAI, bot, spells);
         CoaAreneReserveMana(botAI, bot, spells);
-
-        return RecordUsage(USAGE_AOE, CastFirst(botAI, bot, spells, target, USAGE_AOE));
-    }
-
-    bool isUseful() override
-    {
-        Unit* target = AI_VALUE(Unit*, "current target");
-        return target && target->IsAlive() && !CoaSoigneurEpargneControle(bot, target) && ClassHas(bot, KIND_AOE) &&
-               HasReadyAbility(botAI, bot,[](uint16 kind) { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
+        return spells;
     }
 };
 
