@@ -1717,6 +1717,20 @@ AiPlayerbot.CoaIa.LeverServiteur = 1
 # Default: 1
 AiPlayerbot.CoaIa.ReserveDefensif = 1
 
+# D1, 19/10 (banc des soins n°3 : Witch Doctor Shadowhunting, Cultist Godblade, Guardian) : vie (%) sous
+# laquelle la reserve de survie ci-dessus s'arme. 100 : des que le bot est en combat (la mana du Witch
+# Doctor tombait de 100 a 33 % avant que sa vie passe sous 65 %). 1 a 99 : sous ce pourcentage de vie.
+# 0 : AiPlayerbot.MediumHealth, comportement d'avant.
+# Default: 100
+AiPlayerbot.CoaIa.ReserveDefensifSeuil = 100
+
+# D1, 19/10 : la reserve de survie se garde dans la ressource du sort de survie -- energie, rage, focus,
+# puissance runique, pas seulement la mana (Guardian : Raise Shield 20 et Turn The Blade 30 d'energie
+# jamais payables). Une reserve hors mana est plafonnee a la moitie de la ressource maximale, pour qu'un
+# bot a energie ou a rage ne reste jamais plein sans frapper. A 0 : la mana seule, comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.ReserveToutesRessources = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
