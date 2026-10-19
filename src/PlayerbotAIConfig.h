@@ -810,6 +810,7 @@ public:
     bool coaIaReserveToutesRessources; // D1 (19/10) : reserve I8 dans la ressource du defensif (energie, rage...), pas la mana seule
     bool coaIaSoigneurNeFrappePas; // D2 (19/10) : soigneur en groupe, membre sous MediumHealth -> ni ressource ni GCD en attaque
     bool coaIaCoutEffectif;      // D2 (19/10) : DropManaSpells lit le cout du sort effectivement lance (EffectiveSpell)
+    bool coaIaSurvieAttendEtourdi; // D8 (19/10) : bot etourdi, ses sorts de soin et de survie refuses ne sont pas « prets »
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;
