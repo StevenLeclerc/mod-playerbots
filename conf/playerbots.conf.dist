@@ -1751,6 +1751,12 @@ AiPlayerbot.CoaIa.CoutEffectif = 1
 # Default: 1
 AiPlayerbot.CoaIa.SurvieAttendEtourdi = 1
 
+# I15, 19/10 (Tinker, Zap! jamais lance) : le tri des soins estime les soins du Tinker avec le
+# coefficient de puissance de soin que mod-ascension-compat ajoute par script (Zap! 1,50 ; Repair Shot
+# 0,70). A 0 : la valeur de base seule, comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.SoinCoefficientScript = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
