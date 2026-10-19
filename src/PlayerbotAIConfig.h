@@ -814,6 +814,8 @@ public:
     bool coaIaSoinCoefficientScript; // I15 (19/10) : estimation des soins du Tinker avec le coefficient ajoute par le module
     bool coaIaAttaqueQuiSoigne;  // I17 (19/10) : la reserve C4 et D2 gardent les attaques qui soignent un allie (Heretic)
     bool coaIaProtegerAllie;     // I17 (19/10) : soigneur, « coa protection » pose Void Shield / Hand of Yogg-Saron sur l'allie
+    bool coaIaTracerEcarts;      // D7 (19/10) : banc des soins, ligne « rien » avec le dernier ecart silencieux de CastFirst
+    bool coaIaPretCommeCastFirst; // D7 (19/10) : CoaIaUnPret s'arrete a la recharge globale comme CastFirst (tours a vide)
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;
