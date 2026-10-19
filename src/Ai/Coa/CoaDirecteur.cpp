@@ -2376,6 +2376,8 @@ bool Humain(Player* p)
 // a l'identique. Fil monde seul (EstMercenaire lit RandomPlayerbotMgr::currentBots, sans verrou : MercenaryRewards.h).
 // Ne remplace Humain NULLE PART ailleurs : ce qui s'adresse a l'ecran d'un client (ciel, meteo, paroles, recompense,
 // coffre, portail, objectifs, lieu `joueur`) reste reserve aux humains.
+// 19/10 : seule exception hors du .cpp, ExecuterGisement (CoaDirecteurGardien.inc) : le gisement est pour les humains du
+// PUBLIC, une ancre bot le pose pour eux.
 bool AncreDEvenement(Player* p)
 {
     if (Humain(p))
@@ -7033,6 +7035,8 @@ void Entretien(uint32 diff)
     SuivreBarricades();
     // Lot G des evenements : coffres de la faille (pilles, echeances).
     SuivreCoffres();
+    // Gisement d'apres-evenement (19/10) : noeuds echus, meme entames.
+    SuivreGisements();
     // Objectifs d'evenement (10/10) : APRES les invoques (ennemis restants de cette seconde).
     SuivreObjectifs();
     // Lot F des evenements : les invoques vivants par joueur, publies pour les bots inscrits.

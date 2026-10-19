@@ -431,9 +431,11 @@ void ExecuterCoffre(CoaDirCommande const& c)
 // chaque commande dans la conf CHARGEE (defaut 0 : refus `gisement_eteint`).
 // Les noeuds sont des gameobjects 9101000-9101099 : les bots ne les visent jamais (LootObject::IsLootPossible,
 // LootObjectStack.cpp) ; leur butin exige l'outil et la competence de metier (donnees de l'artisanat). Ils s'effacent
-// seuls : a l'echeance (Map::SummonGameObject avec respawnTime, objet non « spawnedByDefault » : GO_JUST_DEACTIVATED,
-// GameObject::Update) ou une fois recoltes (coffre consommable invoque). Pas de registre : un gisement n'est pas une
-// menace, `lever` et `.directeur stop` le laissent vivre ses 30 minutes ; un redemarrage l'efface (objet non sauve).
+// seuls une fois vides (coffre consommable invoque). Revue du 19/10 : un noeud ouvert puis relache sans tout prendre reste
+// en GO_ACTIVATED (DoLootRelease), etat ou l'echeance du coeur (GO_READY) ne joue pas : un REGISTRE (evGisements, fil
+// monde seul, P-137) le retire a l'echeance (SuivreGisements, chaque seconde, RetirerObjetPortail) ; le respawnTime du
+// coeur (vie + EV_COFFRE_FILET_S) reste le filet si le registre est perdu. Un gisement n'est pas une menace : `lever` et
+// `.directeur stop` le laissent vivre ses 30 minutes ; un redemarrage l'efface (objet non sauve).
 constexpr char const EV_GISEMENT_OPTION[] = "AiPlayerbot.Directeur.EvenementGisement";
 constexpr uint32 EV_GISEMENT_MAX = 8;
 constexpr uint32 EV_GISEMENT_VIE_MIN_S = 300;
@@ -443,6 +445,15 @@ constexpr float EV_GISEMENT_RAYON_MAX_YD = 28.0f;    // visible depuis le point,
 constexpr int EV_GISEMENT_ESSAIS = 5;                // tirages par noeud (sol sec, sans toit, dans la fenetre de hauteur)
 constexpr std::array<uint32, 2> EV_GISEMENT_ORAGE = {9101000, 9101006};
 constexpr std::array<uint32, 2> EV_GISEMENT_NUIT = {9101001, 9101007};
+constexpr size_t EV_GISEMENT_NOEUDS_MAX = 96;        // noeuds vivants dans tout le royaume (12 gisements pleins)
+
+struct EvGisementNoeud
+{
+    ObjectGuid guid;
+    uint32 carte;
+    uint32 finS;             // Maintenant() de l'echeance
+};
+std::vector<EvGisementNoeud> evGisements;            // fil monde seul
 
 bool EstGisement(std::string const& t)
 {
@@ -510,6 +521,11 @@ void ExecuterGisement(CoaDirCommande const& c)
     }
     Map* map = p->GetMap();
     uint32 const n = uint32(c.valeur);
+    if (evGisements.size() + n > EV_GISEMENT_NOEUDS_MAX)
+    {
+        RefuserGisement(c, "plein");
+        return;
+    }
     float const depart = frand(0.0f, 2.0f * float(M_PI));
     uint32 poses = 0, rates = 0;
     for (uint32 k = 0; k < n; ++k)
@@ -528,8 +544,10 @@ void ExecuterGisement(CoaDirCommande const& c)
                 ToitAuDessus(map, px, py, h, sol) || PointSansPvp(map, px, py, h))
                 continue;
             float const o = frand(0.0f, 2.0f * float(M_PI));
-            if (map->SummonGameObject(entree, px, py, h, o, 0.0f, 0.0f, std::sin(o / 2.0f), std::cos(o / 2.0f), c.dureeS))
+            if (GameObject* go = map->SummonGameObject(entree, px, py, h, o, 0.0f, 0.0f, std::sin(o / 2.0f),
+                                                       std::cos(o / 2.0f), c.dureeS + EV_COFFRE_FILET_S))
             {
+                evGisements.push_back(EvGisementNoeud{go->GetGUID(), map->GetId(), Maintenant() + c.dureeS});
                 pose = true;
                 ++poses;
             }
@@ -547,6 +565,35 @@ void ExecuterGisement(CoaDirCommande const& c)
              " rates={} vie_s={} x={:.1f} y={:.1f} z={:.1f} theme={}", c.id, c.cible, c.valeur, poses, rates, c.dureeS,
              c.x, c.y, sol, c.texte.substr(9));
     Accuser(c, "execute", nullptr);
+}
+
+// Chaque seconde (Entretien, fil monde) : un noeud de gisement disparu (recolte, grille dechargee) quitte le registre ; a
+// l'echeance, il est retire meme entame (GO_ACTIVATED). Une ligne de journal par gisement echu n'est pas utile : compte.
+void SuivreGisements()
+{
+    if (evGisements.empty())
+        return;
+    uint32 const maintenant = Maintenant();
+    uint32 retires = 0;
+    for (auto it = evGisements.begin(); it != evGisements.end();)
+    {
+        Map* map = sMapMgr->FindBaseNonInstanceMap(it->carte);
+        GameObject* go = map ? map->GetGameObject(it->guid) : nullptr;
+        if (go && it->finS > maintenant)
+        {
+            ++it;
+            continue;
+        }
+        if (go)
+        {
+            RetirerObjetPortail(go);
+            ++retires;
+        }
+        it = evGisements.erase(it);
+    }
+    if (retires)
+        LOG_INFO("playerbots", "coa directeur evenement: sous_action=gisement motif=echu retires={} restants={}", retires,
+                 evGisements.size());
 }
 
 // Fin d'un coffre (le registre l'a deja quitte) : objet retire s'il existe encore, table d'acces videe, accuse.
