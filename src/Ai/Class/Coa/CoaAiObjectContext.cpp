@@ -759,6 +759,18 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // des degats subis (680769). Force lue dans le DBC : BasePoints 49 + 1 = 50 points, environ 1 % : classe dernier des
     // gros defensifs (recharge 300 s, admis sous 30 %). Force 100 : le premier sous 30 %. Au classement du lot 1 seulement.
     { 582591, KIND_DEFENSIVE, 0, 100 },
+    // D6 du 19/10 (coa-project/docs/SYNTHESE-banc-soins-ia3-20261019.md, sorts du kit jamais lances ; Spell.dbc lu le 19/10).
+    //   - Healing Ward 500957 (Witch Doctor, toutes specialisations ; jamais lance au banc n°3, 0 ligne au journal) : un seul
+    //     effet, SUMMON (28) d'un totem dont l'aura 500956 declenche le soin de zone 805403 toutes les 2,5 s. Classify ne
+    //     voit ni soin ni aura : kind 0, aucune action ne le prenait -- meme cas que My Greatest Invention! (I1). Soin de zone,
+    //     et soin direct au dernier rang ; MARQUE_BALISE : « Can only have 1 Ward active at a time », pas relance avant la fin
+    //     de sa duree (CastFirst le met au banc).
+    { 500957, KIND_HEAL | KIND_GROUP_HEAL, 0, 0, false, MARQUE_BALISE },
+    //   - Harden 800892 (Venomancer, forme de scarabee ; jamais dans une liste de survie au banc n°3) : le sort pose, par le
+    //     script (AscensionVenomancerAbilities.cpp:399-402), des piles de 800960 (aura 87, -3 % chacune, « reducing damage
+    //     taken by 45 % » : 15 piles). Classify lit une pile, -3 % : MARQUE_DEFENSIF_FAIBLE, et la survie du lot 3 lui retire
+    //     KIND_DEFENSIVE. Force 45, la reduction de la description ; recharge 180 s : gros defensif, admis sous 30 %.
+    { 800892, KIND_DEFENSIVE, 0, 45 },
     // I11 du 17/10 (Reaper 55-57) : Jailer's Bargain 805718 absorbe 30 % de la vie maximale par script (effet 0
     // SCHOOL_ABSORB, BasePoints 0 : force lue 1 point, environ 0,02 %, classe dernier). Force 30.
     { 805718, 0, 0, 30 },
