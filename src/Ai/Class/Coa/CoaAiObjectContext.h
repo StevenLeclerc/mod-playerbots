@@ -10,6 +10,7 @@
 #include "AiObjectContext.h"
 #include "ObjectGuid.h"
 
+#include <array>
 #include <ctime>
 #include <unordered_map>
 #include <vector>
@@ -307,6 +308,17 @@ public:
         uint32 repriseMs = 0;  // getMSTime() de la derniere reprise par ce lot
     };
     CoaVenoForme venoForme;
+
+    // D1 (19/10, relecture de b5 : cout par tour) : la reserve de survie par ressource (CoaIaReserveSurvie,
+    // CoaAiObjectContext.cpp), recalculee au plus toutes les CoaIaReserveCacheMs. Indice : Powers (MAX_POWERS = 7, verifie
+    // dans le .cpp). Ecrit et lu par la seule IA de ce bot, sans verrou.
+    struct CoaReserveCache
+    {
+        bool valide = false;
+        uint32 ms = 0;                        // getMSTime() du calcul
+        std::array<int32, 7> reserve = {};
+    };
+    CoaReserveCache reserveSurvie;
 };
 
 #endif
