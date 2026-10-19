@@ -3945,14 +3945,7 @@ public:
             return false;
 
         std::vector<Usable> spells = Candidats(target);
-
-        // IA soins/survie, lot 4 (C3, AiPlayerbot.CoaIa.TriSoins) : soin direct trie par deficit et rendement, dans
-        // chaque groupe direct / HoT / zone ; le moins cher d'abord sous la reserve ne s'y applique plus. Zone et HoT
-        // gardent l'ordre d'avant.
-        if (sPlayerbotAIConfig.coaIaTriSoins && mode == Mode::Direct)
-            CoaIaTrierSoins(bot, target, spells, Rang);
-        else if (SavingManaForHeals(botAI, bot))
-            CheapestFirst(bot, spells);
+        Ordonner(target, spells);
 
         UsageKind const usage = mode == Mode::Group ? USAGE_GROUP_HEAL : mode == Mode::OverTime ? USAGE_HOT : USAGE_HEAL;
         if (spells.empty())
@@ -3976,12 +3969,32 @@ public:
         // recharge globale, deja pose, refus certains sur la cible). Avant, l'action se disait utile et ne trouvait rien :
         // 2 388 « hot rien code=1001 » du Chronomancer au banc.
         if (sPlayerbotAIConfig.coaIaUtiliteAlignee)
-            return target && target->IsAlive() && target->GetHealthPct() < sPlayerbotAIConfig.almostFullHealth &&
-                   ClassHas(bot, wanted) && CoaIaUnPret(botAI, bot, Candidats(target), target);
+        {
+            if (!target || !target->IsAlive() || target->GetHealthPct() >= sPlayerbotAIConfig.almostFullHealth ||
+                !ClassHas(bot, wanted))
+                return false;
+            std::vector<Usable> spells = Candidats(target);
+            // D7 (relecture, AiPlayerbot.CoaIa.PretCommeCastFirst) : CoaIaUnPret s'arrete au premier sort sous recharge
+            // globale, comme CastFirst ; il doit donc lire la liste dans l'ORDRE ou Execute la lance.
+            if (sPlayerbotAIConfig.coaIaPretCommeCastFirst)
+                Ordonner(target, spells);
+            return CoaIaUnPret(botAI, bot, spells, target);
+        }
         return IsUsefulAvant(target, wanted);
     }
 
 private:
+    // IA soins/survie, lot 4 (C3, AiPlayerbot.CoaIa.TriSoins) : soin direct trie par deficit et rendement, dans
+    // chaque groupe direct / HoT / zone ; le moins cher d'abord sous la reserve ne s'y applique plus. Zone et HoT
+    // gardent l'ordre d'avant. Sorti d'Execute le 19/10 (D7) pour que isUseful lise le meme ordre.
+    void Ordonner(Unit* target, std::vector<Usable>& spells)
+    {
+        if (sPlayerbotAIConfig.coaIaTriSoins && mode == Mode::Direct)
+            CoaIaTrierSoins(bot, target, spells, Rang);
+        else if (SavingManaForHeals(botAI, bot))
+            CheapestFirst(bot, spells);
+    }
+
     // Direct / HoT / zone : l'ordre des groupes de « coa heal ».
     static int Rang(uint16 kind) { return ((kind & KIND_GROUP_HEAL) ? 2 : 0) + ((kind & KIND_HOT) ? 1 : 0); }
 
@@ -4222,9 +4235,12 @@ public:
                 return false;
             float const pv = bot->GetHealthPct();
             bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
-            std::vector<Usable> const defensifs = CoaIaDefensifs(botAI, bot, pv, perte, false);
+            // D7 (relecture) : sous AiPlayerbot.CoaIa.PretCommeCastFirst, triee comme dans Execute -- CoaIaUnPret s'arrete au
+            // premier sort sous recharge globale, l'ordre compte.
+            std::vector<Usable> const defensifs = CoaIaDefensifs(botAI, bot, pv, perte,
+                sPlayerbotAIConfig.coaIaUtiliteAlignee && sPlayerbotAIConfig.coaIaPretCommeCastFirst);
             // Banc des soins, B-4 : la liste que le test d'utilite a vue (une action jamais executee faute de sort pret
-            // ne laisse sinon aucune trace). Ordre non trie (`trier` faux) : action a part, « _test ».
+            // ne laisse sinon aucune trace). Ordre non trie (`trier` faux, sauf sous D7 ci-dessus) : action a part, « _test ».
             BancSoinListe(botAI, bot, critique ? "defensive_critique_test" : "defensive_test", defensifs, nullptr);
             return CoaIaUnPret(botAI, bot, defensifs, bot) ||
                    (!critique && pv < float(sPlayerbotAIConfig.mediumHealth) &&
