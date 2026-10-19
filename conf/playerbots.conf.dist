@@ -1745,6 +1745,12 @@ AiPlayerbot.CoaIa.SoigneurNeFrappePas = 1
 # Default: 1
 AiPlayerbot.CoaIa.CoutEffectif = 1
 
+# D8, 19/10 (Venomancer, Burrow) : un bot etourdi ne tente plus ses soins, defensifs et soins sur soi que
+# le serveur refuserait (SPELL_FAILED_STUNNED, environ 8 essais par seconde pendant Burrow), ni sa potion.
+# Un sort utilisable etourdi reste tente. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.SurvieAttendEtourdi = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

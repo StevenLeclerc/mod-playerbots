@@ -3508,6 +3508,22 @@ void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& us
         }), usable.end());
 }
 
+/*
+ * D8 du 19/10 (coa-project/docs/SYNTHESE-banc-soins-ia3-20261019.md, Venomancer 52-54, AiPlayerbot.CoaIa.SurvieAttendEtourdi) :
+ * pendant Burrow 806154 (aura 12, etourdissement de 8 s pose par le bot sur lui-meme), les actions de survie tentaient
+ * leurs sorts environ 8 fois par seconde, tous refuses SPELL_FAILED_STUNNED (87 % des refus du Venomancer 52 en B1). Ce
+ * refus n'a pas de banc (IsLastingFailure), et StrictCheck construisait un Spell par sort et par tour. Bot etourdi
+ * (UNIT_FLAG_STUNNED, le drapeau que lit Spell::CheckCasterAuras) : un sort que le coeur refuserait n'est pas « pret »,
+ * meme jugement que CoaAreneBloqueParEtat (recopie de Spell.cpp:6997-7038, jamais plus strict : un sort
+ * SPELL_ATTR5_ALLOW_WHILE_STUNNED ou SPELL_ATTR6_NOT_AN_ATTACK reste pret). Lu par CoaIaUnPret et CoaIaPretSauf, donc par
+ * les tests d'utilite des soins, defensifs et soins sur soi, et par le declencheur de potion. Option a 0 : avant.
+ */
+bool CoaIaEtourdiRefuse(Player* bot, SpellInfo const* info)
+{
+    return sPlayerbotAIConfig.coaIaSurvieAttendEtourdi && bot->HasUnitFlag(UNIT_FLAG_STUNNED) &&
+           CoaAreneBloqueParEtat(bot, info);
+}
+
 // Un sort de la liste passerait les filtres de CastFirst qui ne dependent que du lanceur (memes tests que
 // HasReadyAbility), et n'est pas deja pose par le bot sur `cible` (CoaSoinDejaPose).
 // `gcd` faux (revue) : la recharge globale ne compte pas -- pour la potion, qui ne doit pas partir parce qu'un defensif
@@ -3520,7 +3536,7 @@ bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spe
     {
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
         if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info) ||
-            CoaExigeFamilierAbsent(bot, info))
+            CoaExigeFamilierAbsent(bot, info) || CoaIaEtourdiRefuse(bot, info))
             continue;
         if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
             continue;
@@ -4573,6 +4589,10 @@ public:
         float const pv = bot->GetHealthPct();
         if (pv >= float(sPlayerbotAIConfig.lowHealth) || !botAI->HasStrategy("potions", BOT_STATE_COMBAT))
             return false;
+        // D8 du 19/10 : etourdi, la potion attend aussi (un objet utilise etourdi est refuse) ; sans cette garde, les
+        // defensifs que CoaIaEtourdiRefuse rend « non prets » armeraient la potion a chaque tour de l'etourdissement.
+        if (sPlayerbotAIConfig.coaIaSurvieAttendEtourdi && bot->HasUnitFlag(UNIT_FLAG_STUNNED))
+            return false;
         std::vector<Usable> const defensifs = CoaIaSurvieActive(bot)
             ? CoaIaDefensifs(botAI, bot, pv, CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv, false)
             : KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
@@ -4606,7 +4626,7 @@ bool CoaIaPretSauf(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* c
         return false;
     if (!CoaPeutPayer(bot, info) || CoaExigeFamilierAbsent(bot, info))
         return false;
-    if (CoaIaPayeEnVieTropCher(bot, info))
+    if (CoaIaPayeEnVieTropCher(bot, info) || CoaIaEtourdiRefuse(bot, info))
         return false;
     if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
         return false;
