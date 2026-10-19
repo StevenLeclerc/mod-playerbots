@@ -1731,6 +1731,20 @@ AiPlayerbot.CoaIa.ReserveDefensifSeuil = 100
 # Default: 1
 AiPlayerbot.CoaIa.ReserveToutesRessources = 1
 
+# D2, 19/10 (banc des soins n°3 : Starcaller Moon Priest, Sun Cleric Blessings) : un soigneur en groupe
+# ou en raid, hors arene 1v1 et duel, ne lance plus d'attaque (« coa attack », « coa aoe ») qui coute une
+# ressource ou la recharge globale tant qu'un membre vivant a 40 yd au plus, lui compris, est sous
+# AiPlayerbot.MediumHealth ; il garde les attaques qui lui rendent de la mana (Gavel of Grace,
+# Celestial Strike) et son coup blanc. Hors groupe, tanks, degats, classes 1 a 11 : inchanges.
+# A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.SoigneurNeFrappePas = 1
+
+# D2, 19/10 : la reserve de mana des soins (DropManaSpells) lit le cout du sort que le bot lancera
+# vraiment (remplacement par proc ou talent), et non celui du sort liste. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.CoutEffectif = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

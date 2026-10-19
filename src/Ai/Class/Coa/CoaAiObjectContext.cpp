@@ -94,6 +94,9 @@ enum CoaMarque : uint16
     // Revue de I1/I2 (CoaSurcharge::marques seulement) : balise au sol (invocation, ni aura ni recharge propre). CastFirst
     // la met au banc pour sa duree apres un lancer reussi : rien d'autre ne dit qu'elle est deja posee.
     MARQUE_BALISE          = 0x0040,
+    // D2 du 19/10 (CoaSurcharge::marques seulement) : une attaque qui rend de la mana a son lanceur (Gavel of Grace 807987,
+    // Celestial Strike 502292) ; le soigneur la garde quand un membre est blesse (CoaIaRetirerFrappesDuSoigneur).
+    MARQUE_REND_MANA       = 0x0080,
     // Internes a Classify (relevees en descendant dans les sorts declenches), effacees avant la fin :
     MARQUE_I_SOIN_ALLIE    = 0x0100,  // un effet de soin vise un allie
     MARQUE_I_DEF_FORT      = 0x0200,  // KIND_DEFENSIVE pose par un effet qui n'est pas une reduction de moins de 10 %
@@ -723,6 +726,14 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // sec to allies », 3 charges, 5 % de mana de base ; DUMMY + SUMMON, kind 0) ; limite par la mana au volet A (0-2 % a la
     // fin de chaque essai A1/A2). Marque MARQUE_REGEN_MANA, lue par « coa regen mana » (CoaRegenManaTrigger).
     { 560750, 0, 0, 0, false, MARQUE_REGEN_MANA | MARQUE_BALISE },
+    // D2 du 19/10 (coa-project/docs/SYNTHESE-banc-soins-ia3-20261019.md, Sun Cleric 98, Starcaller 43) : attaques qui rendent
+    // de la mana, que le soigneur garde quand un membre est sous mediumHealth (CoaIaRetirerFrappesDuSoigneur). Spell.dbc lu le
+    // 19/10 : Gavel of Grace 807987 (Sun Cleric, rang 8 ; effet 2 TRIGGER_SPELL_WITH_VALUE -> 681317, ENERGIZE de mana, 250 ;
+    // gratuit, recharge globale) ; Celestial Strike 502292 (Starcaller, rang 8 ; 40 d'energie, « regenerate 562714s1 % of
+    // your maximum mana » : 562714 = ENERGIZE_PCT 10 % + ENERGIZE 20, pose par script). Celestial Cleave 802437 (2 % par
+    // ennemi touche, 805989) n'y est PAS : c'est l'attaque que le banc mesure lancee pendant que le membre tombe.
+    { 807987, 0, 0, 0, false, MARQUE_REND_MANA },
+    { 502292, 0, 0, 0, false, MARQUE_REND_MANA },
     // I11 du 17/10 (Reaper 55-57) : Jailer's Bargain 805718 absorbe 30 % de la vie maximale par script (effet 0
     // SCHOOL_ABSORB, BasePoints 0 : force lue 1 point, environ 0,02 %, classe dernier). Force 30.
     { 805718, 0, 0, 30 },
@@ -1454,10 +1465,19 @@ bool SavingManaForHeals(PlayerbotAI* botAI, Player* bot)
 }
 
 // Removes what costs mana, for a bot that is keeping the rest of its mana for healing.
+// D2 du 19/10 (AiPlayerbot.CoaIa.CoutEffectif) : le cout est celui du sort que le bot lancera vraiment (EffectiveSpell :
+// remplacement par proc ou talent), comme partout ailleurs (CastFirst, reserve I8). Lu le 19/10 : CalcPowerCost
+// (SpellInfo.cpp:2994) compte deja le pourcentage de mana maximale (UsesMaxManaForCost, pose par le module sur les sorts
+// de StarcallerCosts : Eclipse of Fury 570221 et Touch of Moonlight 574328 a 10 %, Hand of Elune 801990 a 20 %...,
+// AscensionStarcallerContracts.cpp:49-55) et les modificateurs SPELLMOD_COST (ApplySpellMod) : rien d'autre a ajouter.
+// Option a 0 : le sort liste (avant).
 void DropManaSpells(Player* bot, std::vector<Usable>& spells)
 {
     spells.erase(std::remove_if(spells.begin(), spells.end(), [bot](Usable const& spell)
-        { return spell.info->PowerType == POWER_MANA && spell.info->CalcPowerCost(bot, spell.info->GetSchoolMask()) > 0; }),
+        {
+            SpellInfo const* info = sPlayerbotAIConfig.coaIaCoutEffectif ? EffectiveSpell(bot, spell.info) : spell.info;
+            return info->PowerType == POWER_MANA && info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
+        }),
         spells.end());
 }
 
@@ -3101,6 +3121,78 @@ bool CoaIaSoigneurRetient(PlayerbotAI* botAI, Player* bot)
         { return (kind & (KIND_HEAL | KIND_HOT)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); }).empty();
 }
 
+/*
+ * D2 du 19/10 (coa-project/docs/SYNTHESE-banc-soins-ia3-20261019.md § 2, AiPlayerbot.CoaIa.SoigneurNeFrappePas) : un
+ * soigneur frappait pendant qu'un membre tombait. Starcaller Moon Priest (43), volet A d'ia3 : 2 200 attaques pour 792
+ * soins et defensifs, dont 815 lancees alors qu'un membre de l'essai etait sous 65 % (Celestial Cleave 802437 : 40
+ * d'energie et la recharge globale) ; Sun Cleric Blessings (98) : 277 sur 1 114 (Gavel of Grace surtout). « coa attack »
+ * (ACTION_NORMAL) part des qu'aucun soin n'est pret, et la recharge globale qu'elle prend retarde le soin suivant ; la
+ * reserve C4 (CoaIaSoigneurRetient, DropManaSpells) n'ote que ce qui coute de la mana.
+ * Un soigneur (GetCoaRole) dans un groupe ou un raid, hors arene 1v1 et duel : quand un membre vivant, sur sa carte et a
+ * 40 yd au plus, lui compris, est sous mediumHealth, ses attaques (« coa attack », « coa aoe ») ne gardent que celles qui
+ * ne coutent ni ressource ni recharge globale, plus celles qui rendent de la mana (CoaIaRendMana). Le coup blanc continue
+ * (Unit::Attack, hors liste). Hors groupe : rien ne change (« party member to heal » ne rend que lui-meme, et la survie
+ * du lot 3 le garde). Bot non soigneur, classes 1 a 11 (GetCoaRole : Dps) : rien ne change.
+ */
+bool CoaIaSoigneurNeFrappePas(Player* bot)
+{
+    if (!sPlayerbotAIConfig.coaIaSoigneurNeFrappePas || !bot->IsAlive() || GetCoaRole(bot) != CoaRole::Heal ||
+        (CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot)))
+        return false;
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        // Meme lieu d'abord (P-137 : rien d'un autre fil), puis la vie -- comme CoaIaSoigneurRetient.
+        if (member && member->IsInWorld() && member->GetMapId() == bot->GetMapId() &&
+            (member == bot || bot->IsWithinDistInMap(member, 40.0f)) && member->IsAlive() &&
+            member->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth))
+            return true;
+    }
+    return false;
+}
+
+// Le sort rend-il de la mana a son lanceur ? Marque MARQUE_REND_MANA (surcharge : effet fait par script, Celestial Strike),
+// ou effet lisible : ENERGIZE / ENERGIZE_PCT de mana sur le lanceur, directement ou par un sort declenche (un niveau :
+// Gavel of Grace 807987 -> 681317).
+bool CoaIaRendMana(SpellInfo const* info, uint16 marques, uint8 profondeur = 0)
+{
+    if (marques & MARQUE_REND_MANA)
+        return true;
+    for (SpellEffectInfo const& effect : info->Effects)
+    {
+        if (!effect.IsEffect())
+            continue;
+        if ((effect.Effect == SPELL_EFFECT_ENERGIZE || effect.Effect == SPELL_EFFECT_ENERGIZE_PCT) &&
+            effect.MiscValue == POWER_MANA && effect.TargetA.GetTarget() == TARGET_UNIT_CASTER)
+            return true;
+        if ((effect.Effect == SPELL_EFFECT_TRIGGER_SPELL || effect.Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE) &&
+            effect.TriggerSpell && effect.TriggerSpell != info->Id && !profondeur)
+            if (SpellInfo const* declenche = sSpellMgr->GetSpellInfo(effect.TriggerSpell))
+                if (CoaIaRendMana(declenche, 0, 1))
+                    return true;
+    }
+    return false;
+}
+
+// D2 : retire les attaques qui coutent une ressource (toute ressource, vie comprise) ou la recharge globale
+// (Spell::TriggerGlobalCooldown : StartRecoveryTime non nul), sauf celles qui rendent de la mana. Sort effectif
+// (EffectiveSpell), comme CastFirst.
+void CoaIaRetirerFrappesDuSoigneur(Player* bot, std::vector<Usable>& usable)
+{
+    if (usable.empty() || !CoaIaSoigneurNeFrappePas(bot))
+        return;
+    usable.erase(std::remove_if(usable.begin(), usable.end(), [bot](Usable const& spell)
+        {
+            SpellInfo const* info = EffectiveSpell(bot, spell.info);
+            if (CoaIaRendMana(info, spell.marques) || CoaIaRendMana(spell.info, spell.marques))
+                return false;
+            return info->StartRecoveryTime > 0 || info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
+        }), usable.end());
+}
+
 // C2-bis (AiPlayerbot.CoaIa.HotUnique) : HoT a cible unique (SpellInfo::IsSingleTarget, SPELL_ATTR5_LIMIT_N) que le bot
 // tient deja sur une AUTRE unite avec plus de 30 % de sa duree : ne pas le deplacer, sauf urgence (cible sous lowHealth,
 // porteur au-dessus de mediumHealth). Nanobot Reconstruction 502561 (Tinker) : 483 lancers au volet A, deplace de membre
@@ -3195,8 +3287,9 @@ float CoaIaSoinEstime(Player* bot, SpellInfo const* info, Unit* cible, uint8 pro
  *     seulement dans leur groupe (`rang`, l'ordre direct / HoT / zone de « coa heal ») ;
  *   - cible sous criticalHealth : le plus rapide (temps d'incantation) d'abord, a l'interieur de chaque groupe.
  * Les estimations sont relevees une fois par sort avant le tri (jamais dans le comparateur : CalcValue tire au sort).
- * Limite : le cout est celui du DBC (CalcPowerCost) ; un cout fait par script (Touch of Moonlight 574328 du Starcaller,
- * 10 % de la mana maximale, AscensionStarcallerData.h) n'est pas vu.
+ * Le cout est celui de CalcPowerCost. RECTIFIE le 19/10 (D2) : il voit bien le cout de Touch of Moonlight 574328 (10 % de
+ * la mana maximale) -- le module le pose sur le SpellInfo au chargement (StarcallerCosts, UsesMaxManaForCost,
+ * AscensionStarcallerContracts.cpp:49-55), et CalcPowerCost le lit (SpellInfo.cpp:3028).
  */
 template <typename Rang>
 void CoaIaTrierSoins(Player* bot, Unit* cible, std::vector<Usable>& spells, Rang rang)
@@ -3500,6 +3593,9 @@ public:
 
         if (saveMana)
             DropManaSpells(bot, usable);
+        // D2 du 19/10 : soigneur en groupe, un membre sous mediumHealth -- ni ressource ni recharge globale depensee en
+        // attaque, sauf pour rendre de la mana (CoaIaRetirerFrappesDuSoigneur).
+        CoaIaRetirerFrappesDuSoigneur(bot, usable);
         // I4 du 17/10 : sous mediumHealth ou en perte rapide, aucun sort paye en vie par seconde (Immolation Aura du Slayer).
         if (CoaIaSurvieActive(bot))
         {
@@ -3613,6 +3709,8 @@ public:
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
         if (SavingManaForHeals(botAI, bot) || CoaIaSoigneurRetient(botAI, bot))
             DropManaSpells(bot, spells);
+        // D2 du 19/10 : comme dans « coa attack ».
+        CoaIaRetirerFrappesDuSoigneur(bot, spells);
         // I4 du 17/10 : comme dans « coa attack », aucun sort paye en vie par seconde sous mediumHealth ou en perte rapide.
         if (CoaIaSurvieActive(bot))
         {
