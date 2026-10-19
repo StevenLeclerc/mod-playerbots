@@ -812,6 +812,8 @@ public:
     bool coaIaCoutEffectif;      // D2 (19/10) : DropManaSpells lit le cout du sort effectivement lance (EffectiveSpell)
     bool coaIaSurvieAttendEtourdi; // D8 (19/10) : bot etourdi, ses sorts de soin et de survie refuses ne sont pas « prets »
     bool coaIaSoinCoefficientScript; // I15 (19/10) : estimation des soins du Tinker avec le coefficient ajoute par le module
+    bool coaIaAttaqueQuiSoigne;  // I17 (19/10) : la reserve C4 et D2 gardent les attaques qui soignent un allie (Heretic)
+    bool coaIaProtegerAllie;     // I17 (19/10) : soigneur, « coa protection » pose Void Shield / Hand of Yogg-Saron sur l'allie
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;

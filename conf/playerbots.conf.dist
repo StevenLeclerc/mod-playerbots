@@ -1757,6 +1757,19 @@ AiPlayerbot.CoaIa.SurvieAttendEtourdi = 1
 # Default: 1
 AiPlayerbot.CoaIa.SoinCoefficientScript = 1
 
+# I17, 19/10 (Cultist Heretic) : la reserve de mana du soigneur en groupe (AiPlayerbot.CoaIa.ReserveSoigneur)
+# et D2 (AiPlayerbot.CoaIa.SoigneurNeFrappePas) gardent les attaques qui soignent un allie : Gaze of C'Thun,
+# Blade of the Empire avec Blade of Yogg-Saron. Sous la reserve de mana basse (CoaHealerManaReserve), elles
+# partent comme le reste. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.AttaqueQuiSoigne = 1
+
+# I17, 19/10 (Cultist Heretic) : un soigneur pose sa protection sur l'allie soigne quand celui-ci passe
+# sous AiPlayerbot.LowHealth (« coa protection » : Void Shield, Hand of Yogg-Saron), avant le soin direct.
+# Liste fermee de sorts. A 0 : comportement d'avant (aucune protection posee sur un allie).
+# Default: 1
+AiPlayerbot.CoaIa.ProtegerAllie = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
