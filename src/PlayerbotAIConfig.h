@@ -795,6 +795,8 @@ public:
     bool coaIaSoigneurResteEnCombat; // C1 (16/10) : soigneur en combat, cible invalide effacee sans quitter le moteur de combat
     bool coaIaLeverServiteur;    // I7 (17/10) : Necromancer a Life Force sans serviteur en leve un hors combat (en plus de Survie)
     bool coaIaReserveDefensif;   // I8 (17/10) : sous MediumHealth, mana du defensif et d'un soin gardee (en plus de Survie)
+    uint32 coaIaReserveDefensifSeuil; // D1 (19/10) : vie (%) sous laquelle la reserve I8 s'arme ; 100 = des le combat, 0 = MediumHealth
+    bool coaIaReserveToutesRessources; // D1 (19/10) : reserve I8 dans la ressource du defensif (energie, rage...), pas la mana seule
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;

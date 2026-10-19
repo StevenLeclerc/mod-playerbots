@@ -3311,7 +3311,8 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
  * 582591 (30 % de la mana de base) jamais lance ; Runemaster : Granite Resolve absent avec la mana a sec. La reserve de
  * mana existante (SavingManaForHeals, CoaCasterManaReserve) n'agit que sous 15 % et pour un bot qui connait un soin ; celle
  * de l'arene (CoaAreneReserveMana) ne vaut qu'en arene 1v1 et en duel.
- * Un bot NON soigneur et NON tank (revue) paye en mana, sous mediumHealth (65 %), ne lance plus de sort d'attaque paye en mana qui laisserait
+ * Un bot NON soigneur et NON tank (revue) paye en mana, sous mediumHealth (65 % ; D1 : seuil et ressources reglables, plus
+ * bas), ne lance plus de sort d'attaque paye en mana qui laisserait
  * moins que : le cout du plus cher de ses defensifs payes en mana prets ou prets dans CoaIaReservePretDansMs, plus le cout
  * du moins cher de ses soins sur soi payes en mana dans la meme fenetre. Tous les defensifs comptent, quel que soit leur
  * palier (Embrace, recharge 300 s, n'est admis que sous 30 % : c'est pour lui que la mana se garde). Ni « par serviteur »
@@ -3320,21 +3321,54 @@ std::vector<Usable> CoaIaSoinsSurSoi(PlayerbotAI* botAI, Player* bot)
  */
 constexpr uint32 CoaIaReservePretDansMs = 10 * IN_MILLISECONDS;
 
+/*
+ * D1 du 19/10 (coa-project/docs/SYNTHESE-banc-soins-ia3-20261019.md, Witch Doctor 4-5, Cultist 42 et 96, Guardian 19-21) :
+ * la reserve I8 s'armait sous mediumHealth seulement, et ne gardait que la mana.
+ *   - Witch Doctor Shadowhunting, essai 7498 : mana de 100 a 33 % en 19 s d'attaques, vie encore a 64 % ; Vol'jin's Vigil
+ *     504465 (28 % de mana de base) jamais payable ensuite ; « mort avec survie inutilisee » 6/6.
+ *   - Guardian Inspiration, essai 6970 : Raise Shield 500168 (20 d'energie) et Turn The Blade 707170 (30) listes a 61, 44 et
+ *     30 % de vie, energie lue 14-24 : jamais payes, la reserve ne regardait pas l'energie.
+ * Seuil (AiPlayerbot.CoaIa.ReserveDefensifSeuil) : 0 = mediumHealth (avant D1) ; 1 a 99 = sous ce pourcentage de vie ;
+ * 100 = toujours (« coa attack » et « coa aoe », seuls appelants, ne tournent qu'au combat : des l'engagement).
+ */
+bool CoaIaReserveArmee(Player* bot)
+{
+    uint32 const seuil = sPlayerbotAIConfig.coaIaReserveDefensifSeuil;
+    if (!seuil)
+        return bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth);
+    return seuil >= 100 || bot->GetHealthPct() < float(seuil);
+}
+
 void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& usable)
 {
     // Revue de I8 : ni soigneur ni tank. Un tank paye en mana vit sous 65 % en donjon ; la reserve lui retirait les
     // attaques payantes, donc la menace, y compris dans un groupe de joueurs.
     CoaRole const role = GetCoaRole(bot);
     if (usable.empty() || !sPlayerbotAIConfig.coaIaReserveDefensif || !CoaIaSurvieActive(bot) || role == CoaRole::Heal ||
-        role == CoaRole::Tank || !bot->GetMaxPower(POWER_MANA) ||
-        bot->GetHealthPct() >= float(sPlayerbotAIConfig.mediumHealth))
+        role == CoaRole::Tank || !CoaIaReserveArmee(bot))
+        return;
+    // D1 : les ressources gardees -- la mana seule (avant D1, AiPlayerbot.CoaIa.ReserveToutesRessources = 0) ou toute
+    // ressource que le bot a (maximum non nul). La vie (POWER_HEALTH) n'en est jamais une : CoaIaPayeEnVieTropCher la garde.
+    bool const toutes = sPlayerbotAIConfig.coaIaReserveToutesRessources;
+    auto gardee = [bot, toutes](uint32 type)
+    {
+        return type < MAX_POWERS && (toutes || type == POWER_MANA) && bot->GetMaxPower(Powers(type)) > 0;
+    };
+    // Rien a retirer (aucune attaque payee dans une ressource gardee) : les deux listes de survie ne sont pas parcourues.
+    // Revient au comportement d'avant D1 (la reserve n'otait alors rien non plus) ; D1 arme la reserve a chaque attaque.
+    if (std::none_of(usable.begin(), usable.end(), [bot, &gardee](Usable const& spell)
+        {
+            SpellInfo const* info = EffectiveSpell(bot, spell.info);
+            return gardee(info->PowerType) && info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
+        }))
         return;
     bool const sansServiteur = !CoaAreneAServiteur(bot);
-    // Cout en mana d'un sort de survie pret dans la fenetre, 0 sinon.
-    auto coutPret = [bot, sansServiteur](Usable const& spell) -> int32
+    // Cout d'un sort de survie pret dans la fenetre, dans sa ressource (`type`), 0 sinon.
+    auto coutPret = [bot, sansServiteur, &gardee](Usable const& spell, uint32& type) -> int32
     {
         SpellInfo const* info = EffectiveSpell(bot, spell.info);
-        if (info->PowerType != POWER_MANA || (spell.marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)))
+        type = info->PowerType;
+        if (!gardee(type) || (spell.marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)))
             return 0;
         if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
             return 0;
@@ -3346,25 +3380,38 @@ void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& us
             return 0;
         return std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask()));
     };
-    int32 defensif = 0;
+    // Par ressource : le plus cher des defensifs plus le moins cher des soins sur soi (I8, ressource par ressource).
+    std::array<int32, MAX_POWERS> defensif{};
+    std::array<int32, MAX_POWERS> soin{};
+    uint32 type = 0;
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }))
-        defensif = std::max(defensif, coutPret(spell));
-    int32 soin = 0;
+        if (int32 const cout = coutPret(spell, type))
+            defensif[type] = std::max(defensif[type], cout);
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
              { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
-        if (int32 const cout = coutPret(spell))
-            soin = soin ? std::min(soin, cout) : cout;
-    int32 const reserve = defensif + soin;
-    if (reserve <= 0)
+        if (int32 const cout = coutPret(spell, type))
+            soin[type] = soin[type] ? std::min(soin[type], cout) : cout;
+    std::array<int32, MAX_POWERS> reserve{};
+    bool rien = true;
+    for (uint32 t = 0; t < MAX_POWERS; ++t)
+    {
+        reserve[t] = defensif[t] + soin[t];
+        // D1 : hors mana, au plus la moitie du maximum (choix de ce correctif, le diagnostic ne chiffre pas de plafond).
+        // L'energie et la rage remontent au plein : une reserve au-dessus du maximum figerait le bot, plein, sans frapper.
+        // La mana garde la regle d'I8, sans plafond.
+        if (t != POWER_MANA && reserve[t] > 0)
+            reserve[t] = std::min<int32>(reserve[t], int32(bot->GetMaxPower(Powers(t)) / 2));
+        rien = rien && reserve[t] <= 0;
+    }
+    if (rien)
         return;
-    int32 const mana = int32(bot->GetPower(POWER_MANA));
-    usable.erase(std::remove_if(usable.begin(), usable.end(), [bot, mana, reserve](Usable const& spell)
+    usable.erase(std::remove_if(usable.begin(), usable.end(), [bot, &reserve, &gardee](Usable const& spell)
         {
             SpellInfo const* info = EffectiveSpell(bot, spell.info);
-            if (info->PowerType != POWER_MANA)
+            if (!gardee(info->PowerType) || reserve[info->PowerType] <= 0)
                 return false;
             int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
-            return cout > 0 && mana - cout < reserve;
+            return cout > 0 && int32(bot->GetPower(Powers(info->PowerType))) - cout < reserve[info->PowerType];
         }), usable.end());
 }
 
