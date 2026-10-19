@@ -38,6 +38,7 @@
 #include "Trigger.h"
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
 #include "mod-ascension-compat/src/AscensionGuardianStandardData.h"
+#include "mod-ascension-compat/src/AscensionTinkerData.h"
 
 #include <algorithm>
 #include <array>
@@ -3223,6 +3224,37 @@ bool CoaIaHotTenuAilleurs(Player* bot, SpellInfo const* info, uint32 listeId, Un
     return false;
 }
 
+/*
+ * I15 du 17/10, ecrit le 19/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md § 2, Tinker 51 ; AiPlayerbot.CoaIa.
+ * SoinCoefficientScript) : le module ajoute a la valeur de base des sorts du Tinker un coefficient de puissance par script
+ * (tinker_scaling::ModifySpellEffectBaseValue, AscensionTinkerContracts.cpp:325-347, crochet appele par
+ * SpellEffectInfo::CalcValue, SpellInfo.cpp:517), AVANT le bonus de soin du coeur. Zap! 681298 : 748 + 1,50 x puissance
+ * de soin ; Repair Shot 574152 : 1010 + 0,70 (AscensionTinkerData.h, lu le 19/10). CoaIaSoinEstime ne lisait que la base :
+ * le tri C3 placait Repair Shot devant Zap!, jamais lance en A1 et A4 au banc n°3.
+ * Recopie des termes additifs de ce crochet, meme table (TinkerCoefficients, incluse) et memes gardes (famille 34, ni copie
+ * TinkerCopies) ; la courbe de niveau (`curve`) n'est pas recopiee : au niveau 60 elle multiplie la base par 0,987.
+ * Option a 0, autre classe ou sort hors table : 0, l'estimation d'avant.
+ */
+uint32 CoaIaCoefficientScript(Player* bot, SpellInfo const* info, uint8 effet)
+{
+    if (!sPlayerbotAIConfig.coaIaSoinCoefficientScript || info->SpellFamilyName != 34)
+        return 0;
+    for (uint32 copie : TinkerCopies)
+        if (info->Id == copie)
+            return 0;
+    for (TinkerCoefficient const& ligne : TinkerCoefficients)
+        if (ligne.spell == info->Id && ligne.effect == effet)
+        {
+            SpellSchoolMask const ecole = ligne.school ? SpellSchoolMask(ligne.school) : info->GetSchoolMask();
+            float const ajout = ligne.sp * float(std::max(0, bot->SpellBaseDamageBonusDone(ecole))) +
+                                ligne.ap * bot->GetTotalAttackPowerValue(BASE_ATTACK) +
+                                ligne.rap * bot->GetTotalAttackPowerValue(RANGED_ATTACK) +
+                                ligne.healing * float(std::max(0, bot->SpellBaseHealingBonusDone(info->GetSchoolMask())));
+            return ajout > 0.0f ? uint32(std::min(ajout, float(INT32_MAX / 2))) : 0;
+        }
+    return 0;
+}
+
 // C3 : vie que le sort rendra a `cible`, lue dans ses effets (valeurs de base sans tirage, bonus de soin du lanceur
 // Unit::SpellHealingBonusDone), HoT sur toute sa duree, un niveau de declenche par TRIGGER_SPELL ou par aura
 // PERIODIC_TRIGGER_SPELL. 0 ou 1 point : soin fait par script, illisible.
@@ -3239,7 +3271,7 @@ float CoaIaSoinEstime(Player* bot, SpellInfo const* info, Unit* cible, uint8 pro
         uint32 const valeur = uint32(std::max(0, CoaValeurDeBase(effect)));
         int32 const ticks = (duree > 0 && effect.Amplitude > 0) ? duree / effect.Amplitude : 1;
         if (effect.Effect == SPELL_EFFECT_HEAL)
-            total += float(bot->SpellHealingBonusDone(cible, info, valeur, HEAL, i));
+            total += float(bot->SpellHealingBonusDone(cible, info, valeur + CoaIaCoefficientScript(bot, info, i), HEAL, i));
         else if (effect.Effect == SPELL_EFFECT_HEAL_PCT)
             total += vieMax * float(valeur) / 100.0f;
         else if (effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH)
