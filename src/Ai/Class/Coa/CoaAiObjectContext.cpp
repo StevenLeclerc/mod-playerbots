@@ -98,6 +98,13 @@ enum CoaMarque : uint16
     // D2 du 19/10 (CoaSurcharge::marques seulement) : une attaque qui rend de la mana a son lanceur (Gavel of Grace 807987,
     // Celestial Strike 502292) ; le soigneur la garde quand un membre est blesse (CoaIaRetirerFrappesDuSoigneur).
     MARQUE_REND_MANA       = 0x0080,
+    // I17 du 17/10, ecrit le 19/10 (CoaSurcharge::marques, CoaSurchargeSiPassif::marques) : une attaque qui soigne un allie
+    // (Gaze of C'Thun 502141 ; Blade of the Empire 500720 sous Blade of Yogg-Saron 524887/525078). Gardee par la reserve
+    // de mana du soigneur (C4) et par D2, sous AiPlayerbot.CoaIa.AttaqueQuiSoigne.
+    MARQUE_ATTAQUE_SOIGNE  = 0x0800,
+    // I17 : une protection a poser sur l'allie soigne (Void Shield 578115, Hand of Yogg-Saron 704476), lancee par
+    // « coa protection » (CoaProtectionAction), sous AiPlayerbot.CoaIa.ProtegerAllie.
+    MARQUE_PROTEGE_ALLIE   = 0x1000,
     // Internes a Classify (relevees en descendant dans les sorts declenches), effacees avant la fin :
     MARQUE_I_SOIN_ALLIE    = 0x0100,  // un effet de soin vise un allie
     MARQUE_I_DEF_FORT      = 0x0200,  // KIND_DEFENSIVE pose par un effet qui n'est pas une reduction de moins de 10 %
@@ -665,7 +672,8 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // 524877, AscensionCultistAuras.cpp:221). SPELL_ATTR1_EXCLUDE_CASTER : jamais sur soi (MARQUE_PAS_SUR_SOI), donc
     // seulement utile a une action qui protege un allie -- aucune ne le fait aujourd'hui. La regle C1 lui donne deja
     // KIND_DEFENSIVE (aura 87 sur TargetA 21) ; l'entree le garantit et le documente.
-    { 704476, KIND_DEFENSIVE | KIND_ALLY_CAST, 0, 15 },
+    // I17 (19/10) : MARQUE_PROTEGE_ALLIE, « coa protection » la pose sur l'allie soigne sous lowHealth.
+    { 704476, KIND_DEFENSIVE | KIND_ALLY_CAST, 0, 15, false, MARQUE_PROTEGE_ALLIE },
     // Solar Invocation: Revelation (Sun Cleric 46-48, 98 ; C3). TargetA 25 : enracine un ennemi OU soigne un allie
     // (declenches 680702 et 680701). Range en attaque (Live : x879), jamais en soin. Soin d'un allie ; perte assumee de
     // l'enracinement. Recharge de categorie 767 partagee avec Solar Invocation: Ascension.
@@ -734,6 +742,15 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // your maximum mana » : 562714 = ENERGIZE_PCT 10 % + ENERGIZE 20, pose par script). Celestial Cleave 802437 (2 % par
     // ennemi touche, 805989) n'y est PAS : c'est l'attaque que le banc mesure lancee pendant que le membre tombe.
     { 807987, 0, 0, 0, false, MARQUE_REND_MANA },
+    // I17 du 17/10, ecrit le 19/10 (DIAG-equilibrage-classes-20261017.md, Heretic 40). Spell.dbc lu le 19/10 :
+    //   - Gaze of C'Thun 502141 (rang 8, premier rang 500110) : TargetA 25 (ennemi ou allie), saute sur 3 cibles, « dealing
+    //     ... damage to enemies or healing allies » (effets 142 vers 520334 et 520335) ; 15 % de mana de base. Attaque qui
+    //     soigne : la reserve de mana du soigneur ne la retire plus (MARQUE_ATTAQUE_SOIGNE, kind inchange) ;
+    //   - Void Shield 578115 (rang 8, premier rang 500715) : absorbe sur allie (aura 69, TargetA 21), 30 s, pose Wracked
+    //     Mind 805801 (ExcludeTargetAuraSpell, lu par CoaRefusCibleCertain) ; 26 % de mana de base. La regle C1 lui donne
+    //     deja KIND_DEFENSIVE | KIND_ALLY_CAST (kind inchange) ; marque MARQUE_PROTEGE_ALLIE pour « coa protection ».
+    { 502141, 0, 0, 0, false, MARQUE_ATTAQUE_SOIGNE },
+    { 578115, 0, 0, 0, false, MARQUE_PROTEGE_ALLIE },
     { 502292, 0, 0, 0, false, MARQUE_REND_MANA },
     // I11 du 17/10 (Reaper 55-57) : Jailer's Bargain 805718 absorbe 30 % de la vie maximale par script (effet 0
     // SCHOOL_ABSORB, BasePoints 0 : force lue 1 point, environ 0,02 %, classe dernier). Force 30.
@@ -760,6 +777,11 @@ struct CoaSurchargeSiPassif
 constexpr CoaSurchargeSiPassif CoaSurchargesSiPassif[] =
 {
     { 802839, 504329, KIND_HEAL | KIND_SELF_HEAL | KIND_HOT, MARQUE_SOIN_SOI_SEUL },
+    // I17 (19/10) : Blade of the Empire (premier rang 500720) soigne l'allie le plus bas pour 35 % (524887) ou 70 % (525078)
+    // des degats infliges (AscensionCultistEvents.cpp:76, « dealt && Named(info, 500720) »). Avec l'un des deux passifs :
+    // attaque qui soigne (MARQUE_ATTAQUE_SOIGNE), kind inchange.
+    { 500720, 524887, 0, MARQUE_ATTAQUE_SOIGNE },
+    { 500720, 525078, 0, MARQUE_ATTAQUE_SOIGNE },
 };
 
 CoaSurcharge const* CoaSurchargeDe(uint32 spellId)
@@ -1472,10 +1494,13 @@ bool SavingManaForHeals(PlayerbotAI* botAI, Player* bot)
 // de StarcallerCosts : Eclipse of Fury 570221 et Touch of Moonlight 574328 a 10 %, Hand of Elune 801990 a 20 %...,
 // AscensionStarcallerContracts.cpp:49-55) et les modificateurs SPELLMOD_COST (ApplySpellMod) : rien d'autre a ajouter.
 // Option a 0 : le sort liste (avant).
-void DropManaSpells(Player* bot, std::vector<Usable>& spells)
+// I17 (19/10) : `garderSoins` vrai, une attaque qui soigne un allie (MARQUE_ATTAQUE_SOIGNE) reste.
+void DropManaSpells(Player* bot, std::vector<Usable>& spells, bool garderSoins = false)
 {
-    spells.erase(std::remove_if(spells.begin(), spells.end(), [bot](Usable const& spell)
+    spells.erase(std::remove_if(spells.begin(), spells.end(), [bot, garderSoins](Usable const& spell)
         {
+            if (garderSoins && (spell.marques & MARQUE_ATTAQUE_SOIGNE))
+                return false;
             SpellInfo const* info = sPlayerbotAIConfig.coaIaCoutEffectif ? EffectiveSpell(bot, spell.info) : spell.info;
             return info->PowerType == POWER_MANA && info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
         }),
@@ -3190,6 +3215,9 @@ void CoaIaRetirerFrappesDuSoigneur(Player* bot, std::vector<Usable>& usable)
             SpellInfo const* info = EffectiveSpell(bot, spell.info);
             if (CoaIaRendMana(info, spell.marques) || CoaIaRendMana(spell.info, spell.marques))
                 return false;
+            // I17 : une attaque qui soigne un allie reste aussi.
+            if (sPlayerbotAIConfig.coaIaAttaqueQuiSoigne && (spell.marques & MARQUE_ATTAQUE_SOIGNE))
+                return false;
             return info->StartRecoveryTime > 0 || info->CalcPowerCost(bot, info->GetSchoolMask()) > 0;
         }), usable.end());
 }
@@ -3630,7 +3658,11 @@ public:
         // (and its weapon), keeping the rest for heals.
         // IA soins/survie, lot 4 (C4) : un soigneur en groupe retient aussi sa mana tant que le groupe n'est pas plein ou
         // que sa mana est sous CoaIa.ReserveSoigneurMana (CoaIaSoigneurRetient).
-        bool const saveMana = SavingManaForHeals(botAI, bot) || CoaIaSoigneurRetient(botAI, bot);
+        // I17 (19/10, AiPlayerbot.CoaIa.AttaqueQuiSoigne) : sous la seule reserve C4 (groupe pas plein, mana sous 80 %), une
+        // attaque qui soigne un allie reste ; sous la reserve de mana basse (SavingManaForHeals), tout ce qui coute part.
+        bool const economie = SavingManaForHeals(botAI, bot);
+        bool const saveMana = economie || CoaIaSoigneurRetient(botAI, bot);
+        bool const garderSoins = !economie && sPlayerbotAIConfig.coaIaAttaqueQuiSoigne;
 
         std::vector<Usable> usable = KnownAbilities(botAI, bot, [tank](uint16 kind) { return IsAttack(kind, tank); });
         // CoaArene, survie (11/10, arene 1v1 et duel, IaSurvie) : les etendards et autres sorts au sol de soutien ne sont
@@ -3640,7 +3672,7 @@ public:
             return false;
 
         if (saveMana)
-            DropManaSpells(bot, usable);
+            DropManaSpells(bot, usable, garderSoins);
         // D2 du 19/10 : soigneur en groupe, un membre sous mediumHealth -- ni ressource ni recharge globale depensee en
         // attaque, sauf pour rendre de la mana (CoaIaRetirerFrappesDuSoigneur).
         CoaIaRetirerFrappesDuSoigneur(bot, usable);
@@ -3755,8 +3787,9 @@ public:
 
         std::vector<Usable> spells = KnownAbilities(botAI, bot, [](uint16 kind)
             { return (kind & KIND_AOE) && (kind & (KIND_DAMAGE | KIND_HOSTILE)); });
-        if (SavingManaForHeals(botAI, bot) || CoaIaSoigneurRetient(botAI, bot))
-            DropManaSpells(bot, spells);
+        bool const economie = SavingManaForHeals(botAI, bot);
+        if (economie || CoaIaSoigneurRetient(botAI, bot))
+            DropManaSpells(bot, spells, !economie && sPlayerbotAIConfig.coaIaAttaqueQuiSoigne);
         // D2 du 19/10 : comme dans « coa attack ».
         CoaIaRetirerFrappesDuSoigneur(bot, spells);
         // I4 du 17/10 : comme dans « coa attack », aucun sort paye en vie par seconde sous mediumHealth ou en perte rapide.
@@ -3935,6 +3968,55 @@ private:
 
     // Lot S : une cible autre que le bot et hors de son groupe ou raid (le joueur servi d'un evenement).
     static bool HorsGroupe(Player* bot, Unit* target) { return target != bot && !bot->IsInRaidWith(target); }
+};
+
+/*
+ * I17 du 17/10, ecrit le 19/10 (coa-project/docs/DIAG-equilibrage-classes-20261017.md, Heretic 40 ; synthese du banc n°3,
+ * D5 et D6 : Void Shield 578115 et Hand of Yogg-Saron 704476 jamais lances). Aucune action ne posait une protection sur
+ * un ALLIE : « coa defensive » ne vise que le bot, et sous mediumHealth. « coa protection » : un soigneur (GetCoaRole),
+ * l'allie que « party member to heal » designe sous lowHealth (45 %), lui compris, dans son groupe ou raid -- les sorts
+ * marques MARQUE_PROTEGE_ALLIE seulement (surcharges : liste fermee), pas deja poses par lui sur la cible (CoaSoinDejaPose),
+ * jamais un sort qui exclut son lanceur sur lui-meme. KIND_DEFENSIVE exige : la regle C1 et les surcharges ne le posent
+ * qu'au classement du lot 1 (AiPlayerbot.CoaIa.Classement) ; a 0, rien n'est lance (CoaSoinDejaPose lit ce kind). Memes filtres que les soins (CoaIaUnPret, CastFirst). Trace du banc
+ * des soins sous l'action « protection » ; compte d'usage sous « defensive ». Sous AiPlayerbot.CoaIa.ProtegerAllie.
+ */
+class CoaProtectionAction : public Action
+{
+public:
+    CoaProtectionAction(PlayerbotAI* botAI) : Action(botAI, "coa protection") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        Unit* target = AI_VALUE(Unit*, "party member to heal");
+        if (!target || !target->IsAlive())
+            return false;
+        std::vector<Usable> const sorts = Candidats(target);
+        t_bancSoinEchec = BancSoinEchec();
+        SpellInfo const* cast = RecordUsage(USAGE_DEFENSIVE, CastFirst(botAI, bot, sorts, target, USAGE_DEFENSIVE));
+        BancSoinTracer(bot, "protection", cast, sorts.empty());
+        return cast;
+    }
+
+    bool isUseful() override
+    {
+        if (!sPlayerbotAIConfig.coaIaProtegerAllie || !bot->IsAlive() || GetCoaRole(bot) != CoaRole::Heal)
+            return false;
+        Unit* target = AI_VALUE(Unit*, "party member to heal");
+        return target && target->IsAlive() && target->GetHealthPct() < float(sPlayerbotAIConfig.lowHealth) &&
+               CoaIaUnPret(botAI, bot, Candidats(target), target);
+    }
+
+private:
+    std::vector<Usable> Candidats(Unit* target)
+    {
+        // Hors groupe (le joueur servi d'un evenement, comme HorsGroupe de « coa heal ») : rien.
+        if (target != bot && !bot->IsInRaidWith(target))
+            return {};
+        bool const surSoi = target == bot;
+        return KnownAbilities(botAI, bot, [surSoi](uint16 kind, uint16 marques)
+            { return (marques & MARQUE_PROTEGE_ALLIE) && (kind & KIND_DEFENSIVE) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) &&
+                     !(surSoi && (marques & MARQUE_PAS_SUR_SOI)); });
+    }
 };
 
 // Takes the current target back when it attacks someone else.
@@ -5244,8 +5326,11 @@ public:
                                            { NextAction("coa heal", ACTION_CRITICAL_HEAL + 4) }));
         triggers.push_back(new TriggerNode("medium aoe heal",
                                            { NextAction("coa group heal", ACTION_CRITICAL_HEAL + 3) }));
+        // I17 (19/10) : « coa protection » a 2,5, devant le soin direct d'un membre a vie basse (2), derriere le soin de
+        // zone (3) et le soin critique (4). Inerte hors MARQUE_PROTEGE_ALLIE et sous AiPlayerbot.CoaIa.ProtegerAllie = 0.
         triggers.push_back(new TriggerNode("party member low health",
-                                           { NextAction("coa heal", ACTION_CRITICAL_HEAL + 2) }));
+                                           { NextAction("coa protection", ACTION_CRITICAL_HEAL + 2.5f),
+                                             NextAction("coa heal", ACTION_CRITICAL_HEAL + 2) }));
         triggers.push_back(new TriggerNode("party member medium health",
                                            { NextAction("coa hot", ACTION_CRITICAL_HEAL + 1),
                                              NextAction("coa heal", ACTION_CRITICAL_HEAL) }));
@@ -5381,6 +5466,7 @@ public:
         creators["coa veno forme"] = &CoaActionFactoryInternal::coa_veno_forme;
         creators["coa drop target"] = &CoaActionFactoryInternal::coa_drop_target;
         creators["coa regen mana"] = &CoaActionFactoryInternal::coa_regen_mana;
+        creators["coa protection"] = &CoaActionFactoryInternal::coa_protection;
     }
 
 private:
@@ -5417,6 +5503,7 @@ private:
     static Action* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeAction(botAI); }
     static Action* coa_drop_target(PlayerbotAI* botAI) { return new CoaDropTargetAction(botAI); }
     static Action* coa_regen_mana(PlayerbotAI* botAI) { return new CoaRegenManaAction(botAI); }
+    static Action* coa_protection(PlayerbotAI* botAI) { return new CoaProtectionAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>

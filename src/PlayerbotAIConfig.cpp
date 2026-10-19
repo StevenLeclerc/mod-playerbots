@@ -1089,6 +1089,8 @@ bool PlayerbotAIConfig::Initialize()
     coaIaCoutEffectif = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.CoutEffectif", true);
     coaIaSurvieAttendEtourdi = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.SurvieAttendEtourdi", true);
     coaIaSoinCoefficientScript = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.SoinCoefficientScript", true);
+    coaIaAttaqueQuiSoigne = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.AttaqueQuiSoigne", true);
+    coaIaProtegerAllie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ProtegerAllie", true);
     // --- fin IA soins/survie
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
