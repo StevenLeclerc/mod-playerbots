@@ -97,6 +97,31 @@ void Persister();
 // (aucun bot n'initie de combat contre lui ; la riposte reste permise).
 bool SousTreve(uint32 guidLow);
 
+// ------------------------------------------------------------------ paix de zone (19/10/2026)
+//
+// Verbe `paix` : cible = id de ZONE (celle que rend Player::GetZoneId : une entree de AreaTable.dbc), carte = sa carte
+// (controle : AreaTableEntry::mapid, carte du monde ouvert seulement), duree_s 60..3600, joueur 0. Au plus PAIX_MAX
+// zones en paix ; une paix reposee sur la meme zone remplace l'ancienne (fin la plus tardive). Levable (`lever`),
+// echue a son terme, levee bus eteint ; `.directeur stop` d'un joueur ne la leve pas (elle ne vise personne).
+// Tant qu'elle court, pour les BOTS dans la zone (hors champ de bataille, arene et aire arene, ex. Gurubashi) :
+//  - meriteLeDrapeauFFA est faux (PlayerbotAI.cpp) : le bloc existant retire le FFA de WildPvp ; le drapeau JcJ de
+//    WildPvp.BotsPvpMinLevel n'est pas pose, et celui deja pose (sans minuteur) recoit le minuteur ordinaire ;
+//  - PossibleTargetsValue::AcceptUnit (donc aussi NearestEnemyPlayersValue, qui l'appelle d'abord) : aucun bot dans la
+//    zone ne convoite un joueur, et aucun bot ne convoite un joueur qui s'y trouve ; riposte, champ de bataille,
+//    arene, duel permis, et le chasseur designe d'une prime (verbe `chasser`) garde son prime.
+// Les humains ne sont pas touches (ni drapeau ni ciblage), sauf qu'aucun bot ne les y convoite.
+// LECTURE SANS VERROU : un compteur atomique (aucune paix : un chargement), puis PAIX_MAX mots atomiques
+// (zone << 32 | fin), ecrits par le fil monde seul ; un mot se lit d'un seul tenant (jamais la zone d'une paix et la fin
+// d'une autre).
+constexpr uint32 PAIX_MAX = 8;
+bool PaixDeZone(uint32 zoneId);
+// PaixDeZone(zone du bot), hors champ de bataille, arene et aire AREA_FLAG_ARENA. Fil du bot (lit sa position).
+bool BotEnPaix(Player* bot);
+// Le CANDIDAT `unit` (meme carte que le bot qui l'evalue) est-il dans une zone en paix, hors aire AREA_FLAG_ARENA ?
+bool CiblePaix(Unit const* unit);
+// Retirer `paix` de Directeur.Verbes n'empeche que les NOUVELLES paix (VerbeAllume n'est lu qu'a la reception) : celles
+// en cours courent jusqu'a leur terme, ou `lever` (emettre.py lever --cible <id>), ou bus eteint.
+
 // ------------------------------------------------------------------ lot D2c
 //
 // Verbe `suspendre_mercenaire` (SPEC-directeur-D2.md § 5). Deux effets, un
@@ -553,6 +578,11 @@ enum CoaDirCompteur : uint8
                                      // meme joueur (PacteEntreBots) : plusieurs par seconde et par bot, pas des combats
     COA_DIR_MORTS_ENTRE_PACTES,      // bots tues par un bot (ou son familier) pacte pour le meme joueur : lignes
                                      // `coa directeur mort_entre_pactes:` ecrites
+    // Paix de zone (19/10/2026), en fin de la ligne bilan (BilanPaix) :
+    COA_DIR_PAIX_POSEES,             // paix posees (remplacements compris)
+    COA_DIR_PAIX_ECHUES,             // paix arrivees a leur terme
+    COA_DIR_ECARTE_PAIX,             // EVALUATIONS de cible refusees par une paix (plusieurs par seconde et par bot)
+    COA_DIR_FFA_RETIRES_PAIX,        // drapeaux FFA de WildPvp retires parce que le bot est dans une zone en paix
     COA_DIR_NB_COMPTEURS
 };
 void Compter(CoaDirCompteur c);

@@ -54,6 +54,8 @@ enum class CoaDirVerbe : uint8
     // Lot D5 « l'imprevu » (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md § 3.1-3.2), AVANT Inconnu :
     Attirer,        // 1 a 3 creatures existantes courent vers le joueur `joueur` (cible 0, texte `patrouille`)
     Soigner,        // le bot `cible` soigne le joueur `joueur` (valeur = seuil de PV, duree_s <= 420)
+    // Paix de zone (19/10/2026, coa-project exploitation/directeur/paix_zone.py), AVANT Inconnu :
+    Paix,           // cible = id de ZONE (Player::GetZoneId), carte = sa carte, duree_s 60..3600, joueur 0
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
 };
 
@@ -155,6 +157,11 @@ public:
     // « contient ») ? Faux : `attirer` et `soigner` sont refuses `colonnes_imprevu`, les autres verbes passent.
     // Vrai implique ColonnesRecompense().
     virtual bool ColonnesImprevu() const { return false; }
+
+    // Paix de zone (19/10/2026). L'ENUM de `verbe` porte-t-il les treize valeurs R3 en tete ET contient-il 'paix'
+    // (migration data/sql/characters/updates/2026_10_19_00_coa_directeur_paix.sql, controle « contient ») ? Faux :
+    // `paix` est refuse `colonnes_paix`, les autres verbes passent. Vrai implique ColonnesRecompense().
+    virtual bool ColonnesPaix() const { return false; }
 };
 
 #endif

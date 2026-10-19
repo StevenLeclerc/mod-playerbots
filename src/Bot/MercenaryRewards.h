@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <ctime>
 #include <deque>
+#include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 
@@ -263,6 +264,67 @@ private:
     uint32 _purgeTimer = 0;
     uint32 _medianTimer = 0;
     uint32 _rapportTimer = 0;
+
+    // --- MORTS JcJ PAR ZONE (19/10/2026, « paix de zone » du Directeur) ------
+    //
+    // Le releve [Mercenaire] est GLOBAL : il ne dit pas OU l'on meurt. Le
+    // Directeur (coa-project, exploitation/directeur/paix_zone.py) a besoin de
+    // la zone pour poser une paix (verbe `paix`, CoaDirecteur.cpp) sur un
+    // massacre en boucle. On compte donc chaque mort JcJ hors champ de bataille
+    // et arene par ZONE DE LA VICTIME (Player::GetZoneId : le parent de son
+    // aire dans AreaTable.dbc) sur une fenetre glissante de ZONES_MINUTES minutes, en
+    // seaux d'une minute, avec deux sous-comptes : « meme equipe » (tueur et
+    // victime de la meme TeamId) et « tueur mercenaire ».
+    //
+    // LA LIGNE, UNE PAR MINUTE, ET SEULEMENT SI UNE ZONE A DES MORTS (logger
+    // playerbots.coa, donc CoaBots.log) -- FORMAT STABLE, PARSE PAR paix_zone.py :
+    //   coa jcj zones: fenetre=300 seq=<n> zones=<k> liste=<zone>/<carte>=<total>,<meme_equipe>,<mercenaire>;...
+    // `zones` : nombre de zones ayant au moins une mort dans la fenetre ;
+    // `liste` : au plus ZONES_TOP zones, par total decroissant (puis meme equipe,
+    // puis id de zone), separees par `;`, sans espace. `seq` croit d'une unite
+    // par ligne emise (remis a 0 au redemarrage). Tout champ NOUVEAU se met APRES
+    // `liste`, separe par une espace : le parseur ancre le debut.
+    //
+    // `debordees` (en fin de ligne) est un CUMUL depuis le demarrage, pas un compte de la fenetre ; il doit rester a 0.
+    // La fenetre couvre la minute en cours et les quatre precedentes : 4 a 5 min selon l'instant de la publication.
+    // Les morts dans une aire arene du monde ouvert (Gurubashi) ne sont pas comptees, comme champ de bataille et arene.
+    //
+    // CONCURRENCE. OnPvpKill part des fils de carte, la publication du fil
+    // monde : un std::mutex PROPRE (pas _mutex, que IsUnderTruce prend en
+    // partage sur le chemin chaud ; ici rien n'est lu sur un chemin chaud). Une
+    // mort JcJ par seconde au pire mesure (P-280 : ~3 000 / 30 min) : le verrou
+    // ne se dispute pas. Aucun appel au code de jeu sous ce verrou, et le LOG est
+    // emis apres l'avoir rendu.
+    //
+    // « TUEUR MERCENAIRE » EST UNE APPROXIMATION ASSUMEE : session de bot ET
+    // hachage mercenaire (PlayerbotAIConfig::IsMercenary), sans IsRandomBot --
+    // qui lit `currentBots` sans verrou et n'a rien a faire sur un fil de carte
+    // (P-050, voir l'en-tete de la classe). Un alt `.bot add` dont le GUID tombe
+    // dans le seau compterait ; il ne porte ni la chasse ni le FFA de WildPvp.
+    static constexpr uint32 ZONES_MINUTES = 5;
+    static constexpr uint32 ZONES_TOP = 20;
+    static constexpr uint32 ZONES_MAX = 512;            // zones suivies au plus (defense ; ~quelques dizaines en service)
+    static constexpr uint32 ZONES_PERIODE_MS = 60 * 1000;
+
+    struct ZoneJcJ
+    {
+        uint32 carte = 0;
+        uint32 minute[ZONES_MINUTES] = {};              // minute de jeu (GetGameTime / 60) portee par le seau
+        uint32 total[ZONES_MINUTES] = {};
+        uint32 memeEquipe[ZONES_MINUTES] = {};
+        uint32 mercenaire[ZONES_MINUTES] = {};
+    };
+
+    // Fil de carte (OnPvpKill). Lit killer/killed sous le fil appelant seulement.
+    void NoterMortParZone(Player* killer, Player* killed);
+    // Fil monde (Update), toutes les ZONES_PERIODE_MS : purge, somme, ligne.
+    void PublierZones();
+
+    std::mutex _zonesMutex;
+    std::unordered_map<uint32, ZoneJcJ> _zonesJcJ;      // cle : zone de la victime ; sous _zonesMutex
+    uint32 _zonesDebordees = 0;                         // morts non comptees (ZONES_MAX atteint), CUMUL depuis le demarrage ; sous _zonesMutex
+    uint32 _zonesTimer = 0;                             // fil monde
+    uint32 _zonesSeq = 0;                               // fil monde
 };
 
 // --- L'INDEX << OU SONT LES PROIES >> (CoA) ----------------------------------

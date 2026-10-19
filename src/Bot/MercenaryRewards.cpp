@@ -5,6 +5,7 @@
  */
 
 #include "MercenaryRewards.h"
+#include "DBCStores.h"
 #include "Formulas.h"
 #include "GameTime.h"
 #include "Log.h"
@@ -14,7 +15,9 @@
 #include "Playerbots.h"
 #include "RandomPlayerbotMgr.h"
 #include "ScriptMgr.h"
+#include "StringFormat.h"
 #include "World.h"
+#include "WorldSession.h"
 
 #include <algorithm>
 #include <array>
@@ -23,6 +26,8 @@
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -191,6 +196,15 @@ void MercenaryRewards::Update(uint32 diff)
         }
     }
 
+    // Morts JcJ par zone (19/10/2026) : une ligne par minute, seulement si une zone a des morts. Voir
+    // MercenaryRewards.h, « MORTS JcJ PAR ZONE ». AVANT la purge, dont le `return` couperait la suite.
+    _zonesTimer += diff;
+    if (_zonesTimer >= ZONES_PERIODE_MS)
+    {
+        _zonesTimer = 0;
+        PublierZones();
+    }
+
     _purgeTimer += diff;
     if (_purgeTimer < PURGE_PERIOD_MS)
         return;
@@ -261,6 +275,9 @@ void MercenaryRewards::OnPvpKill(Player* killer, Player* killed)
         return;
 
     _pvpKillsSeen.fetch_add(1, std::memory_order_relaxed);
+
+    // Morts JcJ par zone (19/10/2026) : independant de la recompense et de la treve, et AVANT elles (leurs `return`).
+    NoterMortParZone(killer, killed);
 
     // La treve protege la victime quoi qu'il arrive, y compris quand le tueur
     // n'a droit a aucune recompense : les deux decisions sont independantes.
@@ -702,6 +719,125 @@ void MercenaryRewards::RecomputeMedian()
     }
 
     _medianBotLevel.store(0, std::memory_order_relaxed);
+}
+
+// =============================================================================
+// MORTS JcJ PAR ZONE (19/10/2026) -- voir MercenaryRewards.h
+// =============================================================================
+void MercenaryRewards::NoterMortParZone(Player* killer, Player* killed)
+{
+    // Champ de bataille et arene : le JcJ y est le jeu, la paix de zone ne les vise jamais (le verbe `paix` refuse
+    // une carte qui n'est pas du monde ouvert). Ne pas les compter garde la ligne courte et sans faux massacre.
+    if (killed->InBattleground() || killed->InArena())
+        return;
+    // Arene du monde ouvert (Gurubashi, AREA_FLAG_ARENA) : meme raison -- son JcJ est voulu, et la compter pousserait
+    // la regle a poser une paix sur toute sa zone parente (revue du 19/10).
+    if (AreaTableEntry const* aire = sAreaTableStore.LookupEntry(killed->GetAreaId()))
+        if (aire->flags & AREA_FLAG_ARENA)
+            return;
+
+    uint32 const zone = killed->GetZoneId();
+    if (!zone)
+        return;
+    uint32 const carte = killed->GetMapId();
+    bool const memeEquipe = killer->GetTeamId() == killed->GetTeamId();
+    // Approximation assumee (en-tete) : session de bot + hachage, sans IsRandomBot (P-050).
+    bool const mercenaire = killer->GetSession() && killer->GetSession()->IsBot() &&
+                            sPlayerbotAIConfig.IsMercenary(killer->GetGUID().GetRawValue());
+    uint32 const minute = static_cast<uint32>(GameTime::GetGameTime().count() / 60);
+    uint32 const seau = minute % ZONES_MINUTES;
+
+    std::lock_guard<std::mutex> garde(_zonesMutex);
+    auto it = _zonesJcJ.find(zone);
+    if (it == _zonesJcJ.end())
+    {
+        if (_zonesJcJ.size() >= ZONES_MAX)
+        {
+            ++_zonesDebordees;
+            return;
+        }
+        it = _zonesJcJ.emplace(zone, ZoneJcJ{}).first;
+    }
+    ZoneJcJ& z = it->second;
+    z.carte = carte;
+    if (z.minute[seau] != minute)
+    {
+        // Seau d'une minute ancienne (ZONES_MINUTES minutes plus tot, ou jamais servi) : on le recycle.
+        z.minute[seau] = minute;
+        z.total[seau] = 0;
+        z.memeEquipe[seau] = 0;
+        z.mercenaire[seau] = 0;
+    }
+    ++z.total[seau];
+    if (memeEquipe)
+        ++z.memeEquipe[seau];
+    if (mercenaire)
+        ++z.mercenaire[seau];
+}
+
+void MercenaryRewards::PublierZones()
+{
+    struct Ligne
+    {
+        uint32 zone, carte, total, memeEquipe, mercenaire;
+    };
+    std::vector<Ligne> lignes;
+    uint32 debordees = 0;
+    uint32 const minute = static_cast<uint32>(GameTime::GetGameTime().count() / 60);
+    {
+        std::lock_guard<std::mutex> garde(_zonesMutex);
+        debordees = _zonesDebordees;
+        for (auto it = _zonesJcJ.begin(); it != _zonesJcJ.end();)
+        {
+            ZoneJcJ const& z = it->second;
+            Ligne l{ it->first, z.carte, 0, 0, 0 };
+            for (uint32 s = 0; s < ZONES_MINUTES; ++s)
+            {
+                // Dans la fenetre : la minute courante et les ZONES_MINUTES - 1 precedentes. Une minute FUTURE (horloge
+                // de jeu reculee) est hors fenetre aussi : `minute - z.minute[s]` s'enroulerait alors sur un grand
+                // nombre, et le seau est ignore puis recycle.
+                if (z.minute[s] && minute - z.minute[s] < ZONES_MINUTES)
+                {
+                    l.total += z.total[s];
+                    l.memeEquipe += z.memeEquipe[s];
+                    l.mercenaire += z.mercenaire[s];
+                }
+            }
+            if (!l.total)
+            {
+                it = _zonesJcJ.erase(it);   // plus aucune mort dans la fenetre : la table ne garde que les zones vivantes
+                continue;
+            }
+            lignes.push_back(l);
+            ++it;
+        }
+    }
+
+    if (lignes.empty())
+        return;   // aucune ligne quand personne ne meurt : le silence est l'etat normal (paix_zone.py le sait)
+
+    std::sort(lignes.begin(), lignes.end(), [](Ligne const& a, Ligne const& b)
+    {
+        if (a.total != b.total)
+            return a.total > b.total;
+        if (a.memeEquipe != b.memeEquipe)
+            return a.memeEquipe > b.memeEquipe;
+        return a.zone < b.zone;
+    });
+
+    std::string liste;
+    size_t const n = std::min<size_t>(lignes.size(), ZONES_TOP);
+    for (size_t i = 0; i < n; ++i)
+    {
+        Ligne const& l = lignes[i];
+        if (i)
+            liste += ';';
+        liste += Acore::StringFormat("{}/{}={},{},{}", l.zone, l.carte, l.total, l.memeEquipe, l.mercenaire);
+    }
+
+    ++_zonesSeq;
+    LOG_INFO("playerbots.coa", "coa jcj zones: fenetre={} seq={} zones={} liste={} debordees={}",
+             ZONES_MINUTES * 60, _zonesSeq, lignes.size(), liste, debordees);
 }
 
 // =============================================================================

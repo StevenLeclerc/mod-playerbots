@@ -106,6 +106,26 @@ bool PossibleTargetsValue::AcceptUnit(Unit* unit)
             return false;
         }
 
+        // CoA -- Directeur, PAIX DE ZONE (19/10/2026, verbe `paix`, CoaDirecteur.h). Meme place et memes exceptions
+        // que la treve : apres l'autodefense (la riposte reste permise), avant les exemptions qui rendent true (sinon
+        // la paix ne mordrait pas en capitale). Deux sens : un bot DANS une zone en paix ne convoite aucun joueur, et
+        // aucun bot ne convoite un joueur qui s'y trouve (un bot au bord de la zone ne vient pas y chercher sa proie).
+        // BotEnPaix et CiblePaix ecartent l'aire arene (Gurubashi) ; le duel est teste ici. Le chasseur designe
+        // d'une prime (verbe `chasser`) garde son prime : la prime est une decision du Directeur, la paix vise le
+        // massacre entre bots. Sans paix : un chargement atomique (BotEnPaix et PaixDeZone sortent sur nbPaix).
+        if ((CoaDirecteur::BotEnPaix(bot) ||
+             (CoaDirecteur::CiblePaix(unit) && !bot->InBattleground() && !bot->InArena())) &&
+            !(bot->duel && bot->duel->Opponent == unit))
+        {
+            uint32 prime = 0;
+            if (!(CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter(), &prime) &&
+                  prime == unit->GetGUID().GetCounter()))
+            {
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ECARTE_PAIX);
+                return false;
+            }
+        }
+
         // CoA -- Directeur, compagnons (27/09, option Directeur.Compagnons) :
         // PACTE. Un bot amene vers un joueur par `peupler` (toute presence :
         // etapes, finale, compagnon `C-`) ne convoite ni ce joueur ni les

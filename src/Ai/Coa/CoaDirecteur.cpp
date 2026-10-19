@@ -378,6 +378,23 @@ std::shared_mutex verrouConsignes;
 std::unordered_map<uint32, Treve> treves;   // cle : guid bas de la cible
 std::atomic<uint32> nbTreves{0};
 
+// Paix de zone (19/10/2026, CoaDirecteur.h). `paix` n'est lu et ecrit QUE par le fil monde (bus, levees, echeances,
+// Consignes et Bilan, qui y tournent tous) : aucun verrou. Les fils de carte ne lisent QUE casesPaix et nbPaix,
+// atomiques : PAIX_MAX mots `zone << 32 | finS` (0 = case libre), recopies par le fil monde a chaque pose et levee.
+// nbPaix est tenu egal a paix.size() ; il est ecrit APRES les cases a la pose et APRES les avoir videes a la levee :
+// un lecteur qui le voit a 0 sort sans lire les cases.
+struct Paix
+{
+    uint32 id;       // commande qui l'a posee
+    uint32 zone;
+    uint32 carte;
+    uint32 finS;     // GameTime::GetGameTime(), en secondes
+    uint32 kase;     // indice dans casesPaix
+};
+std::unordered_map<uint32, Paix> paix;      // cle : zone ; fil monde seul
+std::array<std::atomic<uint64>, CoaDirecteur::PAIX_MAX> casesPaix{};
+std::atomic<uint32> nbPaix{0};
+
 // Lot D2c : suspensions de mercenaires, meme verrou, meme patron (un compteur
 // atomique tenu egal a suspensions.size() sous le verrou exclusif).
 struct Suspension
@@ -712,6 +729,7 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Evenement:           return "evenement";
         case CoaDirVerbe::Attirer:             return "attirer";
         case CoaDirVerbe::Soigner:             return "soigner";
+        case CoaDirVerbe::Paix:                return "paix";
         default:                               return "inconnu";
     }
 }
@@ -734,6 +752,7 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "evenement")            return CoaDirVerbe::Evenement;
     if (nom == "attirer")              return CoaDirVerbe::Attirer;
     if (nom == "soigner")              return CoaDirVerbe::Soigner;
+    if (nom == "paix")                 return CoaDirVerbe::Paix;
     return CoaDirVerbe::Inconnu;
 }
 
@@ -774,6 +793,13 @@ bool VerbeImprevu(CoaDirVerbe v)
     return v == CoaDirVerbe::Attirer || v == CoaDirVerbe::Soigner;
 }
 
+// Paix de zone (19/10/2026) : `paix` exige l'ENUM R3 en tete ET la valeur 'paix' (controle « contient »,
+// ColonnesPaix ; migration 2026_10_19_00_coa_directeur_paix.sql). Il ne lit aucune colonne D3.
+bool VerbePaix(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Paix;
+}
+
 CoaDirCanal CanalDe(std::string const& nom)
 {
     if (nom.empty())       return CoaDirCanal::Aucun;
@@ -805,7 +831,8 @@ char const* NomCanal(CoaDirCanal c)
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v) || VerbeImprevu(v);
+           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v) || VerbeImprevu(v) ||
+           VerbePaix(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -888,6 +915,7 @@ public:
         _colonnesR = false;
         _colonnesEv = false;
         _colonnesImprevu = false;
+        _colonnesPaix = false;
         QueryResult colonnes = CharacterDatabase.Query(
             "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
@@ -925,6 +953,9 @@ public:
         // ...,'recompenser','pister','attirer','soigner','evenement').
         _colonnesImprevu = _colonnesR && typeVerbe.find(",'attirer'") != std::string::npos &&
                            typeVerbe.find(",'soigner'") != std::string::npos;
+        // Paix de zone (19/10/2026) : meme regle « contient », apres l'ENUM R3. Entre apostrophes : 'paix_x' ne la
+        // contient pas.
+        _colonnesPaix = _colonnesR && typeVerbe.find(",'paix'") != std::string::npos;
         if (_colonnesD3)
             LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
         else
@@ -947,6 +978,10 @@ public:
             LOG_INFO("playerbots", "coa directeur : colonnes imprevu presentes, verbes attirer et soigner lisibles");
         else
             LOG_INFO("playerbots", "coa directeur : colonnes imprevu absentes, verbes attirer et soigner inertes");
+        if (_colonnesPaix)
+            LOG_INFO("playerbots", "coa directeur : colonnes paix presentes, verbe paix lisible");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes paix absentes, verbe paix inerte");
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -1068,6 +1103,7 @@ public:
     bool ColonnesRecompense() const override { return _colonnesR; }
     bool ColonnesEvenement() const override { return _colonnesEv; }
     bool ColonnesImprevu() const override { return _colonnesImprevu; }
+    bool ColonnesPaix() const override { return _colonnesPaix; }
 
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
@@ -1118,6 +1154,7 @@ private:
     bool _colonnesR = false;
     bool _colonnesEv = false;
     bool _colonnesImprevu = false;
+    bool _colonnesPaix = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -1236,6 +1273,88 @@ void LeverEchues()
             ++it;
     }
     nbTreves.store(static_cast<uint32>(treves.size()), std::memory_order_relaxed);
+}
+
+// ------------------------------------------------------------------ paix de zone (19/10/2026)
+//
+// Fil monde seul (voir le magasin `paix`, plus haut). Une case est ECRITE avant que nbPaix ne la compte, et VIDEE avant
+// que nbPaix ne la decompte ; un lecteur qui la verrait encore pleine apres la levee lirait une paix de plus pendant
+// quelques instructions, jamais une case a moitie ecrite.
+
+void PublierNbPaix()
+{
+    nbPaix.store(static_cast<uint32>(paix.size()), std::memory_order_release);
+}
+
+void CloreConsigne(Paix const& z, char const* statut, char const* raison)
+{
+    LOG_INFO("playerbots", "coa directeur cmd: id={} verbe=paix cible={} joueur=0 statut={} raison={}",
+             z.id, z.zone, statut, raison ? raison : "-");
+    if (source)
+        source->Clore(z.id, statut, raison);
+}
+
+// Retire du magasin toute paix pour laquelle `lever` rend vrai, puis ecrit leur levee (statut `leve`). -> nombre.
+template <typename Predicat>
+size_t LeverPaixSi(Predicat lever, char const* raison)
+{
+    if (paix.empty())
+        return 0;
+    std::vector<Paix> levees;
+    for (auto it = paix.begin(); it != paix.end();)
+    {
+        if (lever(it->second))
+        {
+            casesPaix[it->second.kase].store(0, std::memory_order_release);
+            levees.push_back(it->second);
+            it = paix.erase(it);
+        }
+        else
+            ++it;
+    }
+    PublierNbPaix();
+    for (Paix const& z : levees)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_LEVEES);
+        CloreConsigne(z, "leve", raison);
+        LOG_INFO("playerbots", "coa directeur paix: fin zone={} carte={} id={} raison={}", z.zone, z.carte, z.id, raison);
+    }
+    return levees.size();
+}
+
+// Fin NATURELLE : rien n'est ecrit en base (le service la connait : vu_le + duree_s) ; une ligne au journal du module
+// et le bilan la compte (`paix_echues`).
+void LeverPaixEchues()
+{
+    if (paix.empty())
+        return;
+    uint32 const maintenant = Maintenant();
+    bool change = false;
+    for (auto it = paix.begin(); it != paix.end();)
+    {
+        if (it->second.finS <= maintenant)
+        {
+            casesPaix[it->second.kase].store(0, std::memory_order_release);
+            LOG_INFO("playerbots", "coa directeur paix: fin zone={} carte={} id={} raison=echue", it->second.zone,
+                     it->second.carte, it->second.id);
+            it = paix.erase(it);
+            CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAIX_ECHUES);
+            change = true;
+        }
+        else
+            ++it;
+    }
+    if (change)
+        PublierNbPaix();
+}
+
+// `paix=<actives> paix_posees= paix_echues= ecartes_paix= ffa_retires_paix=`, EN FIN de la ligne bilan.
+std::string BilanPaix()
+{
+    return Acore::StringFormat(" paix={} paix_posees={} paix_echues={} ecartes_paix={} ffa_retires_paix={}",
+                               paix.size(), Lire(CoaDirecteur::COA_DIR_PAIX_POSEES),
+                               Lire(CoaDirecteur::COA_DIR_PAIX_ECHUES), Lire(CoaDirecteur::COA_DIR_ECARTE_PAIX),
+                               Lire(CoaDirecteur::COA_DIR_FFA_RETIRES_PAIX));
 }
 
 // ------------------------------------------------------------------ suspensions (D2c)
@@ -6994,6 +7113,7 @@ void Entretien(uint32 diff)
     // (fin d'Entretien) : une cible ou un garde sorti de l'immobilite est recompose dans la meme seconde.
     SuivreReactions();
     LeverEchues();
+    LeverPaixEchues();   // paix de zone (19/10/2026)
     LeverSuspensionsEchues();
     LeverSuspensionsMaitreHumain();
     // D2b : APRES les fins de suspension (levee `fin_suspension` dans la meme
@@ -7048,6 +7168,7 @@ void ExecuterLever(CoaDirCommande const& c)
     size_t const n =
         c.cible == 0
             ? LeverSi([](Treve const&) { return true; }, "lever") +
+                  LeverPaixSi([](Paix const&) { return true; }, "lever") +
                   LeverSuspensionsSi([](Suspension const&) { return true; }, "lever") +
                   LeverAffectationsSi([](AffectationInterne const&) { return true; }, "lever") +
                   LeverCielsSi([](Ciel const&) { return true; }, "lever") +
@@ -7056,6 +7177,7 @@ void ExecuterLever(CoaDirCommande const& c)
                   LeverPrimesSi([](Prime const&) { return true; }, "lever") +
                   LeverEvenementsSi([](uint32, uint32) { return true; }, "lever")
             : LeverSi([&c](Treve const& t) { return t.id == c.cible; }, "lever") +
+                  LeverPaixSi([&c](Paix const& z) { return z.id == c.cible; }, "lever") +
                   LeverSuspensionsSi([&c](Suspension const& s) { return s.id == c.cible; }, "lever") +
                   LeverAffectationsSi([&c](AffectationInterne const& f) { return f.a.id == c.cible; }, "lever") +
                   LeverCielsSi([&c](Ciel const& x) { return x.id == c.cible; }, "lever") +
@@ -7135,6 +7257,96 @@ void ExecuterTreve(CoaDirCommande const& c)
         CloreConsigne(ancienne, "remplace", par.c_str());
     }
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    Accuser(c, "execute", nullptr);
+}
+
+// Verbe `paix` (19/10/2026, CoaDirecteur.h). Pendant duree_s, dans la ZONE `cible` : aucun bot n'y porte le FFA de
+// WildPvp ni n'y recoit le drapeau JcJ de BotsPvpMinLevel, aucun bot n'y convoite un joueur (riposte, champ de bataille,
+// arene, duel et prime exceptes). Un combat deja engage n'est pas interrompu par le ciblage ; le retrait du FFA, lui,
+// rompt les attaques que seul le FFA rendait legales (UpdateFFAPvPState(true), PlayerUpdates.cpp:1539-1554) -- c'est
+// l'effet voulu contre un massacre entre bots d'une meme faction.
+void ExecuterPaix(CoaDirCommande const& c)
+{
+    // 6. bornes : une zone, 1 a 60 minutes, personne vise.
+    if (c.cible == 0 || c.dureeS < 60 || c.dureeS > 3600 || c.joueur != 0)
+    {
+        Refuser(c, "bornes");
+        return;
+    }
+    // 7. la zone : une entree de AreaTable.dbc, sur la carte annoncee, et cette carte est du monde ouvert (jamais un
+    // champ de bataille, une arene, une instance). On n'exige PAS `aire->zone == 0` : la cible est ce que
+    // Player::GetZoneId a rendu (ligne `coa jcj zones:`), c'est-a-dire le parent DIRECT de l'aire, et l'AreaTable
+    // d'Ascension a deplace des aires sous de nouveaux parents (P-275) -- un parent qui aurait lui-meme un parent serait
+    // refuse a tort, alors que PaixDeZone le compare exactement a GetZoneId.
+    AreaTableEntry const* aire = sAreaTableStore.LookupEntry(c.cible);
+    if (!aire)
+    {
+        Refuser(c, "zone_inconnue");
+        return;
+    }
+    if (aire->mapid != c.carte)
+    {
+        Refuser(c, "carte");
+        return;
+    }
+    MapEntry const* carte = sMapStore.LookupEntry(c.carte);
+    if (!carte || !carte->IsWorldMap())
+    {
+        Refuser(c, "carte_hors_monde");
+        return;
+    }
+    // 8. plafond : une paix reposee sur une zone deja en paix n'en ajoute pas.
+    auto it = paix.find(c.cible);
+    if (it == paix.end() && paix.size() >= CoaDirecteur::PAIX_MAX)
+    {
+        Refuser(c, "plafond");
+        return;
+    }
+
+    uint32 fin = Maintenant() + c.dureeS;
+    bool remplace = false;
+    Paix ancienne{};
+    uint32 kase = CoaDirecteur::PAIX_MAX;
+    if (it != paix.end())
+    {
+        // Meme zone : la consigne unique porte l'id de la PLUS RECENTE (le service leve par le dernier id), la fin la
+        // plus tardive gagne (aucune paix ne vise un joueur : pas de proprietaire a departager, a la difference de la
+        // treve). Meme case.
+        remplace = true;
+        ancienne = it->second;
+        fin = std::max(fin, it->second.finS);
+        kase = it->second.kase;
+    }
+    else
+    {
+        // Une case libre existe : paix.size() < PAIX_MAX, et chaque paix du magasin tient exactement une case.
+        for (uint32 i = 0; i < CoaDirecteur::PAIX_MAX; ++i)
+        {
+            if (!casesPaix[i].load(std::memory_order_relaxed))
+            {
+                kase = i;
+                break;
+            }
+        }
+        if (kase >= CoaDirecteur::PAIX_MAX)
+        {
+            Refuser(c, "plafond");   // inatteignable (invariant ci-dessus) ; refuser plutot qu'ecrire hors du tableau
+            return;
+        }
+    }
+    paix[c.cible] = Paix{c.id, c.cible, c.carte, fin, kase};
+    casesPaix[kase].store((static_cast<uint64>(c.cible) << 32) | fin, std::memory_order_release);
+    PublierNbPaix();
+    if (remplace)
+    {
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REMPLACEES);
+        std::string const par = Acore::StringFormat("par_{}", c.id);
+        CloreConsigne(ancienne, "remplace", par.c_str());
+    }
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_PAIX_POSEES);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    LOG_INFO("playerbots", "coa directeur paix: pose zone={} carte={} id={} fin_dans_s={} remplace={}", c.cible, c.carte,
+             c.id, fin - Maintenant(), remplace ? ancienne.id : 0);
     Accuser(c, "execute", nullptr);
 }
 
@@ -10205,6 +10417,13 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "colonnes_imprevu");
         return;
     }
+    // 3 septies (paix de zone, 19/10/2026). `paix` sans la valeur d'ENUM au demarrage : elle ne devrait pas exister
+    // en base (migration 2026_10_19_00 non appliquee, P-131).
+    if (VerbePaix(c.verbe) && (!source || !source->ColonnesPaix()))
+    {
+        Refuser(c, "colonnes_paix");
+        return;
+    }
     // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
     // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
     // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
@@ -10225,7 +10444,8 @@ void Recevoir(CoaDirCommande const& c)
     // Arene1v1 (10/10/2026, Ai/Coa/CoaArene1v1.cpp) : un gladiateur engage (en file, invite,
     // en arene) n'est ni affecte, ni prepare, ni deplace. `c.cible` d'un verbe qui vise un
     // joueur est un humain, jamais un gladiateur : le test ne l'ecarte pas.
-    if (!menage && c.cible && CoaArene1v1::GladiateurEngage(c.cible))
+    // Paix de zone : sa cible est un id de ZONE, pas un guid (une zone 215 n'est pas le personnage 215).
+    if (!menage && c.verbe != CoaDirVerbe::Paix && c.cible && CoaArene1v1::GladiateurEngage(c.cible))
     {
         Refuser(c, "arene");
         return;
@@ -10287,6 +10507,9 @@ void Recevoir(CoaDirCommande const& c)
             break;
         case CoaDirVerbe::Soigner:
             ExecuterSoigner(c);
+            break;
+        case CoaDirVerbe::Paix:
+            ExecuterPaix(c);
             break;
         default:
             Refuser(c, "verbe_eteint");   // inatteignable : VerbeImplemente l'a filtre
@@ -10356,7 +10579,7 @@ void Bilan()
              Lire(COA_DIR_PAROLES_HORS_VUE), Lire(COA_DIR_MISSIONS), Lire(COA_DIR_MISSIONS_IGNOREES),
              Lire(COA_DIR_MISSIONS_DEGRADEES), Lire(COA_DIR_PATROUILLES), Lire(COA_DIR_BANDES_RECALEES),
              Lire(COA_DIR_BANDES_REJOINTES), Lire(COA_DIR_ECARTE_PACTE_BOTS), Lire(COA_DIR_MORTS_ENTRE_PACTES),
-             BilanImprevu());   // lot D5 : ` attires= engages= rentres= attires_actifs= ...`, EN FIN de ligne
+             BilanImprevu() + BilanPaix());   // lot D5 : ` attires= ...` ; paix de zone : ` paix= ...`, EN FIN de ligne
 }
 
 // ------------------------------------------------------------------ lectures 8888 (fil monde)
@@ -10380,6 +10603,14 @@ std::string Consignes()
             out << '\t';
         premier = false;
         out << t.id << ",treve," << t.cible << ',' << t.joueur << ',' << t.finS << ",0,0,0,0,-,-,-";
+    }
+    // Paix de zone (19/10/2026) : cible = la ZONE, joueur 0, carte en sixieme champ ; ni point, ni phase, ni mode.
+    for (auto const& [zone, z] : paix)
+    {
+        if (!premier)
+            out << '\t';
+        premier = false;
+        out << z.id << ",paix," << z.zone << ",0," << z.finS << ',' << z.carte << ",0,0,0,-,-,-";
     }
     // Une suspension n'a ni lieu ni phase ; mode 0 (garde sa chasse) ou 1 (RPG).
     for (auto const& [guid, s] : suspensions)
@@ -10740,6 +10971,7 @@ void CoaDirecteur::TraiterBus(uint32 diff)
     if (!bus)
     {
         LeverSi([](Treve const&) { return true; }, "bus_eteint");
+        LeverPaixSi([](Paix const&) { return true; }, "bus_eteint");   // paix de zone (19/10/2026)
         LeverSuspensionsSi([](Suspension const&) { return true; }, "bus_eteint");
         LeverAffectationsSi([](AffectationInterne const&) { return true; }, "bus_eteint");
         // Lot D3 : heure vraie renvoyee, temps de la zone retabli, paroles oubliees.
@@ -10797,6 +11029,41 @@ bool CoaDirecteur::SousTreve(uint32 guidLow)
     auto it = treves.find(guidLow);
     // Echue mais pas encore levee (la levee passe chaque seconde) : plus sous treve.
     return it != treves.end() && it->second.finS > Maintenant();
+}
+
+bool CoaDirecteur::PaixDeZone(uint32 zoneId)
+{
+    // LA QUESTION D'ABORD : sans paix, un chargement atomique.
+    if (!nbPaix.load(std::memory_order_acquire) || !zoneId)
+        return false;
+    uint32 const maintenant = Maintenant();
+    for (auto const& kase : casesPaix)
+    {
+        uint64 const v = kase.load(std::memory_order_acquire);
+        // Echue mais pas encore levee (la levee passe chaque seconde) : plus en paix.
+        if (v && static_cast<uint32>(v >> 32) == zoneId && static_cast<uint32>(v) > maintenant)
+            return true;
+    }
+    return false;
+}
+
+bool CoaDirecteur::BotEnPaix(Player* bot)
+{
+    if (!bot || !nbPaix.load(std::memory_order_relaxed))
+        return false;
+    if (!PaixDeZone(bot->GetZoneId()) || bot->InBattleground() || bot->InArena())
+        return false;
+    // Une aire arene du monde ouvert (Gurubashi) garde son FFA de coeur et sa convoitise : la paix ne la vise pas.
+    AreaTableEntry const* aire = sAreaTableStore.LookupEntry(bot->GetAreaId());
+    return !(aire && (aire->flags & AREA_FLAG_ARENA));
+}
+
+bool CoaDirecteur::CiblePaix(Unit const* unit)
+{
+    if (!unit || !nbPaix.load(std::memory_order_relaxed) || !PaixDeZone(unit->GetZoneId()))
+        return false;
+    AreaTableEntry const* aire = sAreaTableStore.LookupEntry(unit->GetAreaId());
+    return !(aire && (aire->flags & AREA_FLAG_ARENA));
 }
 
 bool CoaDirecteur::MercenaireSuspendu(uint32 guidLow)

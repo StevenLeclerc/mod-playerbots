@@ -5,6 +5,7 @@
  */
 
 #include "CoaRegistreCombat.h"
+#include "CoaDirecteur.h"   // paix de zone (19/10/2026) : BotEnPaix, ChasseurDe, Compter
 #include "CoaGelBanc.h"
 #include "PlayerbotAI.h"
 #include "CoaSpecialization.h"
@@ -422,13 +423,20 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
     // depuis le DBC et y est immunise. GetZoneId()/GetAreaId() sont les valeurs
     // rafraichies paresseusement par UpdatePositionData (Object.cpp:3166-3180),
     // pas les m_zoneUpdateId/m_areaUpdateId du minuteur de zone.
-    bool const meriteLeDrapeauFFA =
+    bool const meriteHorsPaix =
         sPlayerbotAIConfig.wildPvpEnabled &&
         bot->GetLevel() >= sPlayerbotAIConfig.wildPvpMinLevel &&
         ((sPlayerbotAIConfig.wildPvpAllBotsAreTargets && !GetMaster()) ||
          (!HasGameClientMaster() && sRandomPlayerbotMgr.IsRandomBot(bot) &&
           sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))) &&
         !sPlayerbotAIConfig.CoaLieuSansPvp(bot->GetZoneId(), bot->GetAreaId());
+    // CoA -- Directeur, PAIX DE ZONE (19/10/2026, verbe `paix`, CoaDirecteur.h) : dans une zone en paix, aucun bot ne
+    // merite le FFA de WildPvp ; la branche `else if` ci-dessous le lui retire au tick suivant, comme en sanctuaire.
+    // Evaluee EN DERNIER et seulement pour un bot qui le meritait : sans paix, un chargement atomique. Le chasseur
+    // designe d'une prime (verbe `chasser`) le garde : sa prime n'est pas le massacre que la paix arrete.
+    bool const enPaix = meriteHorsPaix && CoaDirecteur::BotEnPaix(bot) &&
+                        !CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter());
+    bool const meriteLeDrapeauFFA = meriteHorsPaix && !enPaix;
 
     if (meriteLeDrapeauFFA)
     {
@@ -445,6 +453,8 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         {
             bot->pvpInfo.IsInFFAPvPArea = false;
             bot->UpdateFFAPvPState(true);
+            if (enPaix)
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_FFA_RETIRES_PAIX);
         }
     }
 
@@ -463,10 +473,14 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
         {
             // IsRandomBot (cache global, P-050) seulement pour POSER le drapeau : un bot deja marque sans minuteur
             // l'a ete ici (IsRandomBot a passe), on ne le relit pas a chaque tick.
+            // Paix de zone (19/10/2026) : pas de drapeau JcJ dans une zone en paix ; celui deja pose (sans minuteur)
+            // recoit le minuteur ordinaire, par la branche « n'y a plus droit » ci-dessous. Terme en dernier : sans
+            // paix, un chargement atomique.
             bool const permis = sPlayerbotAIConfig.wildPvpEnabled && !bot->IsFFAPvP() && !GetMaster() &&
                                 !HasGameClientMaster() &&
                                 bot->GetLevel() >= sPlayerbotAIConfig.wildPvpBotsPvpMinLevel &&
-                                !sPlayerbotAIConfig.CoaLieuSansPvp(bot->GetZoneId(), bot->GetAreaId());
+                                !sPlayerbotAIConfig.CoaLieuSansPvp(bot->GetZoneId(), bot->GetAreaId()) &&
+                                !CoaDirecteur::BotEnPaix(bot);
             if (!auJcJ)
             {
                 if (permis && sRandomPlayerbotMgr.IsRandomBot(bot))

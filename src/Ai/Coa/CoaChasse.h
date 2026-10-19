@@ -1534,6 +1534,16 @@ private:
             AbandonnerLaTraque("treve_ou_trajet");
             return false;
         }
+        // Paix de zone (19/10/2026, verbe `paix`) : meme regle -- lue par AcceptUnit au CHOIX de la proie, donc une
+        // traque lancee avant la paix est abandonnee ici, que le chasseur ou la proie soit dans la zone. La traque
+        // d'une prime (traqueImposee) n'est pas touchee : la paix vise le massacre entre bots, pas la prime. Sans
+        // paix : deux chargements atomiques.
+        if (!traqueImposee &&
+            (CoaDirecteur::BotEnPaix(bot) || CoaDirecteur::CiblePaix(cible)))
+        {
+            AbandonnerLaTraque("paix");
+            return false;
+        }
 
         float const distance = bot->GetExactDist(cible);
         float const portee = traqueImposee ? float(sPlayerbotAIConfig.directeurPrimeDetectionYd) : PorteeDetection();
