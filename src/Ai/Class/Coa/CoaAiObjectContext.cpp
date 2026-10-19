@@ -752,6 +752,13 @@ constexpr CoaSurcharge CoaSurcharges[] =
     { 502141, 0, 0, 0, false, MARQUE_ATTAQUE_SOIGNE },
     { 578115, 0, 0, 0, false, MARQUE_PROTEGE_ALLIE },
     { 502292, 0, 0, 0, false, MARQUE_REND_MANA },
+    // I9 du 17/10, ecrit le 19/10 (DIAG-equilibrage-classes-20261017.md, Godblade 42 ; synthese du banc n°3, D1 : lance 1
+    // fois en 24 essais). Embrace the Void 582591 : script lu le 19/10 (AscensionCultistAuras.cpp:120-125, 176-181, 265-280)
+    // -- l'absorbe (aura 69) a pour budget la vie MAXIMALE (effet 1 recalcule), n'absorbe que la part d'un coup qui tuerait
+    // (« covered - health + 1 ») : le bot ne peut pas mourir tant que le budget tient ; a la fin, soin de 50 % (+ 704881)
+    // des degats subis (680769). Force lue dans le DBC : BasePoints 49 + 1 = 50 points, environ 1 % : classe dernier des
+    // gros defensifs (recharge 300 s, admis sous 30 %). Force 100 : le premier sous 30 %. Au classement du lot 1 seulement.
+    { 582591, KIND_DEFENSIVE, 0, 100 },
     // I11 du 17/10 (Reaper 55-57) : Jailer's Bargain 805718 absorbe 30 % de la vie maximale par script (effet 0
     // SCHOOL_ABSORB, BasePoints 0 : force lue 1 point, environ 0,02 %, classe dernier). Force 30.
     { 805718, 0, 0, 30 },
