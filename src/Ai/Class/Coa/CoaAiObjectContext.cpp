@@ -1978,6 +1978,43 @@ bool CoaRefuseEnMouvement(Player* bot, SpellInfo const* info)
     return incantationMs || !info->IsActionAllowedChannel();
 }
 
+/*
+ * D7 du 19/10 (coa-project/docs/SYNTHESE-banc-soins-ia3-20261019.md, Bloodmage 25-27 et 99 ; AiPlayerbot.CoaIa.TracerEcarts) :
+ * 203 « soin_soi rien » et 203 « defensive rien » du Bloodmage avec des listes NON vides, code=0 -- CastFirst ecarte un sort
+ * sans echec consigne (filtres d'avance, recharge globale), et la trace du banc ne disait pas lequel ni pourquoi. Le
+ * dernier ecart silencieux de CE fil est garde ici (sort, motif), remis a zero avec t_bancSoinEchec au debut de chaque
+ * action de soin, et ecrit par BancSoinTracer dans une ligne « rien » (jamais « refus » : le controle 2 du banc ne bouge
+ * pas). Motifs : les codes CoaEcart ci-dessous, ou le SpellCastResult du pre-controle de la cible (portee, vue...).
+ * Ni compteur, ni journal hors banc : deux ecritures par ecart.
+ */
+enum CoaEcart : uint16
+{
+    ECART_ETAT_ARENE          = 1010,  // CoaAreneBloqueParEtat (arene 1v1, duel)
+    ECART_SEULES_CAPACITES    = 1011,  // PLAYER_ALLOW_ONLY_ABILITY
+    ECART_RECHARGE            = 1012,  // recharge propre du sort
+    ECART_AURA_LANCEUR        = 1013,  // CoaRefuseParAuraDuLanceur (etat, aura exigee ou interdite : formes maudites)
+    ECART_FORME_ARME          = 1014,  // CoaRefuseParFormeOuArme
+    ECART_RESSOURCE           = 1015,  // CoaPeutPayer
+    ECART_FAMILIER_CIBLE      = 1016,  // CoaExigeFamilierAbsent ou CoaRefusCibleCertain
+    ECART_DEJA_POSE           = 1017,  // CoaSoinDejaPose
+    ECART_RECHARGE_GLOBALE    = 1018,  // recharge globale : CastFirst s'arrete au premier sort qui la subit
+    ECART_BANC                = 1019,  // sort au banc (echec recent)
+    ECART_TACTIQUE            = 1020   // CoaAreneRefusTactique (arene 1v1, duel)
+};
+
+struct CoaEcartTrace
+{
+    uint32 sort = 0;
+    uint16 code = 0;
+};
+thread_local CoaEcartTrace t_coaEcart;
+
+inline void CoaNoterEcart(SpellInfo const* info, uint16 code)
+{
+    if (sPlayerbotAIConfig.coaIaTracerEcarts)
+        t_coaEcart = { info->Id, code };
+}
+
 // Casts the first ability of the list that passes the strict check on the target. Returns it,
 // or nullptr when none went off. With a usage kind, why each ability failed is counted.
 SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spells, Unit* target,
@@ -2015,16 +2052,25 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // CoaArene L0 : refuse d'avance par l'etat du lanceur (etourdi, en fuite, silence...), voir
         // CoaAreneBloqueParEtat. Ni banc ni echec consigne : le sort n'est pas en cause.
         if (filtreEtat && CoaAreneBloqueParEtat(bot, info))
+        {
+            CoaNoterEcart(info, ECART_ETAT_ARENE);
             continue;
+        }
 
         // Voir `seulementCapacites` : refuse d'avance, ni banc ni echec consigne.
         if (seulementCapacites && !info->HasAttribute(SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE) &&
             !info->HasAttribute(SPELL_ATTR0_PASSIVE))
+        {
+            CoaNoterEcart(info, ECART_SEULES_CAPACITES);
             continue;
+        }
 
         // A spell on cooldown would only fail with SPELL_FAILED_NOT_READY.
         if (bot->HasSpellCooldown(info->Id))
+        {
+            CoaNoterEcart(info, ECART_RECHARGE);
             continue;
+        }
 
         // CoA (10/10/2026 soir, arene 1v1) : un sort qui exige une aura du lanceur absente (CasterAuraSpell : les
         // consommateurs d'Advantage du Ranger -- Skullpiercer, Serrated Shot, Assault, Uncover Weakness -- ou les
@@ -2034,15 +2080,22 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // Banc du 11/10 (tour 7) : aussi CasterAuraState, CasterAuraStateNot et ExcludeCasterAuraSpell, le reste du meme
         // bloc du coeur (CoaRefuseParAuraDuLanceur).
         if (CoaRefuseParAuraDuLanceur(bot, info))
+        {
+            CoaNoterEcart(info, ECART_AURA_LANCEUR);
             continue;
+        }
 
         // Banc d'arene du 10/10 (CoaRefuseParFormeOuArme, CoaPeutPayer) : forme absente, arme requise absente,
         // ressource insuffisante -- refus certains du coeur, ecartes sans banc ni echec consigne : le sort repart des
         // que la forme, l'arme ou la ressource est la (avant : banc de 20 s, 20 s et 5 s).
         if (CoaRefuseParFormeOuArme(bot, info))
+        {
+            CoaNoterEcart(info, ECART_FORME_ARME);
             continue;
+        }
         if (!CoaPeutPayer(bot, info))
         {
+            CoaNoterEcart(info, ECART_RESSOURCE);
             // Survie d'arene (11/10, Sun Cleric 478, match id=93) : les refus faute de mana etaient muets -- 18 s sans un
             // sort, adversaire en vue et a portee. Trace seulement (gladiateur d'arene 1v1) ; le sort reste ecarte.
             if (trace)
@@ -2054,13 +2107,17 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         // etat d'aura, ressource a bruler, rien a dissiper (CoaRefusCibleCertain). Recopies du coeur, ecartes sans banc
         // ni echec consigne : le sort repart des que le familier, l'etat ou l'aura est la.
         if (CoaExigeFamilierAbsent(bot, info) || CoaRefusCibleCertain(bot, info, target))
+        {
+            CoaNoterEcart(info, ECART_FAMILIER_CIBLE);
             continue;
+        }
 
         // Lot 20 (13/10) : soin ou bouclier dont l'aura est deja posee par le bot sur la cible (CoaSoinDejaPose), pour
         // tous les bots CoA. Ecarte sans banc ni echec consigne : il repart des que l'aura tombe. Trace en arene 1v1 et en
         // duel seulement (advTactique).
         if (CoaSoinDejaPose(bot, spell, info, target))
         {
+            CoaNoterEcart(info, ECART_DEJA_POSE);
             if (advTactique)
                 CoaAreneNoterDejaPose(botAI, bot, info, target, trace);
             continue;
@@ -2068,7 +2125,10 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
 
         // The global cooldown blocks every spell alike: try again on a later tick.
         if (bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
+        {
+            CoaNoterEcart(info, ECART_RECHARGE_GLOBALE);
             return nullptr;
+        }
 
         // The bench is posted under the id that was checked, so a failure that belongs to a
         // replacement never sidelines the listed spell: a proc lasting two seconds used to take
@@ -2087,7 +2147,10 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
                 benched.erase(bench);
         }
         if (stillBenched)
+        {
+            CoaNoterEcart(info, ECART_BANC);
             continue;
+        }
 
         // Choix tactiques (CoaAreneRefusTactique) : le coeur accepterait ce sort, mais il ne toucherait pas l'adversaire.
         // Ecarte sans banc ni echec consigne. Hors du cone mais dans son rayon : le bot se tourne (memes gardes que le
@@ -2110,6 +2173,7 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             }
             if (refus != COA_TACTIQUE_AUCUN)
             {
+                CoaNoterEcart(info, ECART_TACTIQUE);
                 CoaAreneNoterRefusTactique(botAI, bot, info, advTactique, refus, trace);
                 continue;
             }
@@ -2129,7 +2193,10 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             pre = CoaPreControleCible(bot, info, target, vueCible);
         }
         if (pre != SPELL_CAST_OK)
+        {
+            CoaNoterEcart(info, uint16(pre));
             continue;
+        }
 
         SpellCastResult const check = StrictCheck(bot, info, target);
         if (check == SPELL_CAST_OK)
@@ -2489,7 +2556,8 @@ void BancSoinTracer(Player* bot, char const* action, SpellInfo const* cast, bool
     else if (t_bancSoinEchec.sort || t_bancSoinEchec.code)
         CoaBancSoin::TracerAction(bot, action, "refus", t_bancSoinEchec.sort, t_bancSoinEchec.code);
     else
-        CoaBancSoin::TracerAction(bot, action, "rien", 0, 0);
+        // D7 (AiPlayerbot.CoaIa.TracerEcarts) : le dernier ecart silencieux de CastFirst, ou 0 0 comme avant.
+        CoaBancSoin::TracerAction(bot, action, "rien", t_coaEcart.sort, t_coaEcart.code);
 }
 
 // Banc des soins, B-4 (17/10, DIAG du 17/10 : « l'action qui lance 572617 pendant le banc n'est pas tracee ») : un sort
@@ -3599,20 +3667,41 @@ bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spe
 {
     auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
     time_t const now = time(nullptr);
+    bool const aligne = sPlayerbotAIConfig.coaIaUtiliteAlignee;
+    /*
+     * D7 du 19/10 (AiPlayerbot.CoaIa.PretCommeCastFirst, sous UtiliteAlignee) : CastFirst S'ARRETE au premier sort de la
+     * liste qui subit la recharge globale (« return nullptr ») ; ce test-ci passait au suivant, et un sort hors recharge
+     * globale plus bas dans la liste rendait l'action « utile » pour un CastFirst qui ne l'atteindrait jamais. Lu au
+     * journal du banc n°3 (essai 7015, Bloodmage 27, 18/10 06:57:02-03 UTC) : Blood Veil 572279 lance, puis deux « defensive
+     * rien » et deux « soin_soi rien » code=0 dans la seconde, liste de soins 504085,562720,504849 -- Sanguine Mend 504085
+     * en tete (StartRecoveryCategory 133) et Blood Curse 562720 sans recharge globale (categorie 0, Spell.dbc lu).
+     * Ordre recopie de CastFirst : le banc se lit APRES la recharge globale.
+     */
+    bool const ordre = aligne && sPlayerbotAIConfig.coaIaPretCommeCastFirst;
     for (Usable const& spell : spells)
     {
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
         if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info) ||
             CoaExigeFamilierAbsent(bot, info) || CoaIaEtourdiRefuse(bot, info))
             continue;
-        if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
+        if (bot->HasSpellCooldown(info->Id))
+            continue;
+        bool const auBanc = IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now);
+        if (auBanc && !ordre)
             continue;
         if (cible && CoaSoinDejaPose(bot, spell, info, cible))
             continue;
         // Lot 4 (AiPlayerbot.CoaIa.UtiliteAlignee) : aussi la recharge globale et les refus certains lus sur la cible,
         // que CastFirst applique (HasReadyAbility). Ni portee ni ligne de vue : trop cheres a chaque passage.
-        if (sPlayerbotAIConfig.coaIaUtiliteAlignee &&
-            ((gcd && bot->GetGlobalCooldownMgr().HasGlobalCooldown(info)) || (cible && CoaRefusCibleCertain(bot, info, cible))))
+        if (aligne && cible && CoaRefusCibleCertain(bot, info, cible))
+            continue;
+        if (aligne && gcd && bot->GetGlobalCooldownMgr().HasGlobalCooldown(info))
+        {
+            if (ordre)
+                return false;
+            continue;
+        }
+        if (auBanc)
             continue;
         return true;
     }
@@ -3859,6 +3948,7 @@ public:
 
         // Banc des soins (S0) : remis a zero ICI, apres le FAILURE_NOTHING ci-dessus (le cas `vide` le dit deja).
         t_bancSoinEchec = BancSoinEchec();
+        t_coaEcart = CoaEcartTrace();
         SpellInfo const* cast = RecordUsage(usage, CastFirst(botAI, bot, spells, target, usage));
         BancSoinTracer(bot, mode == Mode::Group ? "group_heal" : mode == Mode::OverTime ? "hot" : "heal", cast,
                        spells.empty());
@@ -3999,6 +4089,7 @@ public:
             return false;
         std::vector<Usable> const sorts = Candidats(target);
         t_bancSoinEchec = BancSoinEchec();
+        t_coaEcart = CoaEcartTrace();
         SpellInfo const* cast = RecordUsage(USAGE_DEFENSIVE, CastFirst(botAI, bot, sorts, target, USAGE_DEFENSIVE));
         BancSoinTracer(bot, "protection", cast, sorts.empty());
         return cast;
@@ -4065,6 +4156,7 @@ public:
     bool Execute(Event /*event*/) override
     {
         t_bancSoinEchec = BancSoinEchec();   // banc des soins (S0) : refus de CETTE action seulement
+        t_coaEcart = CoaEcartTrace();        // D7 : ecart silencieux de CETTE action seulement
         bool vide = true;                    // aucun sort candidat, ni defensif ni soin sur soi
         // IA soins/survie, lot 3 : paliers de vie, tri par force, soins de zone en dernier recours (CoaIaDefensifs).
         if (critique && !CoaIaSurvieActive(bot))
@@ -4147,6 +4239,7 @@ public:
     bool Execute(Event /*event*/) override
     {
         t_bancSoinEchec = BancSoinEchec();
+        t_coaEcart = CoaEcartTrace();
         std::vector<Usable> const soins = CoaIaSoinsSurSoi(botAI, bot);
         BancSoinListe(botAI, bot, "soin_soi", std::vector<Usable>(), &soins);   // banc des soins, B-4
         SpellInfo const* cast = RecordUsage(USAGE_SOIN_SOI, CastFirst(botAI, bot, soins, bot, USAGE_SOIN_SOI));
@@ -4209,6 +4302,7 @@ public:
     {
         std::vector<Usable> const sorts = CoaRegenManaSorts(botAI, bot);
         t_bancSoinEchec = BancSoinEchec();
+        t_coaEcart = CoaEcartTrace();
         SpellInfo const* cast = CastFirst(botAI, bot, sorts, bot);
         BancSoinTracer(bot, "regen_mana", cast, sorts.empty());
         return cast != nullptr;
@@ -5023,6 +5117,7 @@ public:
             quittee = true;
         }
         t_bancSoinEchec = BancSoinEchec();
+        t_coaEcart = CoaEcartTrace();
         std::vector<Usable> const soins = CoaVenoSoins(botAI, bot);
         SpellInfo const* cast = RecordUsage(USAGE_SOIN_SOI, CastFirst(botAI, bot, soins, bot, USAGE_SOIN_SOI));
         BancSoinTracer(bot, "soin_soi", cast, soins.empty());

@@ -1770,6 +1770,19 @@ AiPlayerbot.CoaIa.AttaqueQuiSoigne = 1
 # Default: 1
 AiPlayerbot.CoaIa.ProtegerAllie = 1
 
+# D7, 19/10 (banc des soins) : une ligne « coa soin action: ... resultat=rien » porte le dernier sort que
+# le bot a ecarte sans le tenter et le motif (codes 1010 a 1020, ou le refus du pre-controle de la cible),
+# au lieu de « sort=0 code=0 ». Rien n'est ecrit hors d'un essai du banc. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.TracerEcarts = 1
+
+# D7, 19/10 (Bloodmage, tours a vide) : le test d'utilite des soins et defensifs s'arrete, comme le
+# lancer, au premier sort de la liste qui attend la recharge globale, au lieu de se dire « utile » pour
+# un sort plus bas que le lancer n'atteint pas. Agit seulement si AiPlayerbot.CoaIa.UtiliteAlignee
+# vaut aussi 1. A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.PretCommeCastFirst = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
