@@ -3250,7 +3250,7 @@ bool CoaIaSoigneurRetient(PlayerbotAI* botAI, Player* bot)
  * (Unit::Attack, hors liste). Hors groupe : rien ne change (« party member to heal » ne rend que lui-meme, et la survie
  * du lot 3 le garde). Bot non soigneur, classes 1 a 11 (GetCoaRole : Dps) : rien ne change.
  */
-bool CoaIaSoigneurPeutSoigner(PlayerbotAI* botAI, Player* bot);
+bool CoaIaSoigneurPeutSoigner(PlayerbotAI* botAI, Player* bot, Player* membre);
 
 bool CoaIaSoigneurNeFrappePas(PlayerbotAI* botAI, Player* bot)
 {
@@ -3264,38 +3264,50 @@ bool CoaIaSoigneurNeFrappePas(PlayerbotAI* botAI, Player* bot)
     {
         Player* member = ref->GetSource();
         // Meme lieu d'abord (P-137 : rien d'un autre fil), puis la vie -- comme CoaIaSoigneurRetient.
+        // Relecture de b5 : seulement si le soigneur PEUT soigner CE membre ; sinon il garde ses attaques.
         if (member && member->IsInWorld() && member->GetMapId() == bot->GetMapId() &&
             (member == bot || bot->IsWithinDistInMap(member, 40.0f)) && member->IsAlive() &&
-            member->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth))
-            // Relecture de b5 : seulement si le soigneur PEUT soigner ; sinon il garde ses attaques.
-            return CoaIaSoigneurPeutSoigner(botAI, bot);
+            member->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth) && CoaIaSoigneurPeutSoigner(botAI, bot, member))
+            return true;
     }
     return false;
 }
 
+bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spells, Unit* cible, bool gcd);
+bool CoaIaHotTenuAilleurs(Player* bot, SpellInfo const* info, uint32 listeId, Unit* cible);
+
 /*
  * Relecture de b5 (19/10) : D2 ne retire les attaques que si le soigneur a au moins un soin (direct, periodique ou de
- * zone, ni controle ni hostile) pret et payable : memes filtres du lanceur que CastFirst (forme, arme, aura, ressource,
- * familier, recharge propre, banc), plus l'etat qui le bloque (etourdi, desoriente, en fuite, reduit au silence ou
- * pacifie : CoaAreneBloqueParEtat, recopie de Spell::CheckCasterAuras). La recharge globale ne compte pas : elle passe.
- * A sec, sous silence ou tous soins en recharge, il frappe comme avant D2.
+ * zone, ni controle ni hostile) qui PARTIRAIT sur le membre blesse `membre` :
+ *   - les filtres de CoaHealAction::Candidats : HoT a cible unique tenu ailleurs (HotUnique), soin reserve au lanceur pour
+ *     un autre membre (CanHealOther), sort qui exclut son lanceur pour lui-meme. Le HoT deja pose par lui est ecarte par
+ *     CoaSoinDejaPose, dans CoaIaUnPret (AuraSurLanceur compris) -- un soin direct qui porte aussi un HoT reste offert,
+ *     comme dans « coa heal » ;
+ *   - ni balise (MARQUE_BALISE : Healing Ward, balises du Tinker) : seul « coa group heal » les pose, pour plusieurs
+ *     blesses -- a un seul blesse, elles ne partent pas ;
+ *   - pas d'etat qui bloque le soigneur (etourdi, desoriente, en fuite, reduit au silence ou pacifie : CoaAreneBloqueParEtat,
+ *     recopie de Spell::CheckCasterAuras) ;
+ *   - puis CoaIaUnPret sur le membre, sans la recharge globale (elle passe) : forme, arme, aura, ressource, familier,
+ *     recharge propre, banc, deja pose, refus certain sur la cible.
+ * A sec, sous silence, tous soins en recharge ou deja poses : il frappe comme avant D2.
  */
-bool CoaIaSoigneurPeutSoigner(PlayerbotAI* botAI, Player* bot)
+bool CoaIaSoigneurPeutSoigner(PlayerbotAI* botAI, Player* bot, Player* membre)
 {
-    auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
-    time_t const now = time(nullptr);
-    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
-             { return (kind & (KIND_HEAL | KIND_HOT | KIND_GROUP_HEAL)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)); }))
-    {
-        SpellInfo const* const info = EffectiveSpell(bot, spell.info);
-        if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info) ||
-            CoaExigeFamilierAbsent(bot, info) || CoaAreneBloqueParEtat(bot, info))
-            continue;
-        if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
-            continue;
-        return true;
-    }
-    return false;
+    bool const surSoi = membre == bot;
+    bool const hotUnique = sPlayerbotAIConfig.coaIaHotUnique;
+    std::vector<Usable> soins = KnownAbilities(botAI, bot, [surSoi](uint16 kind, uint16 marques)
+        {
+            return (kind & (KIND_HEAL | KIND_HOT | KIND_GROUP_HEAL)) && !(kind & (KIND_CONTROL | KIND_HOSTILE)) &&
+                   !(marques & MARQUE_BALISE) &&
+                   (surSoi ? !(marques & MARQUE_PAS_SUR_SOI) : CanHealOther(kind, marques));
+        });
+    soins.erase(std::remove_if(soins.begin(), soins.end(), [bot, membre, hotUnique](Usable const& spell)
+        {
+            SpellInfo const* const info = EffectiveSpell(bot, spell.info);
+            return CoaAreneBloqueParEtat(bot, info) ||
+                   (hotUnique && (spell.kind & KIND_HOT) && CoaIaHotTenuAilleurs(bot, info, spell.info->Id, membre));
+        }), soins.end());
+    return !soins.empty() && CoaIaUnPret(botAI, bot, soins, membre, false);
 }
 
 // Le sort rend-il de la mana a son lanceur ? Marque MARQUE_REND_MANA (surcharge : effet fait par script, Celestial Strike),
