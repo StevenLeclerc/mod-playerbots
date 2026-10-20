@@ -4650,6 +4650,103 @@ public:
     bool isUseful() override { return CoaRegenManaArmee(bot); }
 };
 
+/*
+ * Familier passif (R-20261020-2207, 20/10/2026 : « le witch hunter spe houndmaster avec le chien qui n'attaque jamais »).
+ * Un vrai familier (Pet) invoque par un joueur nait PASSIF : le constructeur de Pet appelle InitCharmInfo, et
+ * CharmInfo::CharmInfo pose REACT_PASSIVE (CharmInfo.cpp:37-41) ; Pet::Create passe par InitEntry, pas par UpdateEntry,
+ * et rien ne rend la posture (Spell::EffectSummonPet ne la pose que pour un lanceur creature, SpellEffects.cpp:3613).
+ * LoadPetFromDB reprend ensuite la posture enregistree (Pet.cpp:348). Les classes natives la corrigent par « new pet »
+ * -> « set pet stance » (strategies Hunter, Warlock...) ; aucune strategie CoA ne le fait. Passif, PetAI ne reagit ni a
+ * OwnerAttacked ni a OwnerAttackedBy (PetAI.cpp:446, 467), et HoundActions n'ouvre son saut que sur une victime
+ * (AscensionWitchHunterSummons.cpp, EVENT_AUTO_LEAP). Mesure le 20/10 : les trois Chiens d'ombre (50124) enregistres sur
+ * Armageddon ont ReactState = 0, les familiers du Tinker (que son script rend defensifs, AscensionTinkerSummons.cpp)
+ * ReactState = 1.
+ *
+ * Correctif : une fois par familier (GUID), s'il est passif, il passe DEFENSIF, comme SetPetStanceAction (PetsAction.cpp)
+ * avec la posture par defaut de l'amont. Defensif ne choisit aucune cible lui-meme : il suit les attaques du maitre et
+ * riposte, les cibles sont jugees par le coeur (PetAI::_CanAttack, CanCreatureAttack) -- rien de plus permis en arene, en
+ * JcJ, en sanctuaire ou en duel qu'au familier d'un joueur humain en posture defensive. Seul bot->GetPet() est touche :
+ * les gardiens et serviteurs (m_Controlled) ont leur posture fixee par leur script et ne sont pas lus.
+ * Le declencheur se desarme des que le familier n'est plus passif : une posture choisie ensuite (« pet passive ») est
+ * gardee jusqu'a la prochaine invocation (nouveau GUID). Option AiPlayerbot.Coa.FamilierDefensif : 0 = avant, 1 = Chien
+ * d'ombre seulement, 2 = tout familier. Fil de l'IA du bot ; le familier est sur sa carte (P-137). Cout : une lecture du
+ * GUID du familier et une comparaison par tick ; une recherche (GetPet) seulement entre l'invocation et le traitement.
+ */
+constexpr uint32 CoaChienDombreEntree = 50124;
+
+Pet* CoaFamilierPassif(Player* bot)
+{
+    uint32 const mode = sPlayerbotAIConfig.coaFamilierDefensif;
+    if (!mode)
+        return nullptr;
+    Pet* pet = bot->GetPet();
+    if (!pet || !pet->IsInWorld() || !pet->IsAlive() || pet->GetMap() != bot->GetMap() ||
+        !pet->HasReactState(REACT_PASSIVE))
+        return nullptr;
+    if (mode == 1 && pet->GetEntry() != CoaChienDombreEntree)
+        return nullptr;
+    return pet;
+}
+
+class CoaFamilierPassifTrigger : public Trigger
+{
+public:
+    CoaFamilierPassifTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa familier passif") {}
+
+    bool IsActive() override
+    {
+        uint32 const mode = sPlayerbotAIConfig.coaFamilierDefensif;
+        if (!mode)
+            return false;
+        // Le GUID du familier est un champ du joueur : aucune recherche tant que le bot n'en a pas, ou que celui-ci a
+        // deja ete traite. Un familier nouveau (invocation, rappel, entree d'arene) a un GUID nouveau et rearme.
+        ObjectGuid const guid = bot->GetPetGUID();
+        if (guid != vu)
+        {
+            vu = guid;
+            arme = guid.IsPet();
+        }
+        if (!arme)
+            return false;
+        Pet* pet = bot->GetPet();
+        if (!pet || !pet->IsInWorld())
+            return false;  // pas encore dans le monde : on relit au tick suivant
+        // Desarme des que le familier n'est plus passif (notre action, ou une posture deja enregistree), ou s'il n'est
+        // pas vise par le mode : une posture choisie ensuite par un maitre reste la sienne jusqu'a la prochaine invocation.
+        if (!pet->HasReactState(REACT_PASSIVE) || (mode == 1 && pet->GetEntry() != CoaChienDombreEntree))
+        {
+            arme = false;
+            return false;
+        }
+        return CoaFamilierPassif(bot) != nullptr;
+    }
+
+private:
+    ObjectGuid vu;
+    bool arme = false;
+};
+
+class CoaFamilierDefensifAction : public Action
+{
+public:
+    CoaFamilierDefensifAction(PlayerbotAI* botAI) : Action(botAI, "coa familier defensif") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        Pet* pet = CoaFamilierPassif(bot);
+        if (!pet)
+            return false;
+        pet->SetReactState(REACT_DEFENSIVE);
+        if (CharmInfo* charmInfo = pet->GetCharmInfo())
+            charmInfo->SetPlayerReactState(REACT_DEFENSIVE);
+        LOG_INFO("playerbots.coa", "coa familier: guid={} classe={} entree={} familier={} posture=defensive avant=passive",
+                 bot->GetGUID().GetCounter(), uint32(bot->getClass()), pet->GetEntry(), pet->GetGUID().GetCounter());
+        return true;
+    }
+
+    bool isUseful() override { return CoaFamilierPassif(bot) != nullptr; }
+};
+
 // Removes a harmful magic, curse, disease or poison effect from the bot or a group member.
 class CoaDispelAction : public Action
 {
@@ -5934,6 +6031,9 @@ public:
         triggers.push_back(new TriggerNode("coa posture survie", { NextAction("coa posture survie", ACTION_HIGH + 8.5f) }));
         triggers.push_back(new TriggerNode("coa veno soin", { NextAction("coa veno soin", ACTION_HIGH + 8.5f) }));
         triggers.push_back(new TriggerNode("coa veno forme", { NextAction("coa veno forme", ACTION_HIGH + 9) }));
+        // R-20261020-2207 : familier passif -> defensif (AiPlayerbot.Coa.FamilierDefensif). Instantane, une fois par
+        // invocation ; sous les defensifs et les interruptions.
+        triggers.push_back(new TriggerNode("coa familier passif", { NextAction("coa familier defensif", ACTION_HIGH + 1) }));
     }
 
 protected:
@@ -6048,6 +6148,9 @@ public:
         // passe par « attack anything » a 4,0 (GrindingStrategy.cpp:25), sur un
         // declencheur different, et n'est donc pas ralenti.
         triggers.push_back(new TriggerNode("coa ambush", { NextAction("coa stealth", AmbushPriority) }));
+        // R-20261020-2207 : le familier invoque hors combat (preparation d'arene, apres une resurrection) passe defensif
+        // avant le premier coup du maitre (AiPlayerbot.Coa.FamilierDefensif). Meme declencheur que dans « coa ».
+        triggers.push_back(new TriggerNode("coa familier passif", { NextAction("coa familier defensif", ACTION_NORMAL + 6) }));
     }
 };
 
@@ -6144,6 +6247,7 @@ public:
         creators["coa drop target"] = &CoaActionFactoryInternal::coa_drop_target;
         creators["coa regen mana"] = &CoaActionFactoryInternal::coa_regen_mana;
         creators["coa protection"] = &CoaActionFactoryInternal::coa_protection;
+        creators["coa familier defensif"] = &CoaActionFactoryInternal::coa_familier_defensif;
     }
 
 private:
@@ -6182,6 +6286,7 @@ private:
     static Action* coa_drop_target(PlayerbotAI* botAI) { return new CoaDropTargetAction(botAI); }
     static Action* coa_regen_mana(PlayerbotAI* botAI) { return new CoaRegenManaAction(botAI); }
     static Action* coa_protection(PlayerbotAI* botAI) { return new CoaProtectionAction(botAI); }
+    static Action* coa_familier_defensif(PlayerbotAI* botAI) { return new CoaFamilierDefensifAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -6201,6 +6306,7 @@ public:
         creators["coa veno forme"] = &CoaTriggerFactoryInternal::coa_veno_forme;
         creators["coa invalid target"] = &CoaTriggerFactoryInternal::coa_invalid_target;
         creators["coa regen mana"] = &CoaTriggerFactoryInternal::coa_regen_mana;
+        creators["coa familier passif"] = &CoaTriggerFactoryInternal::coa_familier_passif;
     }
 
 private:
@@ -6216,6 +6322,7 @@ private:
     static Trigger* coa_veno_forme(PlayerbotAI* botAI) { return new CoaVenoFormeTrigger(botAI); }
     static Trigger* coa_invalid_target(PlayerbotAI* botAI) { return new CoaInvalidTargetTrigger(botAI); }
     static Trigger* coa_regen_mana(PlayerbotAI* botAI) { return new CoaRegenManaTrigger(botAI); }
+    static Trigger* coa_familier_passif(PlayerbotAI* botAI) { return new CoaFamilierPassifTrigger(botAI); }
 };
 
 }  // namespace
