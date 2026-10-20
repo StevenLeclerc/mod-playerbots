@@ -808,6 +808,7 @@ public:
     uint32 coaIaAttaqueQuiSoigneMana; // ia5 (20/10) : I17 ne garde une attaque qui soigne payee en mana qu'au-dessus de ce % de mana ; 0 = toujours
     bool coaIaReserveSurviePalier; // ia5 (20/10) : la survie garde la ressource du defensif d'un palier plus bas (Embrace sous 30 %...)
     bool coaGarderPassifs;       // ia5 (20/10) : Randomize (CancelAuras) garde les auras passives du bot (Harvester, talents...)
+    uint32 coaFamilierDefensif;  // R-20261020-2207 (20/10) : familier (Pet) passif d'un bot CoA -> defensif ; 0 avant, 1 Chien d'ombre, 2 tous
     bool coaIaPostureSurvie;     // ia5 (20/10) : non-tank en combat sous MediumHealth -> la posture qui ouvre ses defensifs, retour hors combat
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;

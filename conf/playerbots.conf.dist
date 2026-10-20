@@ -1815,6 +1815,20 @@ AiPlayerbot.CoaIa.PostureSurvie = 1
 # Default: 0 (20/10/2026, P-289 : allumer seulement apres epreuve d'execution sur le PTR)
 AiPlayerbot.Coa.GarderPassifs = 0
 
+# R-20261020-2207 (20/10/2026) : le familier d'un bot de classe CoA (vrai familier, Pet : SUMMON_PET ou apprivoise)
+# apparait en posture PASSIVE (CharmInfo::CharmInfo, coeur), et rien ne la change pour une classe CoA : les classes
+# natives passent par le declencheur « new pet » -> « set pet stance », absent des strategies CoA. Un familier passif
+# n'attaque jamais (PetAI::OwnerAttacked et OwnerAttackedBy rendent la main) : le Chien d'ombre du Witch Hunter
+# Houndmaster (creature 50124, Houndmaster's Whistle 801343) restait a cote de son maitre en arene.
+# Une fois par familier invoque, s'il est passif, il passe DEFENSIF : il attaque ce que son maitre attaque et ce qui
+# l'attaque, lui ou son maitre ; une posture changee ensuite (commande « pet passive » d'un maitre) est gardee jusqu'a
+# la prochaine invocation. Les gardiens et serviteurs (Necromancer, Lesser Shadowhound...) ne sont PAS touches.
+# 0 = comportement d'avant ; 1 = Chien d'ombre (50124) seulement ; 2 = tout familier passif d'un bot CoA (Tinker,
+# Primalist, Greater Imp...).
+# Lue par PlayerbotAIConfig::Initialize() : `reload config` PUIS `playerbots rndbot reload`.
+# Default: 1
+AiPlayerbot.Coa.FamilierDefensif = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

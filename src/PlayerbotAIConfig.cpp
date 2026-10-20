@@ -1099,6 +1099,8 @@ bool PlayerbotAIConfig::Initialize()
     coaIaReserveSurviePalier = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveSurviePalier", true);
     coaIaPostureSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PostureSurvie", true);
     coaGarderPassifs = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.GarderPassifs", false);
+    // R-20261020-2207 (20/10/2026) : a 0, comportement d'avant (le familier reste dans la posture ou il apparait).
+    coaFamilierDefensif = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.FamilierDefensif", 1), 2);
     // --- fin IA soins/survie
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
