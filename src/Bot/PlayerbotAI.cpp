@@ -1527,6 +1527,19 @@ void PlayerbotAI::HandleBotOutgoingPacket(WorldPacket const& packet)
                 horizontalSpeed = 0.11f;
             verticalSpeed = -verticalSpeed;
 
+            // CoA (20/10/2026, R-20261020-1622, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md § 4.4) : une
+            // projection vers le haut d'au moins ~1,3 m (vz >= 7 ; Whirlpool 526365 : vz 15, 5,8 m) laisse une ligne
+            // « coa vol: » dans CoaBots.log, pour pouvoir dater et placer le prochain « bot qui s'envole ». Le paquet ne
+            // porte pas le sort : on note la vitesse, le sommet (vz^2 / 2g, g = 19,29) et la position du bot.
+            if (sPlayerbotAIConfig.coaTracerVol && verticalSpeed >= 7.0f)
+                LOG_INFO("playerbots.coa",
+                         "coa vol: guid={} nom={} evenement=projection vz={:.1f} vxy={:.1f} sommet_m={:.1f} carte={} zone={} "
+                         "aire={} x={:.1f} y={:.1f} z={:.1f} en_combat={}",
+                         bot->GetGUID().GetCounter(), bot->GetName(), verticalSpeed, horizontalSpeed,
+                         verticalSpeed * verticalSpeed / (2.0f * 19.29f), bot->GetMapId(), bot->GetZoneId(),
+                         bot->GetAreaId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
+                         bot->IsInCombat() ? 1 : 0);
+
             bot->CastStop();
             bot->StopMoving();
             bot->GetMotionMaster()->Clear();

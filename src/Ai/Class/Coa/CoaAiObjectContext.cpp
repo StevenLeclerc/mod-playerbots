@@ -421,6 +421,35 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0, bool 
             effect.ApplyAuraName == SPELL_AURA_HOVER)
             selfHover = true;
 
+    // UN BOT QUI S'ENVOLE (R-20261020-1622, 20/10/2026, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md § 2.7 et
+    // § 4.3 ; AiPlayerbot.Coa.SansFlottement). Le test ci-dessus ne voit que TARGET_UNIT_CASTER et ne retire que la
+    // marque « defensif » : Venomwing Form 520307 (forme permanente, HOVER sur soi) restait KIND_STANCE, et Aether
+    // Current 531512 (FEATHER_FALL + HOVER sur un allie choisi, TargetA 57, donc sur soi aussi) gardait KIND_ALLY_CAST.
+    // Tout sort qui pose HOVER (106) ou FEATHER_FALL (105) sur une cible qui n'est pas un ennemi -- le lanceur, un allie
+    // choisi, une zone d'allies -- n'est plus du tout un sort de bot : plus aucune marque (fin de Classify). Releve du
+    // 20/10 sur les sorts connus d'un personnage (character_spell du Live, du PTR et d'Armageddon), 7 sorts : 520307,
+    // 531512, Mantid Descent 570123 (FEATHER_FALL, TargetA 21), Voice of Bwonsamdi 801716, Illidan's Guile 806109,
+    // 193105 (monture sans nom, 78 + 32 + FEATHER_FALL sur soi ; la monte des bots passe par CheckMountStateAction, pas
+    // par ces marques) et Mechsuit: Activate Jets 801389. EXCEPTION, decidee le 20/10 : un sort de BOND (JUMP 41,
+    // JUMP_DEST 42, LEAP_BACK 138) dont l'aura ne fait que RALENTIR LA CHUTE (FEATHER_FALL, jamais HOVER) garde ses
+    // marques -- l'amorti accompagne le saut, il ne fait pas flotter. Seul 801389 (LEAP_BACK + FEATHER_FALL + explosion
+    // au sol sur les ennemis : capacite offensive et de mobilite) est dans ce cas parmi les sorts connus ; le retirer
+    // aux bots aurait change une rotation. Le joueur humain garde tous ces sorts, rien n'est retire du jeu. Le sort
+    // lui-meme seulement, pas un sort qu'il declenche. Lu au classement des kits (premier bot apres le demarrage) :
+    // `reload config` ne reclasse pas.
+    bool leap = false;
+    for (SpellEffectInfo const& effect : info->Effects)
+        if (effect.Effect == SPELL_EFFECT_JUMP || effect.Effect == SPELL_EFFECT_JUMP_DEST ||
+            effect.Effect == SPELL_EFFECT_LEAP_BACK)
+            leap = true;
+
+    bool selfFloat = false;
+    for (SpellEffectInfo const& effect : info->Effects)
+        if (effect.IsEffect() && IsAuraEffect(effect) &&
+            (effect.ApplyAuraName == SPELL_AURA_HOVER || (effect.ApplyAuraName == SPELL_AURA_FEATHER_FALL && !leap)) &&
+            !IsEnemyTarget(effect.TargetA.GetTarget()) && !IsEnemyTarget(effect.TargetB.GetTarget()))
+            selfFloat = true;
+
     // Only the ability itself: a spell it triggers is not the stance the bot stands in.
     // Same rule for a stance as for a buff: one that incapacitates its caster would be
     // taken out of combat and kept, and the bot with it. No such spell is known by any
@@ -597,6 +626,16 @@ void Classify(SpellInfo const* info, CoaAbility& ability, uint8 depth = 0, bool 
                 ability.dispelMask |= sous.dispelMask;
                 ability.marques |= sous.marques;
             }
+    }
+
+    // R-20261020-1622 : un sort qui fait flotter le bot ou ralentit sa chute n'est jamais lance par lui (selfFloat).
+    // Les deux classements (kindAncien et lot 1) passent ici.
+    if (!depth && selfFloat && sPlayerbotAIConfig.coaSansFlottement)
+    {
+        ability.kind = 0;
+        ability.dispelMask = 0;
+        ability.marques = 0;
+        return;
     }
 
     if (depth || !lot1)

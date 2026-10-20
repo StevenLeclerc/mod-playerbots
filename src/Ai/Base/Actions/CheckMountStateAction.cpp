@@ -704,14 +704,35 @@ int32 CheckMountStateAction::CalculateMasterMountSpeed(Player* master) const
 
     if (!noRealMaster && !bot->InBattleground())
     {
+        // CoA (20/10/2026, R-20261020-1622, AiPlayerbot.Coa.VolZoneVolable) : hors zone ou le bot peut voler,
+        // GetMountType rend 0 (monture au sol) meme si le maitre monte une monture volante. La vitesse de vol du
+        // maitre (149, 279) ferait alors ecarter toutes les montures au sol (TryRandomMountFiltered) : le bot ne
+        // monterait plus. Pour une monture VOLANTE du maitre seulement (meme test que GetMountType), on prend sa vitesse
+        // AU SOL (effets MOD_INCREASE_MOUNTED_SPEED), a defaut le palier au sol du bot ; une monture au sol garde le
+        // calcul d'origine.
+        bool const solSeulement = sPlayerbotAIConfig.coaVolZoneVolable && !BotCanUseFlyingMount(bot);
         auto auraEffects = master->GetAuraEffectsByType(SPELL_AURA_MOUNTED);
         if (!auraEffects.empty())
         {
             SpellInfo const* masterSpell = auraEffects.front()->GetSpellInfo();
             int32 effect1 = masterSpell->Effects[1].BasePoints;
             int32 effect2 = masterSpell->Effects[2].BasePoints;
-            return std::max(effect1, effect2);
+            bool const masterVolant =
+                masterSpell->Effects[1].ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED ||
+                masterSpell->Effects[2].ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED;
+            if (!solSeulement || !masterVolant)
+                return std::max(effect1, effect2);
+
+            int32 ground = -1;
+            for (SpellEffectInfo const& effect : masterSpell->Effects)
+                if (effect.ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED)
+                    ground = std::max(ground, effect.BasePoints);
+            if (ground >= 0)
+                return ground;
+            return (ridingSkill >= 150) ? 99 : 59;
         }
+        else if (solSeulement && (masterInShapeshiftForm == FORM_FLIGHT_EPIC || masterInShapeshiftForm == FORM_FLIGHT))
+            return (ridingSkill >= 150) ? 99 : 59;
         else if (masterInShapeshiftForm == FORM_FLIGHT_EPIC)
             return 279;
         else if (masterInShapeshiftForm == FORM_FLIGHT)
@@ -735,6 +756,13 @@ uint32 CheckMountStateAction::GetMountType(Player* master) const
 
     if (noRealMaster)
         return (!bot->InBattleground() && BotCanUseFlyingMount(bot)) ? 1 : 0;
+
+    // CoA (20/10/2026, R-20261020-1622, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md § 2.6) : avec un maitre, le
+    // type suivait sa monture SANS test de zone -- un maitre sur l'une des 212 montures volantes sans ONLY_FLYING_AREAS
+    // faisait monter au bot une monture volante en Azeroth, et UpdateMovementState le faisait voler a ses cotes. Le bot
+    // ne prend une monture volante que s'il peut lui-meme voler ici, maitre ou pas (AiPlayerbot.Coa.VolZoneVolable).
+    if (sPlayerbotAIConfig.coaVolZoneVolable && (bot->InBattleground() || !BotCanUseFlyingMount(bot)))
+        return 0;
 
     auto auraEffects = master->GetAuraEffectsByType(SPELL_AURA_MOUNTED);
     if (!auraEffects.empty())
