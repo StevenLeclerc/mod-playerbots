@@ -1783,6 +1783,27 @@ AiPlayerbot.CoaIa.TracerEcarts = 1
 # Default: 1
 AiPlayerbot.CoaIa.PretCommeCastFirst = 1
 
+# ia5, 20/10 (banc des soins n°4, Cultist Heretic) : sous la reserve du soigneur (ReserveSoigneur) et D2
+# (SoigneurNeFrappePas), une attaque qui soigne un allie ET coute de la mana (AttaqueQuiSoigne : Gaze of C'Thun,
+# Blade of the Empire) n'est gardee qu'avec au moins ce pourcentage de mana. 0 : toujours gardee (I17 tel quel).
+# Default: 80
+AiPlayerbot.CoaIa.AttaqueQuiSoigneMana = 80
+
+# ia5, 20/10 (Witch Doctor 4, Cultist Godblade 42) : un bot ni tank ni soigneur, au-dessus de 30 % de vie, ne lance
+# pas un defensif ou un soin sur soi paye en mana (ou en energie si ReserveToutesRessources = 1) qui laisserait
+# moins que le cout du plus cher de ses defensifs d'un palier de vie plus bas (Embrace the Void, Shadowstalker...).
+# N'agit qu'avec la reserve D1 (ReserveDefensif, et ReserveDefensifSeuil ou ReserveToutesRessources non nul).
+# A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.ReserveSurviePalier = 1
+
+# ia5, 20/10 (Guardian 19 et 20) : un bot ni tank ni soigneur, en combat sous AiPlayerbot.MediumHealth (ou en perte
+# rapide), sans defensif pret dans sa posture, prend la posture qui ouvre ses defensifs (Tower Formation pour
+# Raise Shield, Turn The Blade, Brace) ; hors combat, « coa buff » remet sa posture d'origine. A 0 : comportement
+# d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.PostureSurvie = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.

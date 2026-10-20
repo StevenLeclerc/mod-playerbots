@@ -805,6 +805,9 @@ public:
     bool coaIaProtegerAllie;     // I17 (19/10) : soigneur, « coa protection » pose Void Shield / Hand of Yogg-Saron sur l'allie
     bool coaIaTracerEcarts;      // D7 (19/10) : banc des soins, ligne « rien » avec le dernier ecart silencieux de CastFirst
     bool coaIaPretCommeCastFirst; // D7 (19/10) : CoaIaUnPret s'arrete a la recharge globale comme CastFirst (tours a vide)
+    uint32 coaIaAttaqueQuiSoigneMana; // ia5 (20/10) : I17 ne garde une attaque qui soigne payee en mana qu'au-dessus de ce % de mana ; 0 = toujours
+    bool coaIaReserveSurviePalier; // ia5 (20/10) : la survie garde la ressource du defensif d'un palier plus bas (Embrace sous 30 %...)
+    bool coaIaPostureSurvie;     // ia5 (20/10) : non-tank en combat sous MediumHealth -> la posture qui ouvre ses defensifs, retour hors combat
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;
     bool autoDoQuests;

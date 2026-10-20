@@ -1093,6 +1093,11 @@ bool PlayerbotAIConfig::Initialize()
     coaIaProtegerAllie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ProtegerAllie", true);
     coaIaTracerEcarts = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.TracerEcarts", true);
     coaIaPretCommeCastFirst = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PretCommeCastFirst", true);
+    // ia5 (20/10/2026, banc des soins n°4) : a 0, comportement d'avant.
+    coaIaAttaqueQuiSoigneMana =
+        std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaIa.AttaqueQuiSoigneMana", 80), 100);
+    coaIaReserveSurviePalier = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveSurviePalier", true);
+    coaIaPostureSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PostureSurvie", true);
     // --- fin IA soins/survie
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);
