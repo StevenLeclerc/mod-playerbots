@@ -4872,7 +4872,95 @@ void PlayerbotFactory::InitGlyphs(bool increment)
     bot->SendTalentsInfoData(false);
 }
 
-void PlayerbotFactory::CancelAuras() { bot->RemoveAllAuras(); }
+/*
+ * ia5 (20/10/2026, AiPlayerbot.Coa.GarderPassifs, defaut 1) : Randomize (ligne `CancelAuras();`) retirait TOUTES les auras
+ * par Unit::RemoveAllAuras, passives comprises : passifs de specialisation (Harvester 92145 du Reaper Harvest), talents,
+ * passifs de classe et d'objet. Rien ne les reposait : Player::_addSpell / learnSpell rendent faux pour un sort deja connu
+ * (« tries to learn already active spell »), et les sorts appris par talent passent par _addTalentAurasAndSpells, appele
+ * au seul apprentissage. Elles ne revenaient qu'a la reconnexion (Player::_LoadAuras, puis les passifs a la connexion).
+ * Mesure du banc n°4 : Blood Harvest 504565 (soin de Harvester) 17 467 PV par essai B1 au banc n°3, 0 sur 20 essais au
+ * banc n°4 pour les memes bots ; bot 40 sans un soin de Harvester depuis le 18/10 21:58 UTC. Declencheurs : l'evenement
+ * « randomize » (8 h ; pose aussi par la preparation du banc des soins) et les remises a neuf de masse.
+ * Regle, recopiee du coeur (Unit::RemoveArenaAuras et Unit::RemoveAllAurasOnDeath gardent `aura->IsPassive()`) : on garde
+ * l'aura possedee ET lancee par le bot lui-meme qui est passive, ou cachee et liee a une forme (SPELL_ATTR0_DO_NOT_DISPLAY
+ * avec Stances : la seconde famille que _addSpell pose a l'apprentissage). Tout le reste part comme avant : buffs, debuffs,
+ * formes, montures, auras posees par d'autres. Un passif dont le sort est desappris (ClearSpells, reinitialisation des
+ * talents) est retire par Player::removeSpell lui-meme, avant ou apres ce point. A 0 : RemoveAllAuras, comportement d'avant.
+ */
+void PlayerbotFactory::CancelAuras()
+{
+    if (!sPlayerbotAIConfig.coaGarderPassifs)
+    {
+        bot->RemoveAllAuras();
+        return;
+    }
+    ObjectGuid const soi = bot->GetGUID();
+    auto garder = [soi, this](Aura const* aura)
+    {
+        SpellInfo const* info = aura->GetSpellInfo();
+        return aura->GetOwner() == bot && aura->GetCasterGUID() == soi && info &&
+               (info->IsPassive() || (info->HasAttribute(SPELL_ATTR0_DO_NOT_DISPLAY) && info->Stances));
+    };
+    // Comme RemoveAllAuras : une suppression peut en poser une autre ; quelques passes au plus.
+    for (uint8 passe = 0; passe < 4; ++passe)
+    {
+        bot->RemoveAppliedAuras([&garder](AuraApplication const* app) { return !garder(app->GetBase()); });
+        bot->RemoveOwnedAuras([&garder](Aura const* aura) { return !garder(aura); });
+        bool reste = false;
+        for (auto const& [id, app] : bot->GetAppliedAuras())
+            if (!garder(app->GetBase()))
+            {
+                reste = true;
+                break;
+            }
+        if (!reste)
+            for (auto const& [id, aura] : bot->GetOwnedAuras())
+                if (!garder(aura))
+                {
+                    reste = true;
+                    break;
+                }
+        if (!reste)
+            break;
+    }
+    // Les passifs deja perdus par une remise a neuf d'avant ce correctif (le bot ne s'est pas reconnecte depuis) : reposes
+    // comme a l'apprentissage, CastSpell(bot, id, true) (Player::_addSpell, branche passive).
+    for (uint32 const id : PassifsSansAura(bot))
+        bot->CastSpell(bot, id, true);
+}
+
+std::vector<uint32> PlayerbotFactory::PassifsSansAura(Player* bot)
+{
+    std::vector<uint32> manquants;
+    if (!bot)
+        return manquants;
+    for (auto const& [id, ps] : bot->GetSpellMap())
+    {
+        if (!ps || ps->State == PLAYERSPELL_REMOVED || !ps->Active || !(ps->specMask & bot->GetActiveSpecMask()))
+            continue;
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
+        if (!info || info->IsDeprecatedForPlayers ||
+            !(info->IsPassive() || (info->HasAttribute(SPELL_ATTR0_DO_NOT_DISPLAY) && info->Stances)))
+            continue;
+        // Le sort enseigne d'autres sorts (SPELL_EFFECT_LEARN_SPELL) : _addSpell ne le lance pas, il refuse meme de
+        // l'ajouter. Seul un sort qui pose une aura est attendu sur le bot.
+        bool aura = false;
+        bool apprend = false;
+        for (SpellEffectInfo const& effet : info->Effects)
+        {
+            // Une aura posee sur le bot lui-meme (lanceur, ou zone qui l'inclut) : un passif qui vise le familier
+            // (TARGET_UNIT_PET) n'est pas attendu sur le bot, et serait sinon « manquant » a chaque fois.
+            uint32 const cible = effet.TargetA.GetTarget();
+            aura = aura || effet.IsAreaAuraEffect() || (effet.IsAura() && (cible == TARGET_UNIT_CASTER || cible == 0));
+            apprend = apprend || effet.Effect == SPELL_EFFECT_LEARN_SPELL;
+        }
+        if (!aura || apprend || !bot->IsNeedCastPassiveSpellAtLearn(info) || !bot->HasItemFitToSpellRequirements(info) ||
+            bot->HasAura(id))
+            continue;
+        manquants.push_back(id);
+    }
+    return manquants;
+}
 
 void PlayerbotFactory::InitInventory()
 {

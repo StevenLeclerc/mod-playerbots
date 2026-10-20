@@ -1675,6 +1675,17 @@ public:
                      " niveau_apres={} spe_origine={} spe={} role={} set_fixe={} set_attendus={} set_poses={} pv_max={}",
                      id, m.guid, m.nom, uint32(m.classe), m.niveauAvant, uint32(b->GetLevel()), m.speOrigine, m.spe,
                      uint32(m.role), p.setFixe ? 1 : 0, attendus, poses, uint32(b->GetMaxHealth()));
+            // ia5 (20/10) : passifs connus SANS leur aura (PlayerbotFactory::PassifsSansAura : meme jugement que
+            // Player::_addSpell). Lecture seule, apres la remise a neuf eventuelle ; `ids` : les 20 premiers. Preuve du
+            // correctif AiPlayerbot.Coa.GarderPassifs au banc suivant : connus_sans_aura=0.
+            {
+                std::vector<uint32> const manquants = PlayerbotFactory::PassifsSansAura(b);
+                std::string ids;
+                for (size_t k = 0; k < manquants.size() && k < 20; ++k)
+                    ids += (k ? "," : "") + std::to_string(manquants[k]);
+                LOG_INFO("playerbots.coa", "coa soin passifs: essai={} guid={} connus_sans_aura={} ids={}", id, m.guid,
+                         uint32(manquants.size()), ids.empty() ? "-" : ids);
+            }
             // B-7 (17/10) : l'arbre PORTE pendant l'essai, lu ici et non apres le banc (le bot rendu reprend sa
             // specialisation d'origine). `natif=0` : la specialisation a ete imposee a un bot d'une autre. `entrees`
             // en dernier (la plus longue).
