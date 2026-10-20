@@ -4731,7 +4731,7 @@ uint32 CoaPostureDeRole(PlayerbotAI* botAI, Player* bot, std::vector<Usable> con
  * changee par un humain ou une autre regle n'est jamais defaite) :
  *   - en combat, au calme : vie >= almostFullHealth, aucune perte rapide depuis CoaPostureCalmeMs, et au moins
  *     CoaPostureCalmeMs apres la bascule (hysteresis : pas d'aller-retour A -> B -> A dans la meme alerte) ;
- *   - hors combat, par « coa buff » (CoaPostureRetour), abandonne 30 s apres la premiere demande ; sans posture d'origine,
+ *   - hors combat, par « coa buff » (CoaPostureRetour) ; abandon 60 s apres la premiere demande, ou sans posture d'origine :
  *     la posture prise est retiree et la regle d'avant (premiere posture du kit) s'applique.
  * Tant qu'une bascule est notee, aucune autre n'a lieu. Prix : la posture de survie peut couter des degats (Tower
  * Formation : -10 %) jusqu'au retour. A 0 : rien ne change.
@@ -4772,6 +4772,9 @@ uint32 CoaPostureSurviePlanifier(PlayerbotAI* botAI, Player* bot, Usable* postur
 
     if (etat.active)
     {
+        // Relecture de 7d : de retour en combat, une demande de retour hors combat en cours est oubliee (son delai
+        // d'abandon repartira de zero au prochain hors combat).
+        etat.retourMs = 0;
         // Posture changee par un autre (humain, autre regle) ou perdue : la bascule est oubliee, rien n'est defait.
         if (!bot->HasAura(etat.survie))
         {
@@ -4852,9 +4855,11 @@ uint32 CoaPostureSurviePlanifier(PlayerbotAI* botAI, Player* bot, Usable* postur
 
 // Hors combat (« coa buff ») : la posture d'origine a remettre, si la survie a pris une posture et que le bot la porte encore.
 // La note tient jusqu'au retour (la posture prise disparait : faite, ou changee par un autre) ou CoaPostureAbandonMs apres la
-// premiere demande : un refus repete ne boucle pas (et la garde `recent` de « coa buff » espace deja les essais). Sans
-// posture d'origine, la posture prise est retiree : la regle d'avant (premiere posture du kit) reprend la main. 0 sinon.
-constexpr uint32 CoaPostureAbandonMs = 30 * IN_MILLISECONDS;
+// premiere demande hors combat : un refus repete ne boucle pas. A l'abandon, comme sans posture d'origine, la posture prise
+// est RETIREE : la regle d'avant (premiere posture du kit) reprend la main, au lieu de laisser le bot en posture de survie
+// (relecture de 7d). Le delai vaut deux fois StanceRecastSeconds (30 s) : la garde `recent` de « coa buff » peut retarder
+// le premier essai de la posture d'origine jusqu'a 30 s ; a 30 s pile, l'abandon tombait avant ou avec cet essai. 0 sinon.
+constexpr uint32 CoaPostureAbandonMs = 2 * uint32(StanceRecastSeconds) * IN_MILLISECONDS;
 
 uint32 CoaPostureRetour(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& /*spells*/)
 {
@@ -4880,6 +4885,7 @@ uint32 CoaPostureRetour(PlayerbotAI* botAI, Player* bot, std::vector<Usable> con
         etat.retourMs = maintenant;
     else if (getMSTimeDiff(etat.retourMs, maintenant) >= CoaPostureAbandonMs)
     {
+        bot->RemoveAurasDueToSpell(etat.survie);
         etat = CoaAiObjectContext::CoaPostureSurvieEtat();
         return 0;
     }
