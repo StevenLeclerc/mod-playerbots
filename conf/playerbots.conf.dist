@@ -1786,6 +1786,8 @@ AiPlayerbot.CoaIa.PretCommeCastFirst = 1
 # ia5, 20/10 (banc des soins n°4, Cultist Heretic) : sous la reserve du soigneur (ReserveSoigneur) et D2
 # (SoigneurNeFrappePas), une attaque qui soigne un allie ET coute de la mana (AttaqueQuiSoigne : Gaze of C'Thun,
 # Blade of the Empire) n'est gardee qu'avec au moins ce pourcentage de mana. 0 : toujours gardee (I17 tel quel).
+# Couplage : 80 = AiPlayerbot.CoaIa.ReserveSoigneurMana ; a valeurs egales, la reserve C4 ne garde l'attaque qui soigne
+# que lorsqu'elle retient pour un membre blesse, jamais lorsqu'elle retient pour la mana. Changer l'un, revoir l'autre.
 # Default: 80
 AiPlayerbot.CoaIa.AttaqueQuiSoigneMana = 80
 
@@ -1793,16 +1795,25 @@ AiPlayerbot.CoaIa.AttaqueQuiSoigneMana = 80
 # pas un defensif ou un soin sur soi paye en mana (ou en energie si ReserveToutesRessources = 1) qui laisserait
 # moins que le cout du plus cher de ses defensifs d'un palier de vie plus bas (Embrace the Void, Shadowstalker...).
 # N'agit qu'avec la reserve D1 (ReserveDefensif, et ReserveDefensifSeuil ou ReserveToutesRessources non nul).
+# Aussi : la reserve D1 ne compte plus deux fois un sort a la fois defensif et soin sur soi (Granite Resolve avec K2).
 # A 0 : comportement d'avant.
 # Default: 1
 AiPlayerbot.CoaIa.ReserveSurviePalier = 1
 
 # ia5, 20/10 (Guardian 19 et 20) : un bot ni tank ni soigneur, en combat sous AiPlayerbot.MediumHealth (ou en perte
-# rapide), sans defensif pret dans sa posture, prend la posture qui ouvre ses defensifs (Tower Formation pour
-# Raise Shield, Turn The Blade, Brace) ; hors combat, « coa buff » remet sa posture d'origine. A 0 : comportement
-# d'avant.
+# rapide), sans defensif pret dans sa posture, prend la posture qui ouvre ses defensifs et les rend payables
+# (Tower Formation pour Raise Shield, Turn The Blade, Brace). Retour a la posture d'origine en combat au calme
+# (vie >= AiPlayerbot.AlmostFullHealth, 10 s sans perte rapide) ou hors combat par « coa buff » ; jamais une posture
+# que la survie n'a pas prise elle-meme. A 0 : comportement d'avant.
 # Default: 1
 AiPlayerbot.CoaIa.PostureSurvie = 1
+
+# ia5, 20/10 (Reaper Harvest, tous les bots) : la remise a neuf d'un bot (PlayerbotFactory::Randomize, evenement
+# « randomize » de 8 h, preparation du banc des soins) garde ses auras passives (passifs de specialisation, talents,
+# objets) au lieu de toutes les retirer, et repose celles deja perdues (sort connu, passif, aura absente). A 0 :
+# RemoveAllAuras, comportement d'avant (les passifs ne revenaient qu'a la reconnexion).
+# Default: 1
+AiPlayerbot.Coa.GarderPassifs = 1
 
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
