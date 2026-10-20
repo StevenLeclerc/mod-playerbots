@@ -4881,9 +4881,10 @@ void PlayerbotFactory::InitGlyphs(bool increment)
  * Mesure du banc n°4 : Blood Harvest 504565 (soin de Harvester) 17 467 PV par essai B1 au banc n°3, 0 sur 20 essais au
  * banc n°4 pour les memes bots ; bot 40 sans un soin de Harvester depuis le 18/10 21:58 UTC. Declencheurs : l'evenement
  * « randomize » (8 h ; pose aussi par la preparation du banc des soins) et les remises a neuf de masse.
- * Regle, recopiee du coeur (Unit::RemoveArenaAuras et Unit::RemoveAllAurasOnDeath gardent `aura->IsPassive()`) : on garde
- * l'aura possedee ET lancee par le bot lui-meme qui est passive, ou cachee et liee a une forme (SPELL_ATTR0_DO_NOT_DISPLAY
- * avec Stances : la seconde famille que _addSpell pose a l'apprentissage). Tout le reste part comme avant : buffs, debuffs,
+ * Regle INSPIREE du coeur (Unit::RemoveArenaAuras et Unit::RemoveAllAurasOnDeath gardent toute aura `IsPassive()`) mais
+ * plus stricte : on ne garde que l'aura possedee ET lancee par le bot lui-meme qui est passive, ou cachee et liee a une
+ * forme (SPELL_ATTR0_DO_NOT_DISPLAY avec Stances : la seconde famille que _addSpell pose a l'apprentissage). Une aura
+ * passive posee par un autre part, comme avant. Tout le reste part comme avant : buffs, debuffs,
  * formes, montures, auras posees par d'autres. Un passif dont le sort est desappris (ClearSpells, reinitialisation des
  * talents) est retire par Player::removeSpell lui-meme, avant ou apres ce point. A 0 : RemoveAllAuras, comportement d'avant.
  */
@@ -4934,31 +4935,41 @@ std::vector<uint32> PlayerbotFactory::PassifsSansAura(Player* bot)
     std::vector<uint32> manquants;
     if (!bot)
         return manquants;
-    for (auto const& [id, ps] : bot->GetSpellMap())
+    std::unordered_set<uint32> vus;
+    auto examiner = [bot, &manquants, &vus](uint32 id)
     {
-        if (!ps || ps->State == PLAYERSPELL_REMOVED || !ps->Active || !(ps->specMask & bot->GetActiveSpecMask()))
-            continue;
+        if (!vus.insert(id).second)
+            return;
         SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
         if (!info || info->IsDeprecatedForPlayers ||
             !(info->IsPassive() || (info->HasAttribute(SPELL_ATTR0_DO_NOT_DISPLAY) && info->Stances)))
-            continue;
+            return;
         // Le sort enseigne d'autres sorts (SPELL_EFFECT_LEARN_SPELL) : _addSpell ne le lance pas, il refuse meme de
-        // l'ajouter. Seul un sort qui pose une aura est attendu sur le bot.
+        // l'ajouter. Seul un sort qui pose une aura SUR LE BOT est attendu : lanceur (ou cible 0), ou zone qui l'inclut.
+        // Ni un passif qui vise le familier (TARGET_UNIT_PET), ni une aura de zone sur les seuls ennemis
+        // (APPLY_AREA_AURA_ENEMY : le coeur ne la pose pas sur son proprietaire) -- relances a chaque remise a neuf,
+        // « connus_sans_aura » ne descendrait jamais a 0.
         bool aura = false;
         bool apprend = false;
         for (SpellEffectInfo const& effet : info->Effects)
         {
-            // Une aura posee sur le bot lui-meme (lanceur, ou zone qui l'inclut) : un passif qui vise le familier
-            // (TARGET_UNIT_PET) n'est pas attendu sur le bot, et serait sinon « manquant » a chaque fois.
             uint32 const cible = effet.TargetA.GetTarget();
-            aura = aura || effet.IsAreaAuraEffect() || (effet.IsAura() && (cible == TARGET_UNIT_CASTER || cible == 0));
+            aura = aura || (effet.IsAreaAuraEffect() && effet.Effect != SPELL_EFFECT_APPLY_AREA_AURA_ENEMY) ||
+                   (effet.IsAura() && !effet.IsAreaAuraEffect() && (cible == TARGET_UNIT_CASTER || cible == 0));
             apprend = apprend || effet.Effect == SPELL_EFFECT_LEARN_SPELL;
         }
         if (!aura || apprend || !bot->IsNeedCastPassiveSpellAtLearn(info) || !bot->HasItemFitToSpellRequirements(info) ||
             bot->HasAura(id))
-            continue;
+            return;
         manquants.push_back(id);
-    }
+    };
+    for (auto const& [id, ps] : bot->GetSpellMap())
+        if (ps && ps->State != PLAYERSPELL_REMOVED && ps->Active && (ps->specMask & bot->GetActiveSpecMask()))
+            examiner(id);
+    // Les talents sont gardes a part (m_talents), comme les parcourt Player::ApplyItemDependentAuras.
+    for (auto const& [id, talent] : bot->GetTalentMap())
+        if (talent && talent->State != PLAYERSPELL_REMOVED && talent->IsInSpec(bot->GetActiveSpec()))
+            examiner(id);
     return manquants;
 }
 
