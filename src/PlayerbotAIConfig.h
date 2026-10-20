@@ -818,6 +818,7 @@ public:
     bool coaIaPretCommeCastFirst; // D7 (19/10) : CoaIaUnPret s'arrete a la recharge globale comme CastFirst (tours a vide)
     uint32 coaIaAttaqueQuiSoigneMana; // ia5 (20/10) : I17 ne garde une attaque qui soigne payee en mana qu'au-dessus de ce % de mana ; 0 = toujours
     bool coaIaReserveSurviePalier; // ia5 (20/10) : la survie garde la ressource du defensif d'un palier plus bas (Embrace sous 30 %...)
+    bool coaGarderPassifs;       // ia5 (20/10) : Randomize (CancelAuras) garde les auras passives du bot (Harvester, talents...)
     bool coaIaPostureSurvie;     // ia5 (20/10) : non-tank en combat sous MediumHealth -> la posture qui ouvre ses defensifs, retour hors combat
     // --- fin IA soins/survie
     uint32 lootLogMinQuality;

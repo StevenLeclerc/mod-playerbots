@@ -1101,6 +1101,7 @@ bool PlayerbotAIConfig::Initialize()
         std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaIa.AttaqueQuiSoigneMana", 80), 100);
     coaIaReserveSurviePalier = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveSurviePalier", true);
     coaIaPostureSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PostureSurvie", true);
+    coaGarderPassifs = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.GarderPassifs", true);
     // --- fin IA soins/survie
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);

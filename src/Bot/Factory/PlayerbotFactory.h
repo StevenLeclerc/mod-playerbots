@@ -81,6 +81,8 @@ public:
     void InitPet();
     void InitAmmo();
     static uint32 CalcMixedGearScore(uint32 gs, uint32 quality);
+    // ia5 (20/10) : passifs connus dont l'aura manque (meme jugement que Player::_addSpell a l'apprentissage).
+    static std::vector<uint32> PassifsSansAura(Player* bot);
     static void DestroyEquippedGear(Player* bot);
     static void AutoGear(Player* bot, uint32 itemQuality, uint32 ilvl, bool incremental, bool secondChance = false,
                         bool applyFinishers = true);
