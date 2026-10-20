@@ -319,6 +319,31 @@ public:
         std::array<int32, 7> reserve = {};
     };
     CoaReserveCache reserveSurvie;
+
+    // ia5 (20/10, AiPlayerbot.CoaIa.PostureSurvie) : la posture prise par la survie (CoaPostureSurviePlanifier,
+    // CoaAiObjectContext.cpp). `active` n'est pose QUE par cette bascule : le retour (en combat au calme, ou par « coa buff »
+    // hors combat) ne defait jamais une posture choisie par un humain ou par une autre regle, borne dans le temps.
+    // Ecrit et lu par la seule IA de ce bot, sans verrou.
+    struct CoaPostureSurvieEtat
+    {
+        bool active = false;
+        uint32 origine = 0;          // posture portee avant la bascule (0 : aucune)
+        uint32 survie = 0;           // posture prise par la survie
+        uint32 priseMs = 0;          // getMSTime() de la bascule
+        uint32 dernierePerteMs = 0;  // getMSTime() de la derniere perte rapide vue depuis la bascule
+        uint32 retourMs = 0;         // getMSTime() de la premiere demande de retour hors combat (abandon apres 30 s)
+    };
+    CoaPostureSurvieEtat postureSurvie;
+
+    // ia5 (20/10, relecture de 7d) : CoaIaReservePalier en cache au plus CoaIaReserveCacheMs, avec les entrees du calcul.
+    struct CoaReservePalierCache
+    {
+        bool valide = false;
+        uint32 ms = 0;
+        uint8 palier = 0;                     // CoaIaPalierDeVie : critique, bas, moyen, haut ; +4 en perte rapide
+        std::array<int32, 7> reserve = {};
+    };
+    CoaReservePalierCache reservePalier;
 };
 
 #endif

@@ -1525,6 +1525,10 @@ bool SavingManaForHeals(PlayerbotAI* botAI, Player* bot)
  * mana, Eldritch Mending 574325 41 (journal du 19/10) ; Blade of Yogg-Saron 500748 n'a rien soigne pour le bot 14. Une
  * attaque qui soigne, payee en mana, n'est gardee par la reserve du soigneur (C4) et par D2 qu'avec au moins ce % de mana.
  * 0 : toujours gardee (I17 tel quel). Un bot sans mana, ou une attaque qui ne coute pas de mana, n'est pas touche.
+ * COUPLAGE (relecture de 7d) : le defaut 80 est celui d'AiPlayerbot.CoaIa.ReserveSoigneurMana. La reserve C4 retient la
+ * mana quand un membre est sous almostFullHealth OU que la mana est sous ce seuil ; a 80 = 80, l'attaque qui soigne n'est
+ * donc gardee par C4 que dans le premier cas (groupe blesse, mana encore haute), et jamais quand C4 retient pour la mana.
+ * Baisser ReserveSoigneurMana sans baisser ce seuil retire les attaques qui soignent entre les deux valeurs.
  */
 bool CoaIaAttaqueQuiSoigneManaOk(Player* bot)
 {
@@ -3699,8 +3703,13 @@ std::array<int32, MAX_POWERS> CoaIaReserveCalculer(PlayerbotAI* botAI, Player* b
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; }))
         if (int32 const cout = coutPret(spell, type))
             defensif[type] = std::max(defensif[type], cout);
-    for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind)
-             { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)); }))
+    // ia5 (relecture de 7d, sous AiPlayerbot.CoaIa.ReserveSurviePalier) : un sort deja compte comme defensif ne compte pas
+    // une seconde fois comme soin. Granite Resolve 520229 devient aussi soin sur soi avec K2 (HEAL_PCT, mod-ascension-compat
+    // 75d4645) : seul sort de survie du Runemaster, il aurait double la reserve (defensif + « soin » = deux fois son cout).
+    bool const sansDoublon = d1 && sPlayerbotAIConfig.coaIaReserveSurviePalier;
+    for (Usable const& spell : KnownAbilities(botAI, bot, [sansDoublon](uint16 kind)
+             { return (kind & KIND_HEAL) && !(kind & (KIND_GROUP_HEAL | KIND_CONTROL | KIND_HOSTILE)) &&
+                      !(sansDoublon && (kind & KIND_DEFENSIVE)); }))
         if (int32 const cout = coutPret(spell, type))
             soin[type] = soin[type] ? std::min(soin[type], cout) : cout;
     std::array<int32, MAX_POWERS> reserve{};
@@ -3787,11 +3796,14 @@ void CoaIaReserveSurvie(PlayerbotAI* botAI, Player* bot, std::vector<Usable>& us
  * isUseful de « coa defensive » et de « coa soin soi » (sans quoi l'action se dirait utile pour une liste vide).
  * A 0, ou sans D1 (ReserveDefensifSeuil 0 et ReserveToutesRessources 0 : mana seule) : rien ne change.
  */
-std::array<int32, MAX_POWERS> CoaIaReservePalier(PlayerbotAI* botAI, Player* bot, float pv, bool perte)
+std::array<int32, MAX_POWERS> CoaIaReservePalierCalculer(PlayerbotAI* botAI, Player* bot, float pv, bool perte)
 {
     std::array<int32, MAX_POWERS> reserve{};
     bool const toutes = sPlayerbotAIConfig.coaIaReserveToutesRessources;
     bool const sansServiteur = !CoaAreneAServiteur(bot);
+    // Relecture de 7d : ni un sort au banc, ni un sort a cible unique deja tenu sur un autre membre (il ne partira pas).
+    auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
+    time_t const now = time(nullptr);
     for (Usable const& spell : KnownAbilities(botAI, bot, [](uint16 kind, uint16 marques)
              { return (kind & KIND_DEFENSIVE) && !(marques & (MARQUE_PAS_SUR_SOI | MARQUE_IMMOBILISE)); }))
     {
@@ -3807,7 +3819,9 @@ std::array<int32, MAX_POWERS> CoaIaReservePalier(PlayerbotAI* botAI, Player* bot
         if (sansServiteur && (CoaAreneSortParServiteur(spell.info->Id) || CoaAreneSortParServiteur(info->Id)))
             continue;
         if (CoaRefuseParFormeOuArme(bot, info) || CoaRefuseParAuraDuLanceur(bot, info) ||
-            bot->GetSpellCooldownDelay(info->Id) > CoaIaReservePretDansMs)
+            bot->GetSpellCooldownDelay(info->Id) > CoaIaReservePretDansMs ||
+            IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now) ||
+            CoaIaUniqueTenuAilleurs(bot, info, spell.info->Id))
             continue;
         int32 const cout = std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask()));
         if (cout > int32(bot->GetMaxPower(Powers(type))))
@@ -3817,6 +3831,34 @@ std::array<int32, MAX_POWERS> CoaIaReservePalier(PlayerbotAI* botAI, Player* bot
     for (uint32 t = 0; t < MAX_POWERS; ++t)
         if (reserve[t] > 0)
             reserve[t] = std::min<int32>(reserve[t], int32(bot->GetMaxPower(Powers(t)) / 2));
+    return reserve;
+}
+
+// Relecture de 7d : en cache CoaIaReserveCacheMs par bot (comme D1), recalculee si le palier de vie change -- la reserve
+// ne depend de la vie que par CoaIaDefensifAdmis, qui ne lit que ces paliers et la perte rapide.
+uint8 CoaIaPalierDeVie(float pv, bool perte)
+{
+    uint8 const palier = pv < CoaIaCritiquePv ? 0 : pv < float(sPlayerbotAIConfig.lowHealth) ? 1 :
+                         pv < float(sPlayerbotAIConfig.mediumHealth) ? 2 : 3;
+    return uint8(palier + (perte ? 4 : 0));
+}
+
+std::array<int32, MAX_POWERS> CoaIaReservePalier(PlayerbotAI* botAI, Player* bot, float pv, bool perte)
+{
+    CoaAiObjectContext::CoaReservePalierCache& cache =
+        static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->reservePalier;
+    uint32 const maintenant = getMSTime();
+    uint8 const palier = CoaIaPalierDeVie(pv, perte);
+    if (!cache.valide || cache.palier != palier || getMSTimeDiff(cache.ms, maintenant) >= CoaIaReserveCacheMs)
+    {
+        std::array<int32, MAX_POWERS> const calcul = CoaIaReservePalierCalculer(botAI, bot, pv, perte);
+        std::copy(calcul.begin(), calcul.end(), cache.reserve.begin());
+        cache.ms = maintenant;
+        cache.palier = palier;
+        cache.valide = true;
+    }
+    std::array<int32, MAX_POWERS> reserve{};
+    std::copy(cache.reserve.begin(), cache.reserve.end(), reserve.begin());
     return reserve;
 }
 
@@ -4401,18 +4443,19 @@ public:
             float const pv = bot->GetHealthPct();
             bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
             std::vector<Usable> defensifs = CoaIaDefensifs(botAI, bot, pv, perte, true);
+            // Relecture de 7d : `vide` AVANT le retrait du palier -- une liste videe par la reserve se trace « rien ».
+            vide = defensifs.empty();
             // ia5 (AiPlayerbot.CoaIa.ReserveSurviePalier) : ni defensif ni soin qui mangerait la ressource du defensif d'un
             // palier plus bas (CoaIaRetirerSousPalier).
             CoaIaRetirerSousPalier(botAI, bot, defensifs, pv, perte);
-            vide = defensifs.empty();
             // Banc des soins, B-4 : les listes AVANT le lancer (un lancer met le sort en recharge).
             BancSoinListe(botAI, bot, critique ? "defensive_critique" : "defensive", defensifs, nullptr);
             SpellInfo const* cast = CastFirst(botAI, bot, defensifs, bot, USAGE_DEFENSIVE);
             if (!cast && !critique && pv < float(sPlayerbotAIConfig.mediumHealth))
             {
                 std::vector<Usable> soins = CoaIaSoinsSurSoi(botAI, bot);
-                CoaIaRetirerSousPalier(botAI, bot, soins, pv, perte);
                 vide = vide && soins.empty();
+                CoaIaRetirerSousPalier(botAI, bot, soins, pv, perte);
                 cast = CastFirst(botAI, bot, soins, bot, USAGE_DEFENSIVE);
             }
             RecordUsage(USAGE_DEFENSIVE, cast);
@@ -4489,11 +4532,12 @@ public:
         t_bancSoinEchec = BancSoinEchec();
         t_coaEcart = CoaEcartTrace();
         std::vector<Usable> soins = CoaIaSoinsSurSoi(botAI, bot);
+        bool const vide = soins.empty();  // relecture de 7d : avant le retrait du palier
         // ia5 (AiPlayerbot.CoaIa.ReserveSurviePalier) : comme « coa defensive ».
         CoaIaRetirerSousPalier(botAI, bot, soins, bot->GetHealthPct(), CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv);
         BancSoinListe(botAI, bot, "soin_soi", std::vector<Usable>(), &soins);   // banc des soins, B-4
         SpellInfo const* cast = RecordUsage(USAGE_SOIN_SOI, CastFirst(botAI, bot, soins, bot, USAGE_SOIN_SOI));
-        BancSoinTracer(bot, "soin_soi", cast, soins.empty());
+        BancSoinTracer(bot, "soin_soi", cast, vide);
         return cast;
     }
 
@@ -4676,38 +4720,88 @@ uint32 CoaPostureDeRole(PlayerbotAI* botAI, Player* bot, std::vector<Usable> con
  * journal du 19/10, essai 8396 (bot 1186, B1) : liste « 500168,504910,707170 » a 65 %, 47 %, 43 %, 28 % de vie avec 26 a
  * 50 d'energie, rien de lance hors Heroic Resolve 504910 et Counter Stance 802188 (qui exige Assault) ; la reserve D1 ne
  * gardait rien, ces sorts etant refuses par l'aura du lanceur. « mort avec survie inutilisee » 4/4 en B1 et B2, 19 et 20.
- * Regle, en combat seulement (CoaIaDecisionActive), sous mediumHealth ou en perte rapide : si AUCUN defensif admis n'est pret
- * dans la posture portee, prendre la posture connue (KIND_STANCE, hors CoaPosturesHorsRegle) qui est l'aura exigee du plus
- * grand nombre de defensifs admis au palier, sans recharge ni banc, sans refus de forme, d'arme, de familier ni de vie
- * (la ressource n'est pas exigee : l'energie remonte, et D1 la garde des que le defensif est pret). Egalite : le plus petit
- * id. Hors combat, « coa buff » remet la posture que la regle d'avant donne (la premiere du kit), si le bot porte une
- * posture de survie (CoaPostureRetour). Prix : la posture de survie peut couter des degats (Tower Formation : -10 %) jusqu'a
- * la fin du combat. A 0 : rien ne change.
+ *
+ * BASCULE, en combat (CoaIaDecisionActive), sous mediumHealth ou en perte rapide, sans posture de survie deja prise : si
+ * AUCUN defensif admis n'est pret dans la posture portee (ressource comprise, recharge globale non), prendre la posture
+ * connue (KIND_STANCE, hors CoaPosturesHorsRegle) qui est l'aura exigee du plus grand nombre de defensifs admis au palier,
+ * sans recharge ni banc, sans refus de forme, d'arme, de familier ni de vie, et PAYABLES une fois la posture payee (meme
+ * critere que le test « pret » de la posture portee ; relecture de 7d : Tower Formation coute 20 d'energie). Egalite : le
+ * plus petit id. La bascule est notee (CoaAiObjectContext::postureSurvie : posture d'origine, posture prise, heure).
+ * RETOUR, seulement si la bascule est notee et que le bot porte encore la posture prise (une posture
+ * changee par un humain ou une autre regle n'est jamais defaite) :
+ *   - en combat, au calme : vie >= almostFullHealth, aucune perte rapide depuis CoaPostureCalmeMs, et au moins
+ *     CoaPostureCalmeMs apres la bascule (hysteresis : pas d'aller-retour A -> B -> A dans la meme alerte) ;
+ *   - hors combat, par « coa buff » (CoaPostureRetour), abandonne 30 s apres la premiere demande ; sans posture d'origine,
+ *     la posture prise est retiree et la regle d'avant (premiere posture du kit) s'applique.
+ * Tant qu'une bascule est notee, aucune autre n'a lieu. Prix : la posture de survie peut couter des degats (Tower
+ * Formation : -10 %) jusqu'au retour. A 0 : rien ne change.
  */
 bool CoaIaPretSauf(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* cible, bool sansAura, bool sansForme, bool gcd);
+
+constexpr uint32 CoaPostureCalmeMs = 10 * IN_MILLISECONDS;
 
 bool CoaPostureHorsRegle(uint32 id)
 {
     return std::find(std::begin(CoaPosturesHorsRegle), std::end(CoaPosturesHorsRegle), id) != std::end(CoaPosturesHorsRegle);
 }
 
-// La posture de survie a prendre maintenant (`posture` : son sort), 0 sinon.
-uint32 CoaPostureSurvieVoulue(PlayerbotAI* botAI, Player* bot, Usable* posture)
+// La posture que le bot porte parmi `postures` (hors regle exclues), 0 sinon.
+uint32 CoaPosturePortee(Player* bot, std::vector<Usable> const& postures)
 {
+    for (Usable const& p : postures)
+        if ((p.kind & KIND_STANCE) && !CoaPostureHorsRegle(p.info->Id) && bot->HasAura(p.info->Id))
+            return p.info->Id;
+    return 0;
+}
+
+// Le sort de posture a lancer maintenant (`posture`), 0 sinon ; `retour` : c'est le retour a la posture d'origine.
+uint32 CoaPostureSurviePlanifier(PlayerbotAI* botAI, Player* bot, Usable* posture, bool* retour)
+{
+    if (retour)
+        *retour = false;
     if (!sPlayerbotAIConfig.coaIaPostureSurvie || !CoaIaSurvieActive(bot) || !CoaIaDecisionActive(bot))
         return 0;
     CoaRole const role = GetCoaRole(bot);
     if (role == CoaRole::Tank || role == CoaRole::Heal)
         return 0;
+    CoaAiObjectContext::CoaPostureSurvieEtat& etat =
+        static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->postureSurvie;
+    uint32 const maintenant = getMSTime();
     float const pv = bot->GetHealthPct();
     bool const perte = CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv;
+
+    if (etat.active)
+    {
+        // Posture changee par un autre (humain, autre regle) ou perdue : la bascule est oubliee, rien n'est defait.
+        if (!bot->HasAura(etat.survie))
+        {
+            etat = CoaAiObjectContext::CoaPostureSurvieEtat();
+            return 0;
+        }
+        if (perte)
+            etat.dernierePerteMs = maintenant;
+        if (!etat.origine || pv < float(sPlayerbotAIConfig.almostFullHealth) || perte ||
+            getMSTimeDiff(etat.priseMs, maintenant) < CoaPostureCalmeMs ||
+            (etat.dernierePerteMs && getMSTimeDiff(etat.dernierePerteMs, maintenant) < CoaPostureCalmeMs))
+            return 0;
+        for (Usable const& p : KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_STANCE) != 0; }))
+            if (p.info->Id == etat.origine && CoaIaPretSauf(botAI, bot, p, nullptr, false, false, true))
+            {
+                if (posture)
+                    *posture = p;
+                if (retour)
+                    *retour = true;
+                return etat.origine;
+            }
+        return 0;
+    }
+
     if (pv >= float(sPlayerbotAIConfig.mediumHealth) && !perte)
         return 0;
     std::vector<Usable> const postures = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_STANCE) != 0; });
     if (postures.empty())
         return 0;
-    // Un defensif admis est deja pret dans la posture portee (recharge globale comprise : elle passe) : il part, rien ne
-    // change.
+    // Un defensif admis est deja pret dans la posture portee (ressource comprise ; la recharge globale passe) : il part.
     if (CoaIaUnPret(botAI, bot, CoaIaDefensifs(botAI, bot, pv, perte, false), bot, false))
         return 0;
     auto const& benched = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->benchedSpells;
@@ -4719,23 +4813,31 @@ uint32 CoaPostureSurvieVoulue(PlayerbotAI* botAI, Player* bot, Usable* posture)
     for (Usable const& candidate : postures)
     {
         uint32 const id = candidate.info->Id;
-        if (CoaPostureHorsRegle(id) || bot->HasAura(id))
+        if (CoaPostureHorsRegle(id) || bot->HasAura(id) || !CoaIaPretSauf(botAI, bot, candidate, nullptr, false, false, true))
             continue;
+        SpellInfo const* const infoPosture = EffectiveSpell(bot, candidate.info);
+        uint32 const typePosture = infoPosture->PowerType;
+        int32 const coutPosture = std::max(0, infoPosture->CalcPowerCost(bot, infoPosture->GetSchoolMask()));
         size_t compte = 0;
         for (Usable const& spell : defensifs)
         {
             SpellInfo const* info = EffectiveSpell(bot, spell.info);
             if (info->CasterAuraSpell != id || !CoaIaDefensifAdmis(info, pv, perte) || CoaRefuseParFormeOuArme(bot, info) ||
-                CoaExigeFamilierAbsent(bot, info) || CoaIaPayeEnVieTropCher(bot, info) || bot->HasSpellCooldown(info->Id) ||
-                IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
+                CoaExigeFamilierAbsent(bot, info) || CoaIaPayeEnVieTropCher(bot, info) || CoaIaEtourdiRefuse(bot, info) ||
+                bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
                 continue;
+            // Payable une fois la posture payee, dans la meme ressource si c'est la meme.
             uint32 const type = info->PowerType;
-            if (type < MAX_POWERS && bot->GetMaxPower(Powers(type)) &&
-                info->CalcPowerCost(bot, info->GetSchoolMask()) > int32(bot->GetMaxPower(Powers(type))))
-                continue;
+            if (type < MAX_POWERS && bot->GetMaxPower(Powers(type)))
+            {
+                int32 const besoin = std::max(0, info->CalcPowerCost(bot, info->GetSchoolMask())) +
+                                     (type == typePosture ? coutPosture : 0);
+                if (int32(bot->GetPower(Powers(type))) < besoin)
+                    continue;
+            }
             ++compte;
         }
-        if (!compte || !CoaIaPretSauf(botAI, bot, candidate, nullptr, false, false, true))
+        if (!compte)
             continue;
         if (compte > meilleurCompte || (compte == meilleurCompte && id < meilleure))
         {
@@ -4748,33 +4850,40 @@ uint32 CoaPostureSurvieVoulue(PlayerbotAI* botAI, Player* bot, Usable* posture)
     return meilleure;
 }
 
-// Hors combat : la posture que la regle d'avant donne (la premiere posture du kit, `spells` dans l'ordre de « coa buff »),
-// si le bot ni tank ni soigneur porte une AUTRE posture qui est l'aura exigee d'au moins un defensif connu (posture de
-// survie). 0 sinon : rien ne change.
-uint32 CoaPostureRetour(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spells)
+// Hors combat (« coa buff ») : la posture d'origine a remettre, si la survie a pris une posture et que le bot la porte encore.
+// La note tient jusqu'au retour (la posture prise disparait : faite, ou changee par un autre) ou CoaPostureAbandonMs apres la
+// premiere demande : un refus repete ne boucle pas (et la garde `recent` de « coa buff » espace deja les essais). Sans
+// posture d'origine, la posture prise est retiree : la regle d'avant (premiere posture du kit) reprend la main. 0 sinon.
+constexpr uint32 CoaPostureAbandonMs = 30 * IN_MILLISECONDS;
+
+uint32 CoaPostureRetour(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& /*spells*/)
 {
     if (!sPlayerbotAIConfig.coaIaPostureSurvie || bot->IsInCombat())
         return 0;
-    CoaRole const role = GetCoaRole(bot);
-    if (role == CoaRole::Tank || role == CoaRole::Heal)
+    CoaAiObjectContext::CoaPostureSurvieEtat& etat =
+        static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->postureSurvie;
+    if (!etat.active)
         return 0;
-    uint32 defaut = 0;
-    uint32 portee = 0;
-    for (Usable const& spell : spells)
+    if (!bot->HasAura(etat.survie))
     {
-        if (!(spell.kind & KIND_STANCE) || CoaPostureHorsRegle(spell.info->Id))
-            continue;
-        if (!defaut)
-            defaut = spell.info->Id;
-        if (!portee && bot->HasAura(spell.info->Id))
-            portee = spell.info->Id;
-    }
-    if (!defaut || !portee || portee == defaut)
+        etat = CoaAiObjectContext::CoaPostureSurvieEtat();
         return 0;
-    std::vector<Usable> const defensifs = KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; });
-    bool const survie = std::any_of(defensifs.begin(), defensifs.end(),
-        [bot, portee](Usable const& spell) { return EffectiveSpell(bot, spell.info)->CasterAuraSpell == portee; });
-    return survie ? defaut : 0;
+    }
+    if (!etat.origine)
+    {
+        bot->RemoveAurasDueToSpell(etat.survie);
+        etat = CoaAiObjectContext::CoaPostureSurvieEtat();
+        return 0;
+    }
+    uint32 const maintenant = getMSTime();
+    if (!etat.retourMs)
+        etat.retourMs = maintenant;
+    else if (getMSTimeDiff(etat.retourMs, maintenant) >= CoaPostureAbandonMs)
+    {
+        etat = CoaAiObjectContext::CoaPostureSurvieEtat();
+        return 0;
+    }
+    return etat.origine;
 }
 
 class CoaPostureSurvieAction : public Action
@@ -4785,16 +4894,39 @@ public:
     bool Execute(Event /*event*/) override
     {
         Usable posture{};
-        if (!CoaPostureSurvieVoulue(botAI, bot, &posture) || !posture.info)
+        bool retour = false;
+        if (!CoaPostureSurviePlanifier(botAI, bot, &posture, &retour) || !posture.info)
             return false;
+        CoaAiObjectContext::CoaPostureSurvieEtat& etat =
+            static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext())->postureSurvie;
+        uint32 const origine = retour ? 0 : CoaPosturePortee(bot,
+            KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_STANCE) != 0; }));
         t_bancSoinEchec = BancSoinEchec();
         t_coaEcart = CoaEcartTrace();
-        SpellInfo const* cast = CastFirst(botAI, bot, std::vector<Usable>{ posture }, bot, USAGE_DEFENSIVE);
+        SpellInfo const* cast = RecordUsage(USAGE_DEFENSIVE, CastFirst(botAI, bot, std::vector<Usable>{ posture }, bot,
+                                                                       USAGE_DEFENSIVE));
         BancSoinTracer(bot, "posture", cast, false);
+        if (retour)
+        {
+            // Retour fait : la note part. Refuse : la note reste (le retour hors combat la reprendra) et le delai de calme
+            // repart, pour ne pas reessayer a chaque tour.
+            if (cast)
+                etat = CoaAiObjectContext::CoaPostureSurvieEtat();
+            else
+                etat.priseMs = getMSTime();
+        }
+        else if (cast)
+        {
+            etat.active = true;
+            etat.origine = origine;
+            etat.survie = posture.info->Id;
+            etat.priseMs = getMSTime();
+            etat.dernierePerteMs = 0;
+        }
         return cast;
     }
 
-    bool isUseful() override { return CoaPostureSurvieVoulue(botAI, bot, nullptr) != 0; }
+    bool isUseful() override { return CoaPostureSurviePlanifier(botAI, bot, nullptr, nullptr) != 0; }
 };
 
 class CoaPostureSurvieTrigger : public Trigger
@@ -4802,7 +4934,7 @@ class CoaPostureSurvieTrigger : public Trigger
 public:
     CoaPostureSurvieTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa posture survie") {}
 
-    bool IsActive() override { return CoaPostureSurvieVoulue(botAI, bot, nullptr) != 0; }
+    bool IsActive() override { return CoaPostureSurviePlanifier(botAI, bot, nullptr, nullptr) != 0; }
 };
 
 // Out of combat: long buffs on the bot and its group.
