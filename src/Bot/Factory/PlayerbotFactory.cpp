@@ -4925,6 +4925,8 @@ void PlayerbotFactory::CancelAuras()
     for (auto const& [id, aura] : bot->GetOwnedAuras())
         if (aura && !aura->IsRemoved() && !garder(aura))
             possedees.push_back(aura);
+    // Garde-fou de principe : chaque element de l'instantane n'est retire qu'une fois, `retraits` ne peut donc pas
+    // atteindre cette borne (revue du 20/10) ; elle ne protege que d'une future modification de la boucle.
     size_t const borne = 2 * (appliquees.size() + possedees.size());
     size_t retraits = 0;
     bool coupe = false;
