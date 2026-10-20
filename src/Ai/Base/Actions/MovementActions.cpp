@@ -5,7 +5,9 @@
  */
 
 #include "MovementActions.h"
+#include "AreaDefines.h"
 #include "Corpse.h"
+#include "DBCStores.h"
 #include "Event.h"
 #include "FleeManager.h"
 #include "GameObject.h"
@@ -38,6 +40,52 @@
 #include <cstdlib>
 #include <iomanip>
 #include <string>
+
+// CoA (20/10/2026, R-20261020-1622, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md § 2.6 et § 4.4).
+//
+// CoaAireVolable : l'aire du bot permet-elle le vol ? Meme regle que BotCanUseFlyingMount (CheckMountStateAction.cpp)
+// et que le coeur pour une monture ONLY_FLYING_AREAS (SpellInfo::CheckLocation) : aire (a defaut zone)
+// AREA_FLAG_OUTLAND, pas de NO_FLY_ZONE, Vol par temps froid (54197) au Norfendre. Sans test de competence de monte :
+// c'est l'aire qu'on juge, pas la monture.
+static bool CoaAireVolable(Player* bot)
+{
+    AreaTableEntry const* area = sAreaTableStore.LookupEntry(bot->GetAreaId());
+    if (!area)
+        area = sAreaTableStore.LookupEntry(bot->GetZoneId());
+    if (!area || !area->IsFlyable() || (area->flags & AREA_FLAG_NO_FLY_ZONE))
+        return false;
+
+    if (GetVirtualMapForMapAndZone(bot->GetMapId(), bot->GetZoneId()) == MAP_NORTHREND && !bot->HasSpell(54197))
+        return false;
+
+    return true;
+}
+
+// Ligne « coa vol: » de CoaBots.log (AiPlayerbot.Coa.TracerVol) : un bot change d'etat de vol. Une ligne par
+// transition (UpdateMovementState ne pose ou ne retire les drapeaux qu'une fois). Champs nommes, comme `coa score:`.
+// aura_vol = premier sort qui porte au bot une aura de vol (207, sinon 201), 0 si aucun.
+static void CoaTracerVol(Player* bot, Player* master, char const* evenement)
+{
+    if (!sPlayerbotAIConfig.coaTracerVol)
+        return;
+
+    uint32 auraVol = 0;
+    Unit::AuraEffectList const& montees = bot->GetAuraEffectsByType(SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED);
+    Unit::AuraEffectList const& vols = bot->GetAuraEffectsByType(SPELL_AURA_FLY);
+    if (!montees.empty())
+        auraVol = montees.front()->GetId();
+    else if (!vols.empty())
+        auraVol = vols.front()->GetId();
+
+    bool const maitreReel = master && master != bot;
+    LOG_INFO("playerbots.coa",
+             "coa vol: guid={} nom={} evenement={} carte={} zone={} aire={} aire_volable={} x={:.1f} y={:.1f} z={:.1f} "
+             "aura_vol={} maitre={} maitre_vole={}",
+             bot->GetGUID().GetCounter(), bot->GetName(), evenement, bot->GetMapId(), bot->GetZoneId(), bot->GetAreaId(),
+             CoaAireVolable(bot) ? 1 : 0, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), auraVol,
+             maitreReel ? master->GetGUID().GetCounter() : 0,
+             maitreReel && master->HasUnitMovementFlag(MOVEMENTFLAG_FLYING) ? 1 : 0);
+}
 
 MovementAction::MovementAction(PlayerbotAI* botAI, std::string const name) : Action(botAI, name)
 {
@@ -932,7 +980,11 @@ void MovementAction::UpdateMovementState()
         const float gZ = bot->GetMapWaterOrGroundLevel(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
         const bool onGroundZ = bot->GetPositionZ() < gZ + 1.f;
         const bool wantsSwim = liquidState == LIQUID_MAP_IN_WATER || liquidState == LIQUID_MAP_UNDER_WATER;
-        const bool wantsFly = bot->HasIncreaseMountedFlightSpeedAura() || bot->HasFlyAura();
+        // CoA (20/10/2026, R-20261020-1622, AiPlayerbot.Coa.VolZoneVolable) : l'aura de vol ne suffit plus, l'aire doit
+        // permettre le vol (CoaAireVolable). Hors aire volable, wantsFly est faux : le bot ne decolle pas, et un bot
+        // deja en vol y perd ses drapeaux par la branche « !wantsFly » ci-dessous, comme a la fin d'une monture.
+        const bool hasFlightAura = bot->HasIncreaseMountedFlightSpeedAura() || bot->HasFlyAura();
+        const bool wantsFly = hasFlightAura && (!sPlayerbotAIConfig.coaVolZoneVolable || CoaAireVolable(bot));
         const bool canWaterWalk = bot->HasWaterWalkAura();
         const bool isMasterFlying = master ? master->HasUnitMovementFlag(MOVEMENTFLAG_FLYING) : true;
         const bool isMasterSwimming = master ? master->HasUnitMovementFlag(MOVEMENTFLAG_SWIMMING) : true;
@@ -980,6 +1032,7 @@ void MovementAction::UpdateMovementState()
             bot->AddUnitMovementFlag(MOVEMENTFLAG_DISABLE_GRAVITY);
             bot->AddUnitMovementFlag(MOVEMENTFLAG_FLYING);
             movementFlagsUpdated = true;
+            CoaTracerVol(bot, master, "decollage");
         }
         else if (!wantsFly && !isWaterWalking && (isFlying || hasGravityDisabled))
         {
@@ -987,6 +1040,8 @@ void MovementAction::UpdateMovementState()
             bot->RemoveUnitMovementFlag(MOVEMENTFLAG_DISABLE_GRAVITY);
             bot->RemoveUnitMovementFlag(MOVEMENTFLAG_FLYING);
             movementFlagsUpdated = true;
+            if (hasFlightAura)  // vol refuse par l'aire (VolZoneVolable), pas une fin de monture
+                CoaTracerVol(bot, master, "pose_hors_zone_volable");
         }
         else if (!isMasterFlying && isFlying && onGroundZ)
         {

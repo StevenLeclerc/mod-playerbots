@@ -1102,6 +1102,10 @@ bool PlayerbotAIConfig::Initialize()
     coaIaReserveSurviePalier = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveSurviePalier", true);
     coaIaPostureSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PostureSurvie", true);
     coaGarderPassifs = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.GarderPassifs", false);
+    // R-20261020-1622 (20/10/2026, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md) : a 0, comportement d'avant.
+    coaVolZoneVolable = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.VolZoneVolable", true);
+    coaSansFlottement = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.SansFlottement", true);
+    coaTracerVol = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.TracerVol", true);
     // --- fin IA soins/survie
     lootLogMinQuality = sConfigMgr->GetOption<uint32>("AiPlayerbot.LootLogMinQuality", ITEM_QUALITY_RARE);
     autoLearnQuestSpells = sConfigMgr->GetOption<bool>("AiPlayerbot.AutoLearnQuestSpells", true);

@@ -1815,6 +1815,32 @@ AiPlayerbot.CoaIa.PostureSurvie = 1
 # Default: 0 (20/10/2026, P-289 : allumer seulement apres epreuve d'execution sur le PTR)
 AiPlayerbot.Coa.GarderPassifs = 0
 
+# R-20261020-1622 (20/10/2026, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md) : un bot ne prend une monture
+# volante que s'il peut voler la ou il est (Outreterre, Norfendre avec Vol par temps froid, hors NO_FLY), maitre ou pas ;
+# sinon une monture au sol, a la vitesse au sol de la monture de son maitre. Son deplacement ne passe en vol que dans
+# une aire volable ; hors aire volable, un bot en vol perd ses drapeaux de vol. A 0 : comportement d'avant (le bot
+# suivait la monture de son maitre sans test de zone, et volait a ses cotes en Azeroth).
+# Lue par PlayerbotAIConfig::Initialize() : `reload config` PUIS `playerbots rndbot reload`.
+# Default: 1
+AiPlayerbot.Coa.VolZoneVolable = 1
+
+# R-20261020-1622 (20/10/2026) : les bots ne lancent plus aucun sort qui pose HOVER ou FEATHER_FALL sur une cible qui
+# n'est pas un ennemi. Sorts connus d'un personnage touches (releve du 20/10, Live, PTR, Armageddon) : Venomwing Form
+# 520307, Aether Current 531512, Mantid Descent 570123, Voice of Bwonsamdi 801716, Illidan's Guile 806109 et la monture
+# 193105. Exception : un sort de bond (JUMP, JUMP_DEST, LEAP_BACK) qui ne pose que FEATHER_FALL reste aux bots --
+# Mechsuit: Activate Jets 801389. Les joueurs humains gardent tous ces sorts. Lue au classement des kits, au premier
+# bot apres le demarrage : un changement demande un redemarrage. A 0 : comportement d'avant (seul Illidan's Guile
+# etait ecarte, des defensifs seulement).
+# Default: 1
+AiPlayerbot.Coa.SansFlottement = 1
+
+# R-20261020-1622 (20/10/2026) : ligne « coa vol: » dans CoaBots.log quand un bot decolle, est pose hors d'une aire
+# volable, ou est projete vers le haut d'au moins ~1,3 m (vitesse verticale >= 7, paquet SMSG_MOVE_KNOCK_BACK ; une
+# projection subie en etant apeure ou desoriente passe par le serveur et n'est pas tracee). Une ligne par evenement.
+# Lue par PlayerbotAIConfig::Initialize() : `reload config` PUIS `playerbots rndbot reload`.
+# Default: 1
+AiPlayerbot.Coa.TracerVol = 1
+
 # Quality a looted item must reach to be written to the "playerbots.loot" logger:
 # 3 rare (blue), 4 epic, 5 legendary. Nothing is written unless worldserver.conf
 # points that logger at an appender, and only bots are ever logged.
