@@ -4902,30 +4902,72 @@ void PlayerbotFactory::CancelAuras()
         return aura->GetOwner() == bot && aura->GetCasterGUID() == soi && info &&
                (info->IsPassive() || (info->HasAttribute(SPELL_ATTR0_DO_NOT_DISPLAY) && info->Stances));
     };
-    // Comme RemoveAllAuras : une suppression peut en poser une autre ; quelques passes au plus.
-    for (uint8 passe = 0; passe < 4; ++passe)
+    /*
+     * PTR gele le 20/10 (relecture de 7d, pile gdb relevee deux fois) : Unit::RemoveAppliedAuras(predicat) et
+     * RemoveOwnedAuras(predicat) repartent du DEBUT de la table apres chaque retrait (Unit::RemoveAura(iterator) et
+     * Unit::RemoveOwnedAura(iterator) remettent l'iterateur a begin(), Unit.cpp:5302-5317 et 5466-5478). Un script qui
+     * repose une aura dans son retrait (AscensionCultist::Refresh, appele par AfterEffectRemove : ses auras « helper »
+     * dependent de passifs GARDES ici) la faisait retirer de nouveau par le meme predicat, sans fin. RemoveAllAuras n'avait
+     * pas ce defaut : il retire aussi les passifs, et la condition du script tombe.
+     * Desormais : un INSTANTANE des auras a retirer (Aura*, pris avant tout retrait), puis un retrait par element, une
+     * fois. Les Aura et AuraApplication retirees ne sont detruites qu'a la mise a jour suivante de leur porteur
+     * (Unit::m_removedAuras, Aura::m_removedApplications) : les pointeurs de l'instantane restent valides pendant cet
+     * appel, et IsRemoved / GetApplicationOfTarget disent si l'element est encore a retirer. Une aura reposee par un
+     * script est un NOUVEL objet, absent de l'instantane : jamais retiree. Borne dure en plus : 2 x la taille de
+     * l'instantane, LOG_ERROR si elle est atteinte.
+     */
+    ObjectGuid const guid = bot->GetGUID();
+    std::vector<Aura*> appliquees;
+    std::vector<Aura*> possedees;
+    for (auto const& [id, app] : bot->GetAppliedAuras())
+        if (app && !app->GetRemoveMode() && !garder(app->GetBase()))
+            appliquees.push_back(app->GetBase());
+    for (auto const& [id, aura] : bot->GetOwnedAuras())
+        if (aura && !aura->IsRemoved() && !garder(aura))
+            possedees.push_back(aura);
+    size_t const borne = 2 * (appliquees.size() + possedees.size());
+    size_t retraits = 0;
+    bool coupe = false;
+    for (Aura* aura : appliquees)
     {
-        bot->RemoveAppliedAuras([&garder](AuraApplication const* app) { return !garder(app->GetBase()); });
-        bot->RemoveOwnedAuras([&garder](Aura const* aura) { return !garder(aura); });
-        bool reste = false;
-        for (auto const& [id, app] : bot->GetAppliedAuras())
-            if (!garder(app->GetBase()))
+        if (retraits >= borne)
+        {
+            coupe = true;
+            break;
+        }
+        if (aura->IsRemoved())
+            continue;
+        AuraApplication* app = aura->GetApplicationOfTarget(guid);
+        if (!app || app->GetRemoveMode())
+            continue;
+        bot->RemoveAura(app);
+        ++retraits;
+    }
+    for (Aura* aura : possedees)
+    {
+        if (coupe || retraits >= borne)
+        {
+            coupe = true;
+            break;
+        }
+        if (aura->IsRemoved())
+            continue;
+        uint32 const id = aura->GetId();
+        auto& table = bot->GetOwnedAuras();
+        for (auto itr = table.lower_bound(id); itr != table.upper_bound(id); ++itr)
+            if (itr->second == aura)
             {
-                reste = true;
+                bot->RemoveOwnedAura(itr);  // l'iterateur est remis a begin() : on sort tout de suite
+                ++retraits;
                 break;
             }
-        if (!reste)
-            for (auto const& [id, aura] : bot->GetOwnedAuras())
-                if (!garder(aura))
-                {
-                    reste = true;
-                    break;
-                }
-        if (!reste)
-            break;
     }
+    if (coupe)
+        LOG_ERROR("playerbots", "CancelAuras : bot {} ({}), borne de {} retraits atteinte (instantane {} + {}), arret",
+                  bot->GetName(), bot->GetGUID().GetCounter(), borne, appliquees.size(), possedees.size());
     // Les passifs deja perdus par une remise a neuf d'avant ce correctif (le bot ne s'est pas reconnecte depuis) : reposes
-    // comme a l'apprentissage, CastSpell(bot, id, true) (Player::_addSpell, branche passive).
+    // comme a l'apprentissage, CastSpell(bot, id, true) (Player::_addSpell, branche passive). Liste calculee UNE fois
+    // avant les lancers : un script d'application (Refresh du Cultist...) ne relance rien ici, au plus un lancer par id.
     for (uint32 const id : PassifsSansAura(bot))
         bot->CastSpell(bot, id, true);
 }
