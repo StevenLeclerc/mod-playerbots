@@ -55,6 +55,7 @@
 //   9100004 Gardien de la faille  -> 2 x 9100001 Etincelle d'orage (inchange)
 //   9100304 Sonneur de glas       -> 2 x 9100302 Squelette du glas (nuit des morts ; 2 et non 3 depuis la relecture
 //                                    du 08/10 : 2 x 0,8 PV reste sous les 2 Etincelles a 1 du Gardien)
+//   9105013 Gardien tellurique    -> 2 x 9105010 Etincelle tellurique (Sourcier, lot T2 MINAGE, 21/10/2026)
 // Une entree hors de la table refuse `renfort` (`liste_blanche_ou_bornes`), comme avant pour tout autre que le
 // Gardien. Le Sonneur et ses squelettes ne sortent que si EvenementCreatures les permet (absents par defaut : inerte).
 // Le COFFRE aussi a deux formes, fermees : `coffre` -> 9100024 « Coffre de la faille » (inchange) ; `coffre:9100026`
@@ -68,6 +69,12 @@ constexpr uint32 EV_RENFORT_NOMBRE = 2;
 constexpr uint32 EV_SONNEUR_ENTREE = 9100304;          // Sonneur de glas (nuit des morts, migration 2026_10_08_02)
 constexpr uint32 EV_SONNEUR_RENFORT_ENTREE = 9100302;  // Squelette du glas
 constexpr uint32 EV_SONNEUR_RENFORT_NOMBRE = 2;
+// Sourcier, lot T2 MINAGE (21/10/2026) : le Gardien tellurique (copie de 9100004, gabarit reserve au mini-evenement
+// « Faille tellurique » du module) appelle 2 Etincelles telluriques (copie de 9100001), comme le Gardien de la faille.
+// Ids recopies de AscensionArtisanatIds.h (PNJ_GARDIEN_TELLURIQUE, PNJ_MENACE_TELLURIQUE[0]) et de emetteur.py.
+constexpr uint32 EV_GARDIEN_TELLURIQUE_ENTREE = 9105013;
+constexpr uint32 EV_TELLURIQUE_RENFORT_ENTREE = 9105010;
+constexpr uint32 EV_TELLURIQUE_RENFORT_NOMBRE = 2;
 constexpr int32 EV_RENFORT_SEUIL_PCT = 50;
 constexpr uint32 EV_RENFORT_VIE_S = 300;               // TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, comme invoquer
 constexpr float EV_RENFORT_ECART_MIN_YD = 3.0f;
@@ -129,6 +136,7 @@ bool RegleRenfort(uint32 chef, uint32& entree, uint32& nombre)
     {
         case EV_GARDIEN_ENTREE: entree = EV_RENFORT_ENTREE; nombre = EV_RENFORT_NOMBRE; return true;
         case EV_SONNEUR_ENTREE: entree = EV_SONNEUR_RENFORT_ENTREE; nombre = EV_SONNEUR_RENFORT_NOMBRE; return true;
+        case EV_GARDIEN_TELLURIQUE_ENTREE: entree = EV_TELLURIQUE_RENFORT_ENTREE; nombre = EV_TELLURIQUE_RENFORT_NOMBRE; return true;
         default: return false;
     }
 }

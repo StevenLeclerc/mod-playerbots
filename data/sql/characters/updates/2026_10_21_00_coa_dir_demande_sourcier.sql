@@ -1,0 +1,27 @@
+-- CoA -- le Directeur et le Sourcier, lot T2 MINAGE (21/10/2026) : demande `sourcier`.
+-- Conception : coa-project/docs/CONCEPTION-artisanat-T2-sourcier-60.md § 2.0 (3).
+-- A APPLIQUER A LA MAIN (P-131), base des PERSONNAGES du royaume (acore_characters_ptr au PTR). Idempotente : rejouee,
+-- elle ne change rien.
+--
+-- Le jeu (CoaDirecteurSourcier.inc) ecrit une ligne `type = 'sourcier'` quand un humain lance avec succes un sort de
+-- Sourcier « Directeur » ; le service (exploitation/directeur/sourcier.py, par recit.py) la lit et la marque.
+-- L'observateur et l'ecoute ne la touchent pas (observateur.py : `type <> 'ask' AND type <> 'sourcier'` ; ecoute.py :
+-- `type = 'ask'` seulement).
+--
+-- ORDRE : cette migration AVANT le redemarrage du binaire qui porte CoaDirecteurSourcier.inc (il lit l'ENUM au
+-- demarrage : sans `sourcier`, il n'ecrit aucune demande et le dit au journal). Sans danger pour un binaire plus ancien :
+-- il n'ecrit que note, ask, stop, reprise, et aucun code du depot n'exige l'egalite stricte de cet ENUM (lu le 21/10 :
+-- ni ecoute.py, ni observateur.py, ni emetteur.py ne le comparent).
+--
+-- VERIFICATION apres application -- doit rendre exactement :
+--   SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()
+--     AND TABLE_NAME = 'coa_dir_demande' AND COLUMN_NAME = 'type';
+--   enum('note','ask','stop','reprise','sourcier')
+--
+-- RETOUR ARRIERE (ENUM remis a 4 valeurs), SEULEMENT si aucune ligne `sourcier` n'existe (sinon MySQL refuse : donnees
+-- tronquees ; les supprimer d'abord, historique perdu) :
+--   SELECT COUNT(*) FROM coa_dir_demande WHERE type = 'sourcier';   -- doit rendre 0
+--   ALTER TABLE `coa_dir_demande` MODIFY `type` ENUM('note','ask','stop','reprise') NOT NULL;
+
+-- On AJOUTE en fin d'ENUM : les valeurs existantes ne bougent pas. Rejouer le meme MODIFY est sans effet.
+ALTER TABLE `coa_dir_demande` MODIFY `type` ENUM('note','ask','stop','reprise','sourcier') NOT NULL;

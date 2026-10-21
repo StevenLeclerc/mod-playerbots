@@ -12004,6 +12004,9 @@ public:
 // Butin des bots aux evenements (12/10/2026) : fonctions publiques, hors de l'espace de noms anonyme.
 #include "CoaDirecteurButin.inc"
 
+// Sourcier, voie Directeur (21/10/2026, lot T2 MINAGE) : la demande `sourcier` au lancement d'un sort du module.
+#include "CoaDirecteurSourcier.inc"
+
 void AddSC_coa_directeur()
 {
     new coa_directeur_niveau_creaturescript();
@@ -12018,4 +12021,6 @@ void AddSC_coa_directeur()
     new coa_directeur_worldscript();
     new coa_directeur_playerscript();
     new coa_directeur_onglet_playerscript();
+    new coa_directeur_sourcier_spellscript();   // lot T2 du Sourcier : demande `sourcier`
+    new coa_directeur_sourcier_worldscript();
 }
