@@ -447,6 +447,72 @@ constexpr std::array<uint32, 2> EV_GISEMENT_ORAGE = {9101000, 9101006};
 constexpr std::array<uint32, 2> EV_GISEMENT_NUIT = {9101001, 9101007};
 constexpr size_t EV_GISEMENT_NOEUDS_MAX = 96;        // noeuds vivants dans tout le royaume (12 gisements pleins)
 
+// Variante de la tranche de la zone (21/10/2026, ordre du commanditaire ; D-PO-60). Un noeud de nature (Veine, Fleurs,
+// Ossuaire...) a une VARIANTE par tranche >= 2 de ses zones : meme nom, meme modele, meme butin (chest.lootId = noeud de
+// base), seul le verrou change (rang de Minage / Herboristerie de la zone), donc un recolteur avance y gagne des points.
+// Le gisement pose la variante de la tranche de la zone du point ; zone non classee, ou pas de variante pour ce noeud a
+// cette tranche (la Nuit n'en a qu'en T4) : le noeud de base, comme avant.
+// La table zone -> tranche N'EST PAS recopiee ici : c'est celle du generateur (TRANCHE_ZONE, outils/artisanat/
+// generer.py), lue dans ce qu'il a ecrit en base : chaque variante n'est posee (gameobject) que dans les zones de sa
+// tranche. ChargerTranchesGisement la relit au demarrage (DemarrerBus, fil monde, requete synchrone admise comme
+// ChargerDefisBloquants). Seule la regle des ids est commune avec le generateur (ID_VARIANTE0, ids figes) : variante du
+// noeud k (0-11) a la tranche t = 9101012 + 12 (t - 2) + k ; chaque variante deduite est verifiee contre son gabarit
+// (coffre, chest.lootId = noeud de base), sinon le noeud de base.
+// Choix zone plutot que niveau : le niveau d'un evenement suit son ancre (un 60 a Dun Morogh poserait des noeuds au
+// rang 230 qu'aucun debutant du public ne pourrait ouvrir), la competence n'est pas liee au niveau, et la zone donne le
+// meme rang que les noeuds natifs autour du joueur.
+constexpr uint32 EV_GISEMENT_NOEUD_MIN = 9101000;    // plage des noeuds d'artisanat (NOEUD_RECOLTE_MIN/MAX du module)
+constexpr uint32 EV_GISEMENT_NOEUD_MAX = 9101099;
+constexpr uint32 EV_GISEMENT_BASES = 12;             // noeuds de base 9101000-9101011
+constexpr uint32 EV_GISEMENT_VARIANTE0 = 9101012;    // generer.py ID_VARIANTE0
+std::unordered_map<uint32, uint32> evGisementTrancheZone;   // zone -> tranche (>= 2) ; fil monde seul
+
+// Variante du noeud de base `base` a la tranche `t`, verifiee contre son gabarit ; 0 si aucune.
+uint32 VarianteGisement(uint32 base, uint32 t)
+{
+    if (t < 2 || base < EV_GISEMENT_NOEUD_MIN || base >= EV_GISEMENT_NOEUD_MIN + EV_GISEMENT_BASES)
+        return 0;
+    uint64 const e = uint64(EV_GISEMENT_VARIANTE0) + uint64(EV_GISEMENT_BASES) * (t - 2) + (base - EV_GISEMENT_NOEUD_MIN);
+    if (e > EV_GISEMENT_NOEUD_MAX)
+        return 0;
+    GameObjectTemplate const* g = sObjectMgr->GetGameObjectTemplate(uint32(e));
+    return g && g->type == GAMEOBJECT_TYPE_CHEST && g->chest.lootId == base ? uint32(e) : 0;
+}
+
+void ChargerTranchesGisement()
+{
+    evGisementTrancheZone.clear();
+    std::unordered_map<uint32, uint32> conflits;
+    if (QueryResult r = WorldDatabase.Query("SELECT DISTINCT zoneId, id FROM gameobject WHERE id BETWEEN {} AND {}"
+                                            " AND zoneId <> 0", EV_GISEMENT_VARIANTE0, EV_GISEMENT_NOEUD_MAX))
+    {
+        do
+        {
+            uint32 const zone = (*r)[0].Get<uint16>();   // smallint unsigned
+            uint32 const e = (*r)[1].Get<uint32>();
+            uint32 const t = (e - EV_GISEMENT_VARIANTE0) / EV_GISEMENT_BASES + 2;
+            uint32 const base = EV_GISEMENT_NOEUD_MIN + (e - EV_GISEMENT_VARIANTE0) % EV_GISEMENT_BASES;
+            if (VarianteGisement(base, t) != e)
+                continue;   // pas une variante (autre objet de la plage) : ignore
+            auto [it, neuf] = evGisementTrancheZone.emplace(zone, t);
+            if (!neuf && it->second != t)
+                conflits[zone] = t;
+        } while (r->NextRow());
+    }
+    // Deux tranches dans une zone : le generateur n'en pose qu'une (TRANCHE_ZONE) ; donnee incoherente -> noeud de base.
+    for (auto const& [zone, t] : conflits)
+    {
+        LOG_ERROR("playerbots", "coa directeur : gisement, zone {} a deux tranches ({} et {}), noeuds de base", zone,
+                  evGisementTrancheZone[zone], t);
+        evGisementTrancheZone.erase(zone);
+    }
+    std::string liste;
+    for (auto const& [zone, t] : evGisementTrancheZone)
+        liste += (liste.empty() ? "" : ",") + std::to_string(zone) + ":" + std::to_string(t);
+    LOG_INFO("playerbots", "coa directeur : gisement, {} zone(s) a variante de tranche [{}]", evGisementTrancheZone.size(),
+             liste);
+}
+
 struct EvGisementNoeud
 {
     ObjectGuid guid;
@@ -526,11 +592,19 @@ void ExecuterGisement(CoaDirCommande const& c)
         RefuserGisement(c, "plein");
         return;
     }
+    // 21/10 : la variante de la tranche de la zone du point (sinon le noeud de base).
+    uint32 const zone = map->GetZoneId(PHASEMASK_NORMAL, c.x, c.y, sol);
+    auto const zt = evGisementTrancheZone.find(zone);
+    uint32 const tranche = zt != evGisementTrancheZone.end() ? zt->second : 1;
+    std::array<uint32, 2> entrees = *noeuds;
+    for (uint32& e : entrees)
+        if (uint32 const v = VarianteGisement(e, tranche))
+            e = v;
     float const depart = frand(0.0f, 2.0f * float(M_PI));
     uint32 poses = 0, rates = 0;
     for (uint32 k = 0; k < n; ++k)
     {
-        uint32 const entree = (*noeuds)[k % noeuds->size()];
+        uint32 const entree = entrees[k % entrees.size()];
         bool pose = false;
         for (int essai = 0; essai < EV_GISEMENT_ESSAIS && !pose; ++essai)
         {
@@ -562,8 +636,10 @@ void ExecuterGisement(CoaDirCommande const& c)
     }
     CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
     LOG_INFO("playerbots", "coa directeur evenement: id={} sous_action=gisement joueur={} valeur={} motif=pose poses={}"
-             " rates={} vie_s={} x={:.1f} y={:.1f} z={:.1f} theme={}", c.id, c.cible, c.valeur, poses, rates, c.dureeS,
-             c.x, c.y, sol, c.texte.substr(9));
+             " rates={} vie_s={} x={:.1f} y={:.1f} z={:.1f} theme={} zone={} tranche={} entrees={}", c.id, c.cible,
+             c.valeur, poses, rates, c.dureeS, c.x, c.y, sol, c.texte.substr(9), zone, tranche,
+             // entrees tentees (n = 1 : la premiere seule) ; la zone est celle du point, pas de chaque noeud
+             n > 1 ? std::to_string(entrees[0]) + "," + std::to_string(entrees[1]) : std::to_string(entrees[0]));
     Accuser(c, "execute", nullptr);
 }
 
