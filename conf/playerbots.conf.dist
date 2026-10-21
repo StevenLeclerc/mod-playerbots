@@ -4410,10 +4410,12 @@ AiPlayerbot.Directeur.EvenementGisement = 0
 #    AiPlayerbot.Directeur.Sourcier
 #        Description: Mini-evenements du Sourcier, voie Directeur (21/10/2026, lot T2 MINAGE, CoaDirecteurSourcier.inc ;
 #        conception coa-project/docs/CONCEPTION-artisanat-T2-sourcier-60.md). Un HUMAIN qui lance avec succes un sort
-#        de Sourcier « Directeur » (9113900 Ouvrir une faille tellurique) depose une demande `sourcier` dans
+#        de Sourcier « Directeur » (9113900 Ouvrir une faille tellurique, 9113901 Planter une
+#        Graine-tempete) depose une demande `sourcier` dans
 #        coa_dir_demande (texte = l'evenement), que le service lit (sourcier.py, cle `sourcier` de recit.conf). Exige
 #        l'ENUM `sourcier` de coa_dir_demande.type (migration 2026_10_21_00_coa_dir_demande_sourcier.sql), lue au
-#        demarrage. Les gabarits 9105010-9105013 doivent aussi etre dans EvenementCreatures. Lue a chaque sort
+#        demarrage. Les gabarits 9105010-9105013 (Faille tellurique) et 9105021-9105023 (elementaires attires du
+#        Jardin d'orage) doivent aussi etre dans EvenementCreatures. Lue a chaque sort
 #        (`.reload config` suffit).
 #        Default:     0 - eteint (aucune demande ; le module rend le lancement apres 180 s sans menace)
 #                     1 - allume

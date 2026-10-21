@@ -30,11 +30,12 @@ struct SourcierSortDirecteur
     char const* evenement;      // texte de la demande, lu par exploitation/directeur/sourcier.py (EVENEMENTS)
 };
 
-// Lot MINAGE : la Faille tellurique. Lots HERBORISTERIE et DEPECAGE : 9113901 (Jardin d'orage), 9113905 (Appel du
-// Linceul) a ajouter ici avec leur evenement.
-constexpr std::array<SourcierSortDirecteur, 1> SOURCIER_SORTS_DIRECTEUR =
+// Lot MINAGE : la Faille tellurique ; lot HERBORISTERIE : le Jardin d'orage (la Floraison des tombes est du module seul,
+// sans demande). Lot DEPECAGE : 9113905 (Appel du Linceul) a ajouter ici avec son evenement.
+constexpr std::array<SourcierSortDirecteur, 2> SOURCIER_SORTS_DIRECTEUR =
 {{
     { 9113900, "faille_tellurique" },
+    { 9113901, "jardin_orage" },        // lot HERBORISTERIE (21/10) : SORT_PLANTER_GRAINE_TEMPETE
 }};
 
 std::atomic<bool> sourcierTypePresent{ false };   // ecrit une fois au demarrage (fil monde), lu des fils de carte
