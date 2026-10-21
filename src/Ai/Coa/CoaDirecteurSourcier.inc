@@ -31,11 +31,12 @@ struct SourcierSortDirecteur
 };
 
 // Lot MINAGE : la Faille tellurique ; lot HERBORISTERIE : le Jardin d'orage (la Floraison des tombes est du module seul,
-// sans demande). Lot DEPECAGE : 9113905 (Appel du Linceul) a ajouter ici avec son evenement.
-constexpr std::array<SourcierSortDirecteur, 2> SOURCIER_SORTS_DIRECTEUR =
+// sans demande) ; lot DEPECAGE : l'Appel du Linceul (la Traque legendaire est du module seul, sans demande).
+constexpr std::array<SourcierSortDirecteur, 3> SOURCIER_SORTS_DIRECTEUR =
 {{
     { 9113900, "faille_tellurique" },
     { 9113901, "jardin_orage" },        // lot HERBORISTERIE (21/10) : SORT_PLANTER_GRAINE_TEMPETE
+    { 9113905, "appel_linceul" },       // lot DEPECAGE (21/10) : SORT_DEPLOYER_LINCEUL
 }};
 
 std::atomic<bool> sourcierTypePresent{ false };   // ecrit une fois au demarrage (fil monde), lu des fils de carte
