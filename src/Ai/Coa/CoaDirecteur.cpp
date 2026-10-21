@@ -10960,6 +10960,9 @@ void CoaDirecteur::DemarrerBus()
     // admise au demarrage comme la garde de colonnes).
     if (source)
         ChargerDefisBloquants();
+    // 21/10 : zones a variante de tranche du gisement d'apres-evenement (CoaDirecteurGardien.inc).
+    if (source)
+        ChargerTranchesGisement();
     if (source)
         LOG_INFO("playerbots", "coa directeur : bus pret, epoque {}, interrupteur {}", EpoqueMonde(), bus ? 1 : 0);
 }
