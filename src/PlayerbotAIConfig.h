@@ -983,8 +983,9 @@ public:
     // ------------------------------------------------------------ CoaCompagnons
     // CoA (25/10/2026, coa-project/docs/CONCEPTION-bots-compagnons-directeur.md, lot 1 ; Ai/Coa/CoaCompagnons.cpp) :
     // chaque personnage humain a ses bots attitres (allies de sa faction, vis-a-vis de l'autre), reveilles a sa
-    // connexion, endormis apres son depart. Lues UNE FOIS au demarrage (Initialize). Enable faux (defaut) : la table
-    // coa_compagnon n'est meme pas lue, EstCompagnon rend toujours faux, aucun effet.
+    // connexion, endormis apres son depart. Relues a chaque recharge (Initialize), SAUF Enable : CoaCompagnons.cpp le fige
+    // a sa premiere lecture (revue du 26/10, M1). Enable faux (defaut) : la table coa_compagnon n'est meme pas lue,
+    // EstCompagnon rend toujours faux, aucun effet.
     bool coaCompagnonsEnable;
     uint32 coaCompagnonsSeuilNiveau;       // niveau minimal de l'humain (defaut 10)
     uint32 coaCompagnonsAllies;            // allies par personnage (defaut 2, borne a 5)
@@ -993,6 +994,7 @@ public:
     uint32 coaCompagnonsRenouvellement;    // secondes entre deux renouvellements de « add » (defaut 120, 30..600)
     uint32 coaCompagnonsEchelonnement;     // secondes entre deux reveils (defaut 2, 0..60)
     uint32 coaCompagnonsMaxEveilles;       // plafond global de compagnons eveilles (defaut 40 ; 0 = aucun reveil)
+    uint32 coaCompagnonsEcartBas;          // a la constitution, jamais plus de N niveaux sous l'humain (defaut 5)
 
 private:
     PlayerbotAIConfig() = default;

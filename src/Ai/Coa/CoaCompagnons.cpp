@@ -29,6 +29,9 @@
 
 #include "CharacterCache.h"
 #include "Chat.h"
+#include "CoaBancSoin.h"
+#include "CoaDirecteur.h"
+#include "CoaGelBanc.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Group.h"
@@ -43,6 +46,7 @@
 #include "WorldSession.h"
 
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
@@ -98,7 +102,11 @@ std::unordered_map<uint32, Seance> gSeances;                  // humain -> seanc
 std::unordered_map<uint32, uint32> gEveilles;                 // bot eveille -> son humain
 std::deque<std::pair<uint32, uint32>> gFile;                  // (humain, bot) a reveiller, dans l'ordre
 std::unordered_set<uint32> gEnFile;                           // les bots de gFile
+// Endormis restes EN JEU : un humain en ligne de leur groupe les retient (CoaEndormir rend faux). Redemandes a chaque
+// renouvellement jusqu'a leur sortie (revue du 26/10, M2) : sans cette liste, plus rien ne s'en occupait.
+std::unordered_map<uint32, uint32> gRetenus;                  // bot -> son humain
 bool gCharge = false;                                         // table lue au demarrage
+bool gInitialise = false;                                     // ChargerEtEndormir deja appele une fois
 uint32 gCumulMs = 0;
 time_t gProchainReveil = 0;
 time_t gProchainRenouvellement = 0;
@@ -106,12 +114,15 @@ time_t gProchainReleve = 0;
 time_t gDernierAvisPlafond = 0;
 
 // --- lu par tout fil (EstCompagnon), ecrit au fil monde seul
+// Enable FIGE a la premiere lecture (revue du 26/10, M1) : une recharge de la conf ne l'allume ni ne l'eteint. Sans ca,
+// passer Enable de 1 a 0 a chaud faisait tomber les exemptions de bots en jeu et figeait les endormis 360 jours.
+std::atomic<bool> gEnableFige{false};
 std::shared_mutex gVerrou;
 std::unordered_set<uint32> gEnsemble;   // bots au registre, NON retires
 
 time_t Maintenant() { return GameTime::GetGameTime().count(); }
 
-bool Actif() { return sPlayerbotAIConfig.coaCompagnonsEnable && gCharge; }
+bool Actif() { return gEnableFige.load(std::memory_order_relaxed) && gCharge; }
 
 uint32 DureePresence() { return 2 * sPlayerbotAIConfig.coaCompagnonsRenouvellement; }
 
@@ -163,6 +174,20 @@ Membre* Trouver(uint32 humain, uint32 bot)
     return nullptr;
 }
 
+// Endort un bot via RandomPlayerbotMgr ; s'il reste en jeu (un humain en ligne de son groupe le retient), le note dans
+// gRetenus pour redemander au renouvellement suivant. Rend vrai s'il est sorti (ou n'etait pas en jeu).
+bool Coucher(uint32 humain, uint32 bot)
+{
+    if (sRandomPlayerbotMgr.CoaEndormir(Guid(bot)))
+    {
+        gRetenus.erase(bot);
+        return true;
+    }
+    if (gRetenus.emplace(bot, humain).second)
+        LOG_INFO("playerbots", "coa compagnon: retenu humain={} bot={} raison=groupe_humain", NomDe(humain), NomDe(bot));
+    return false;
+}
+
 // Un humain : personnage d'un compte qui n'est pas un compte de bots.
 bool CompteHumain(uint32 compte) { return compte && !sPlayerbotAIConfig.IsInRandomAccountList(compte); }
 
@@ -181,7 +206,7 @@ void Retirer(uint32 humain, Membre& m, char const* motif)
 
 void EndormirBot(uint32 humain, uint32 bot, char const* motif, time_t maintenant)
 {
-    sRandomPlayerbotMgr.CoaEndormir(Guid(bot));
+    Coucher(humain, bot);
     gEveilles.erase(bot);
     if (Membre* m = Trouver(humain, bot))
         if (m->etat == Etat::Eveille)
@@ -217,7 +242,7 @@ uint32 Endormir(uint32 humain, char const* motif, time_t maintenant)
     // Un membre en file n'est pas encore eveille ; s'il a ete pris EN JEU a la constitution, il y est encore.
     for (uint32 bot : retiresDeLaFile)
         if (!gEveilles.count(bot))
-            sRandomPlayerbotMgr.CoaEndormir(Guid(bot));
+            Coucher(humain, bot);
 
     std::vector<uint32> aEndormir;
     for (auto const& [bot, h] : gEveilles)
@@ -316,13 +341,15 @@ std::vector<uint32> Constituer(uint32 humain, uint8 niveau, TeamId camp, Seance&
         clauseReserve = " AND NOT EXISTS (SELECT 1 FROM guild_member g WHERE g.guid = c.guid AND g.guildid IN (" + ids + "))";
     }
 
-    // Jamais au-dessus de humain + 2 (§ 5) ; les comptes de type 2 (addclass) ne sont pas dans la liste.
+    // Jamais au-dessus de humain + 2 (§ 5), ni plus de EcartBas sous lui (revue du 26/10, M3 : sans borne basse, un
+    // humain de niveau 60 recevait des allies de niveau 30, que rien ne rattrape au lot 1). Les comptes de type 2
+    // (addclass) ne sont pas dans la liste.
     QueryResult res = CharacterDatabase.Query(
         "SELECT c.guid, c.race, c.class, c.level, c.name FROM characters c"
-        " WHERE c.account IN ({}) AND c.level <= {} AND c.deleteInfos_Account IS NULL"
+        " WHERE c.account IN ({}) AND c.level <= {} AND c.level + {} >= {} AND c.deleteInfos_Account IS NULL"
         " AND NOT EXISTS (SELECT 1 FROM coa_compagnon cc WHERE cc.bot_guid = c.guid)"
         " AND NOT EXISTS (SELECT 1 FROM arena_team_member a WHERE a.guid = c.guid){}",
-        listeComptes, uint32(niveau) + 2, clauseReserve);
+        listeComptes, uint32(niveau) + 2, sPlayerbotAIConfig.coaCompagnonsEcartBas, uint32(niveau), clauseReserve);
 
     std::vector<uint32> const gladiateurs = GladiateursDeLaConf();
     std::vector<Candidat> allies, visAVis;
@@ -347,6 +374,12 @@ std::vector<uint32> Constituer(uint32 humain, uint8 niveau, TeamId camp, Seance&
                 continue;
             if (sPlayerbotAIConfig.disableDeathKnightLogin && classe == CLASS_DEATH_KNIGHT)
                 continue;
+            // Mobilise par un banc (revue du 26/10, m4) : cible de banc de prime, membre d'essai du banc des soins.
+            if (CoaDirecteur::CibleDeBanc(guid) || CoaBancSoin::MembreEngage(guid))
+                continue;
+            // Pas de mercenaire, ni allie ni vis-a-vis (§ 17 question 6 : « non au debut » ; revue du 26/10, m1).
+            if (sPlayerbotAIConfig.IsMercenary(Guid(guid).GetRawValue()))
+                continue;
 
             // Faction par la table des races (ChrRaces.dbc) : les races 21 et 22 ne sont pas celles d'IsAlliance.
             TeamId const sienne = Player::TeamIdForRace(race);
@@ -354,14 +387,15 @@ std::vector<uint32> Constituer(uint32 humain, uint8 niveau, TeamId camp, Seance&
                 continue;
 
             Player* enJeu = ObjectAccessor::FindConnectedPlayer(Guid(guid));
-            // Un bot en groupe ou en champ de bataille est occupe : on ne le prend pas.
-            if (enJeu && (enJeu->GetGroup() || enJeu->InBattleground() || enJeu->InBattlegroundQueue()))
+            // Un bot en groupe, en champ de bataille ou gele par un banc (CoaGelBanc) est occupe : on ne le prend pas.
+            if (enJeu &&
+                (enJeu->GetGroup() || enJeu->InBattleground() || enJeu->InBattlegroundQueue() || CoaGelBanc(enJeu)))
                 continue;
 
             Candidat c{guid, classe, niv, enJeu != nullptr, urand(0, 1000000)};
             if (sienne == camp)
             {
-                if (besoinAllies && !sPlayerbotAIConfig.IsMercenary(Guid(guid).GetRawValue()))
+                if (besoinAllies)
                     allies.push_back(c);
             }
             else if (besoinVisAVis)
@@ -465,7 +499,7 @@ uint32 Activer(uint32 humain, uint8 niveau, TeamId camp, Seance& seance, time_t 
         bool const enFile = gEnFile.count(bot) != 0;
         if (enFile && ObjectAccessor::FindConnectedPlayer(Guid(bot)))
             continue;
-        sRandomPlayerbotMgr.CoaEndormir(Guid(bot));
+        Coucher(humain, bot);
     }
     return ajoutes.size();
 }
@@ -485,7 +519,7 @@ void Reveiller(time_t maintenant)
             // Parti entre-temps : pas de reveil, et pas de delai consomme. Un membre neuf pris EN JEU (Activer ne l'a
             // pas endormi, il attendait ce reveil) doit quand meme quitter le jeu.
             if (!gEveilles.count(bot))
-                sRandomPlayerbotMgr.CoaEndormir(Guid(bot));
+                Coucher(humain, bot);
             continue;
         }
         Membre* m = Trouver(humain, bot);
@@ -500,6 +534,7 @@ void Reveiller(time_t maintenant)
 
         sRandomPlayerbotMgr.CoaEnroler(Guid(bot), DureePresence());
         gEveilles[bot] = humain;
+        gRetenus.erase(bot);
         m->etat = Etat::Eveille;
         CharacterDatabase.Execute(
             "UPDATE coa_compagnon SET etat = 'eveille', dernier_eveil = UTC_TIMESTAMP(), niveau_reveil = {}"
@@ -571,11 +606,27 @@ void Renouveler(time_t maintenant)
             orphelins.emplace_back(h, bot);
     for (auto const& [h, bot] : orphelins)
         EndormirBot(h, bot, "orphelin", maintenant);
+
+    // Les endormis retenus en jeu par un groupe (revue du 26/10, M2) : redemander. Sortis du jeu (ProcessBot les
+    // deconnecte quand le groupe les lache) ou reveilles entre-temps : oublies. Un groupe qui survit a ses humains
+    // hors ligne ne les retient plus : CoaEndormir les deconnecte alors (et LogoutPlayerBot les sort du groupe).
+    std::vector<std::pair<uint32, uint32>> retenus(gRetenus.begin(), gRetenus.end());
+    for (auto const& [bot, h] : retenus)
+    {
+        if (gEveilles.count(bot) || gEnFile.count(bot) || !ObjectAccessor::FindConnectedPlayer(Guid(bot)))
+        {
+            gRetenus.erase(bot);
+            continue;
+        }
+        if (Coucher(h, bot))
+            LOG_INFO("playerbots", "coa compagnon: sommeil humain={} bot={} apres=0 motif=groupe_libere", NomDe(h),
+                     NomDe(bot));
+    }
 }
 
 void Relever(time_t maintenant)
 {
-    if (gSeances.empty() && gEveilles.empty())
+    if (gSeances.empty() && gEveilles.empty() && gRetenus.empty())
         return;
     uint32 presents = 0;
     for (auto const& [h, s] : gSeances)
@@ -594,8 +645,10 @@ void Relever(time_t maintenant)
         else if (ecart < -2)
             ++devant;
     }
-    LOG_INFO("playerbots", "coa compagnon releve: humains={} seances={} eveilles={} en_file={} en_retard={} devant={}",
-             presents, uint32(gSeances.size()), uint32(gEveilles.size()), uint32(gEnFile.size()), enRetard, devant);
+    LOG_INFO("playerbots",
+             "coa compagnon releve: humains={} seances={} eveilles={} en_file={} en_retard={} devant={} retenus={}",
+             presents, uint32(gSeances.size()), uint32(gEveilles.size()), uint32(gEnFile.size()), enRetard, devant,
+             uint32(gRetenus.size()));
     (void)maintenant;
 }
 
@@ -634,7 +687,7 @@ namespace CoaCompagnons
 {
 bool EstCompagnon(uint32 botGuid)
 {
-    if (!sPlayerbotAIConfig.coaCompagnonsEnable)
+    if (!gEnableFige.load(std::memory_order_relaxed))
         return false;
     std::shared_lock<std::shared_mutex> verrou(gVerrou);
     return gEnsemble.count(botGuid) != 0;
@@ -642,25 +695,54 @@ bool EstCompagnon(uint32 botGuid)
 
 void ChargerEtEndormir()
 {
-    gCharge = false;
+    // Revue du 26/10 (M1) : RandomPlayerbotMgr::Init repasse ici a CHAQUE recharge de la conf (`.reload config` puis
+    // `playerbots rndbot reload`, `.playerbots bot reload` -> PlayerbotAIConfig::Initialize). Tout vider alors
+    // endormait et deconnectait les compagnons des humains en jeu, sans rien pour les reveiller. Donc :
+    //  - Enable est fige a la premiere lecture ;
+    //  - registre deja charge : on le garde tel quel ;
+    //  - seul cas rejoue : Enable fige a 1 et table absente au premier passage (migration appliquee depuis).
+    bool const confEnable = sPlayerbotAIConfig.coaCompagnonsEnable;
+    if (!gInitialise)
+    {
+        gInitialise = true;
+        gEnableFige.store(confEnable, std::memory_order_relaxed);
+    }
+    else
+    {
+        bool const fige = gEnableFige.load(std::memory_order_relaxed);
+        if (gCharge || !fige)
+        {
+            if (gCharge || confEnable)
+                LOG_INFO("playerbots",
+                         "coa compagnon: rechargement ignore enable_fige={} enable_conf={} registre_garde={} "
+                         "(Enable ne change qu'au redemarrage)",
+                         fige ? 1 : 0, confEnable ? 1 : 0, gCharge ? 1 : 0);
+            return;
+        }
+    }
+
+    if (!gEnableFige.load(std::memory_order_relaxed))
+        return;   // inerte : pas une requete, pas une ligne (le Live tourne sans la table)
+
+    // Premier passage, ou nouvel essai apres une table absente : l'etat est vide (rien n'a tourne sans gCharge).
     gRegistres.clear();
     gSeances.clear();
     gEveilles.clear();
     gFile.clear();
     gEnFile.clear();
+    gRetenus.clear();
     {
         std::unique_lock<std::shared_mutex> verrou(gVerrou);
         gEnsemble.clear();
     }
 
-    if (!sPlayerbotAIConfig.coaCompagnonsEnable)
-        return;   // inerte : pas une requete, pas une ligne (le Live tourne sans la table)
-
     if (!CharacterDatabase.Query(
             "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coa_compagnon'"))
     {
-        LOG_ERROR("playerbots", "coa compagnon: table coa_compagnon absente de la base personnages -- compagnons INERTES "
-                                "(appliquer data/sql/characters/updates/2026_10_25_00_coa_compagnon.sql)");
+        // Premier mot « inerte » : un genre que lit exploitation/directeur/compagnons.py (revue du 26/10, m6).
+        LOG_ERROR("playerbots", "coa compagnon: inerte raison=table_absente -- table coa_compagnon absente de la base "
+                                "personnages (appliquer data/sql/characters/updates/2026_10_25_00_coa_compagnon.sql, "
+                                "puis recharger la conf ou redemarrer)");
         return;
     }
 
@@ -715,8 +797,8 @@ void ChargerEtEndormir()
                     ++eveillesAvant;
                 m.etat = Etat::Dort;
                 // « logout » long sur TOUT le registre, avant le premier tirage (§ 6.4 de la conception).
-                sRandomPlayerbotMgr.CoaEndormir(Guid(m.bot));
                 EnsembleAjouter(m.bot);
+                Coucher(humain, m.bot);
                 ++compagnons;
             }
             if (m.etat == Etat::Retire)
@@ -929,8 +1011,14 @@ bool CommandeEndormir(ChatHandler* handler, std::string const& nom)
     uint32 const h = e->Guid.GetCounter();
     uint32 const n = Endormir(h, "commande", Maintenant());
     gSeances.erase(h);
-    handler->PSendSysMessage("coa compagnon endormir: {} ; {} compagnon(s) endormi(s). Ils se reveilleront a sa prochaine connexion.",
-                             e->Name, n);
+    uint32 retenus = 0;
+    for (auto const& [bot, hh] : gRetenus)
+        if (hh == h)
+            ++retenus;
+    handler->PSendSysMessage("coa compagnon endormir: {} ; {} compagnon(s) endormi(s), dont {} retenu(s) en jeu par un "
+                             "groupe (deconnectes des qu'aucun humain du groupe n'est en ligne). Ils se reveilleront a "
+                             "sa prochaine connexion.",
+                             e->Name, n, retenus);
     return true;
 }
 }  // namespace CoaCompagnons

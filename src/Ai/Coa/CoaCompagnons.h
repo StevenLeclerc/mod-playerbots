@@ -32,10 +32,13 @@ class Player;
 namespace CoaCompagnons
 {
 // N'importe quel fil. Vrai si ce bot (guid bas) est au registre d'un humain (eveille ou endormi, pas « retire »).
+// Suit la valeur d'Enable FIGEE au demarrage, pas celle d'une recharge.
 bool EstCompagnon(uint32 botGuid);
 
 // FIL MONDE, au demarrage (RandomPlayerbotMgr::Init, avant le premier tirage) : lit le registre, retire les bots
-// supprimes, purge les lignes d'un humain supprime, et remet TOUT le registre en sommeil.
+// supprimes, purge les lignes d'un humain supprime, et remet TOUT le registre en sommeil. Init repasse ici a chaque
+// recharge de la conf : AiPlayerbot.CoaCompagnons.Enable est fige au premier appel, et un registre deja charge est
+// garde tel quel (seul nouvel essai : table absente au premier passage).
 void ChargerEtEndormir();
 
 // FIL MONDE. Crochets de RandomPlayerbotMgr::OnPlayerLogin / OnPlayerLogout, HUMAINS seulement.
