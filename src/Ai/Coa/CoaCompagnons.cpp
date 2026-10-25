@@ -202,16 +202,22 @@ void EndormirBot(uint32 humain, uint32 bot, char const* motif, time_t maintenant
 // La seance n'est PAS effacee : a l'appelant de le faire.
 uint32 Endormir(uint32 humain, char const* motif, time_t maintenant)
 {
+    std::vector<uint32> retiresDeLaFile;
     for (auto it = gFile.begin(); it != gFile.end();)
     {
         if (it->first == humain)
         {
             gEnFile.erase(it->second);
+            retiresDeLaFile.push_back(it->second);
             it = gFile.erase(it);
         }
         else
             ++it;
     }
+    // Un membre en file n'est pas encore eveille ; s'il a ete pris EN JEU a la constitution, il y est encore.
+    for (uint32 bot : retiresDeLaFile)
+        if (!gEveilles.count(bot))
+            sRandomPlayerbotMgr.CoaEndormir(Guid(bot));
 
     std::vector<uint32> aEndormir;
     for (auto const& [bot, h] : gEveilles)
@@ -475,7 +481,13 @@ void Reveiller(time_t maintenant)
 
         auto s = gSeances.find(humain);
         if (s == gSeances.end() || (!s->second.present && !s->second.commande))
-            continue;   // parti entre-temps : pas de reveil, et pas de delai consomme
+        {
+            // Parti entre-temps : pas de reveil, et pas de delai consomme. Un membre neuf pris EN JEU (Activer ne l'a
+            // pas endormi, il attendait ce reveil) doit quand meme quitter le jeu.
+            if (!gEveilles.count(bot))
+                sRandomPlayerbotMgr.CoaEndormir(Guid(bot));
+            continue;
+        }
         Membre* m = Trouver(humain, bot);
         if (!m || m->etat == Etat::Retire || gEveilles.count(bot))
             continue;
