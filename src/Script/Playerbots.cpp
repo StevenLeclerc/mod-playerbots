@@ -10,6 +10,7 @@
 #include "Channel.h"
 // Lot 4 du mercenaire chasseur : le catalogue de postes de guet, charge au
 // demarrage. Voir Ai/Coa/CoaPostes.h.
+#include "CoaCompagnons.h"
 #include "CoaDirecteur.h"
 #include "CoaPostes.h"
 #include "Config.h"
@@ -436,6 +437,8 @@ public:
         CoaDirecteur::Persister();
         PlayerbotWorldThreadProcessor::instance().Update(diff);
         sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
+        // CoA (25/10/2026) : bots compagnons -- reveils, renouvellement, grace (inerte si l'option est eteinte).
+        CoaCompagnons::MettreAJour(diff);
     }
 };
 

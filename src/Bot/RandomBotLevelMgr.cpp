@@ -10,6 +10,7 @@
 
 #include "RandomBotLevelMgr.h"
 #include "ArenaTeamMgr.h"
+#include "CoaCompagnons.h"
 #include "CoaDirecteur.h"
 #include "DatabaseEnv.h"
 #include "LFGMgr.h"
@@ -346,6 +347,11 @@ void RandomBotLevelMgr::AdjustBotToRange(Player* bot, int targetRangeIndex, Team
         bot->IsDuringRemoveFromWorld())
         return;
 
+    // CoA (25/10/2026, CoaCompagnons.cpp) : garde au point de passage OBLIGE de tout changement de palier (file
+    // d'attente remplie avant que le bot ne devienne compagnon comprise).
+    if (CoaCompagnons::EstCompagnon(bot->GetGUID().GetCounter()))
+        return;
+
     if (targetRangeIndex < 0 || targetRangeIndex >= _numRanges)
         return;
 
@@ -473,6 +479,10 @@ int RandomBotLevelMgr::GetOrFlagPlayerBracket(Player* player)
     bool isRandomBot = sRandomPlayerbotMgr.IsRandomBot(player);
 
     if (isRandomBot && IsNameInExcludeList(player, sPlayerbotAIConfig.levelBracketsExcludeNames))
+        return -1;
+
+    // CoA (25/10/2026, CoaCompagnons.cpp) : un compagnon suit son humain, jamais les paliers.
+    if (isRandomBot && CoaCompagnons::EstCompagnon(player->GetGUID().GetCounter()))
         return -1;
 
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
@@ -747,6 +757,9 @@ void RandomBotLevelMgr::RunLevelBracketsDistribution()
             continue;
         if (IsNameInExcludeList(player, sPlayerbotAIConfig.levelBracketsExcludeNames))
             continue;
+        // CoA (25/10/2026, CoaCompagnons.cpp) : ni compte dans les tranches, ni deplace par elles.
+        if (CoaCompagnons::EstCompagnon(player->GetGUID().GetCounter()))
+            continue;
 
         PlayerbotAI* botAI = GET_PLAYERBOT_AI(player);
         if (sPlayerbotAIConfig.levelBracketsIgnoreGuildWithRealPlayers && botAI && botAI->IsInRealGuild())
@@ -910,6 +923,11 @@ uint8 RandomBotLevelMgr::ComputeResetChance(uint8 level) const
 // whichever is higher) via a full PlayerbotFactory randomize.
 void RandomBotLevelMgr::ResetBot(Player* player, uint8 currentLevel)
 {
+    // CoA (25/10/2026, CoaCompagnons.cpp) : un compagnon ne baisse jamais de niveau (les trois chemins de
+    // ResetBotLevel finissent ici ou dans SkipBotLevel).
+    if (CoaCompagnons::EstCompagnon(player->GetGUID().GetCounter()))
+        return;
+
     uint8 levelToResetTo = sPlayerbotAIConfig.resetBotLevelResetTo;
 
     uint8 dkMinLevel = static_cast<uint8>(sWorld->getIntConfig(CONFIG_START_HEROIC_PLAYER_LEVEL));
@@ -933,6 +951,10 @@ void RandomBotLevelMgr::ResetBot(Player* player, uint8 currentLevel)
 // level, whichever is higher) via a full PlayerbotFactory randomize.
 void RandomBotLevelMgr::SkipBotLevel(Player* player, uint8 currentLevel)
 {
+    // CoA (25/10/2026, CoaCompagnons.cpp) : ni saut de niveau pour un compagnon.
+    if (CoaCompagnons::EstCompagnon(player->GetGUID().GetCounter()))
+        return;
+
     uint8 levelToSkipTo = sPlayerbotAIConfig.resetBotLevelSkipTo;
 
     uint8 dkMinLevel = static_cast<uint8>(sWorld->getIntConfig(CONFIG_START_HEROIC_PLAYER_LEVEL));

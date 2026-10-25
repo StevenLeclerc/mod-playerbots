@@ -1149,6 +1149,20 @@ bool PlayerbotAIConfig::Initialize()
     if (arene1v1NiveauMin < 10)
         arene1v1NiveauMin = 10;
 
+    // ------------------------------------------------------------ CoaCompagnons
+    // CoA (25/10/2026, Ai/Coa/CoaCompagnons.cpp) : inerte par defaut (Enable = 0). Bornes posees ici pour que le
+    // code n'ait jamais a se defendre d'une valeur absurde : un renouvellement trop court ecrirait en base a chaque
+    // seconde, trop long laisserait « add » (2 x Renouvellement) expirer entre deux passes.
+    coaCompagnonsEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaCompagnons.Enable", false);
+    coaCompagnonsSeuilNiveau = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.SeuilNiveau", 10));
+    coaCompagnonsAllies = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Allies", 2), 5);
+    coaCompagnonsVisAVis = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.VisAVis", 2), 5);
+    coaCompagnonsGrace = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Grace", 900), 86400);
+    coaCompagnonsRenouvellement = std::clamp<uint32>(
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Renouvellement", 120), 30, 600);
+    coaCompagnonsEchelonnement = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Echelonnement", 2), 60);
+    coaCompagnonsMaxEveilles = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.MaxEveilles", 40), 500);
+
     selfBotLevel =sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
     botTextLocale = sConfigMgr->GetOption<int32>("AiPlayerbot.BotTextLocale", -1);
 
