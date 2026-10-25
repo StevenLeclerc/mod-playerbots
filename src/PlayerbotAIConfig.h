@@ -980,6 +980,20 @@ public:
     // Defaut faux : la commande refuse (`desactive_banc`), rien d'autre ne change.
     bool arene1v1Banc;
 
+    // ------------------------------------------------------------ CoaCompagnons
+    // CoA (25/10/2026, coa-project/docs/CONCEPTION-bots-compagnons-directeur.md, lot 1 ; Ai/Coa/CoaCompagnons.cpp) :
+    // chaque personnage humain a ses bots attitres (allies de sa faction, vis-a-vis de l'autre), reveilles a sa
+    // connexion, endormis apres son depart. Lues UNE FOIS au demarrage (Initialize). Enable faux (defaut) : la table
+    // coa_compagnon n'est meme pas lue, EstCompagnon rend toujours faux, aucun effet.
+    bool coaCompagnonsEnable;
+    uint32 coaCompagnonsSeuilNiveau;       // niveau minimal de l'humain (defaut 10)
+    uint32 coaCompagnonsAllies;            // allies par personnage (defaut 2, borne a 5)
+    uint32 coaCompagnonsVisAVis;           // vis-a-vis par personnage (defaut 2, borne a 5)
+    uint32 coaCompagnonsGrace;             // secondes entre le depart de l'humain et le sommeil (defaut 900)
+    uint32 coaCompagnonsRenouvellement;    // secondes entre deux renouvellements de « add » (defaut 120, 30..600)
+    uint32 coaCompagnonsEchelonnement;     // secondes entre deux reveils (defaut 2, 0..60)
+    uint32 coaCompagnonsMaxEveilles;       // plafond global de compagnons eveilles (defaut 40 ; 0 = aucun reveil)
+
 private:
     PlayerbotAIConfig() = default;
     ~PlayerbotAIConfig() = default;

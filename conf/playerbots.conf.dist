@@ -2210,6 +2210,39 @@ AiPlayerbot.RandomBotArenaTeamMinLevel = 70
 # server to resume normal randombot arena team assignment.
 AiPlayerbot.DeleteRandomBotArenaTeams = 0
 
+# ---------------------------------------------------------------------------- CoaCompagnons (CoA)
+# Bots compagnons (« visages connus ») : chaque personnage humain de niveau >= SeuilNiveau
+# a ses bots attitres, toujours les memes -- Allies de sa faction et VisAVis de l'autre
+# faction. Ils se connectent quand il se connecte, et se deconnectent Grace secondes apres
+# son depart. Endormis, ils sont figes : hors du tirage des bots aleatoires, des paliers de
+# niveau, de la remise a zero du niveau, de la refonte periodique et de la teleportation
+# aleatoire. Registre : table `coa_compagnon` de la base personnages (migration
+# data/sql/characters/updates/2026_10_25_00_coa_compagnon.sql, A APPLIQUER AVANT d'allumer).
+# Ils s'AJOUTENT a MaxRandomBots. Code : src/Ai/Coa/CoaCompagnons.cpp ; conception :
+# coa-project/docs/CONCEPTION-bots-compagnons-directeur.md. Journal : « coa compagnon: ».
+# Commandes (MJ, console) : .coa compagnon liste|eveiller|endormir <humain>
+#
+# Enable : 0 (defaut) = tout est inerte, la table n'est pas lue.
+#          Repasser de 1 a 0 laisse les compagnons endormis HORS du tirage (evenement
+#          `logout` de PermanentlyInWorldTime) : voir la conception pour les liberer.
+# Lues une seule fois, au demarrage.
+AiPlayerbot.CoaCompagnons.Enable = 0
+# Niveau minimal du personnage humain. Defaut : 10
+AiPlayerbot.CoaCompagnons.SeuilNiveau = 10
+# Taille du registre, par personnage (0 a 5 chacun). Defaut : 2 et 2
+AiPlayerbot.CoaCompagnons.Allies = 2
+AiPlayerbot.CoaCompagnons.VisAVis = 2
+# Secondes entre le depart de l'humain et le sommeil de ses compagnons. Un changement de
+# personnage sur le meme compte les endort tout de suite. Defaut : 900
+AiPlayerbot.CoaCompagnons.Grace = 900
+# Secondes entre deux renouvellements de leur presence (30 a 600). La presence est posee
+# pour 2 x Renouvellement : si le renouvellement cesse, ils s'endorment seuls. Defaut : 120
+AiPlayerbot.CoaCompagnons.Renouvellement = 120
+# Secondes entre deux reveils (0 a 60). Defaut : 2
+AiPlayerbot.CoaCompagnons.Echelonnement = 2
+# Plafond global de compagnons eveilles en meme temps (0 = aucun reveil). Defaut : 40
+AiPlayerbot.CoaCompagnons.MaxEveilles = 40
+
 # ---------------------------------------------------------------------------- Arene1v1 (CoA)
 # Escarmouche 1 contre 1 NON classee : un joueur humain contre un bot d'une classe CoA,
 # le « gladiateur », mis a son niveau (niveau, sorts, talents, equipement) a l'inscription.

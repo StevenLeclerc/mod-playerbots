@@ -148,6 +148,18 @@ public:
     // AddPlayerBot tout seul ne suffit pas, et le manquer coute une campagne
     // de mesure entiere.
     bool CoaEnroler(ObjectGuid guid);
+    // CoA (25/10/2026, CoaCompagnons.cpp) : meme chose, avec une duree de presence (« add ») choisie. FIL MONDE.
+    bool CoaEnroler(ObjectGuid guid, uint32 duree);
+    // CoA (25/10/2026, CoaCompagnons.cpp) : endort un bot. « add » leve, « logout » pose pour
+    // PermanentlyInWorldTime (hors du tirage, redemarrage compris), deconnexion tout de suite s'il est en jeu
+    // et sans humain dans son groupe ; sinon il reste dans la population geree et ProcessBot le deconnecte des
+    // qu'il le peut. FIL MONDE.
+    void CoaEndormir(ObjectGuid guid);
+    // CoA (25/10/2026, CoaCompagnons.cpp) : rend un compagnon purge du registre a la vie ordinaire (« logout » leve,
+    // sans le connecter : le tirage le reprendra comme les autres). FIL MONDE.
+    void CoaLiberer(ObjectGuid guid);
+    // CoA (25/10/2026) : comptes de bots aleatoires (type 1), lus par la constitution des compagnons. FIL MONDE.
+    std::vector<uint32> const& CoaComptesAleatoires() const { return rndBotTypeAccounts; }
 
     bool IsSpecPvp(uint32 bot, uint8 cls);
     void Remove(Player* bot);

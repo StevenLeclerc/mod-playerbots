@@ -74,6 +74,7 @@
 
 #include "Chat.h"
 #include "CharacterCache.h"
+#include "CoaCompagnons.h"
 #include "Group.h"
 #include "GroupMgr.h"
 #include "ObjectAccessor.h"
@@ -98,6 +99,13 @@ public:
 
     ChatCommandTable GetCommands() const override
     {
+        // CoA (25/10/2026, CoaCompagnons.cpp) : registre des bots compagnons d'un personnage humain.
+        static ChatCommandTable compagnonTable =
+        {
+            { "liste",    HandleCoaCompagnonListeCommand,    SEC_GAMEMASTER, Console::Yes },
+            { "eveiller", HandleCoaCompagnonEveillerCommand, SEC_GAMEMASTER, Console::Yes },
+            { "endormir", HandleCoaCompagnonEndormirCommand, SEC_GAMEMASTER, Console::Yes },
+        };
         static ChatCommandTable coaTable =
         {
             // Console::Yes : la console RA n'a ni personnage ni cible
@@ -106,6 +114,7 @@ public:
             { "niveau", HandleCoaNiveauCommand, SEC_GAMEMASTER, Console::Yes },
             { "enrole", HandleCoaEnroleCommand, SEC_GAMEMASTER, Console::Yes },
             { "groupe", HandleCoaGroupeCommand, SEC_GAMEMASTER, Console::Yes },
+            { "compagnon", compagnonTable },
         };
         static ChatCommandTable commandTable =
         {
@@ -431,6 +440,31 @@ public:
             cible->GetHealth(), cible->GetMaxHealth(),
             uint32(cible->GetSpellMap().size()));
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // .coa compagnon liste|eveiller|endormir <humain>   (CoaCompagnons.cpp)
+    // Un nom de personnage HUMAIN ; les messages passent par fmt ({}).
+    // ------------------------------------------------------------------
+    static std::string PremierMot(char const* args)
+    {
+        std::vector<std::string> mots = Decouper(args);
+        return mots.empty() ? std::string() : mots[0];
+    }
+
+    static bool HandleCoaCompagnonListeCommand(ChatHandler* handler, char const* args)
+    {
+        return CoaCompagnons::CommandeListe(handler, PremierMot(args));
+    }
+
+    static bool HandleCoaCompagnonEveillerCommand(ChatHandler* handler, char const* args)
+    {
+        return CoaCompagnons::CommandeEveiller(handler, PremierMot(args));
+    }
+
+    static bool HandleCoaCompagnonEndormirCommand(ChatHandler* handler, char const* args)
+    {
+        return CoaCompagnons::CommandeEndormir(handler, PremierMot(args));
     }
 
     // Le remplissage, partage par les deux commandes. L'ordre compte : voir

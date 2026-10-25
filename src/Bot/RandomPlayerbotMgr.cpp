@@ -6,6 +6,7 @@
 
 #include "RandomPlayerbotMgr.h"
 #include "CoaGelBanc.h"
+#include "CoaCompagnons.h"
 #include "AiFactory.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
@@ -1400,6 +1401,14 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
             SetEventValue(bot, "add", 0, 0);
             currentBots.erase(bot);
 
+            // CoA (25/10/2026, CoaCompagnons.cpp) : un compagnon dont la presence a expire (renouvellement
+            // manque) ou qu'on a endormi en groupe s'en va HORS du tirage, jamais comme un bot ordinaire.
+            if (CoaCompagnons::EstCompagnon(bot))
+            {
+                SetEventValue(bot, "logout", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+                CoaCompagnons::BotSorti(bot);
+            }
+
             if (player)
                 LogoutPlayerBot(botGUID);
         }
@@ -1577,6 +1586,11 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
     // (mesure-experimentale.md § 10). La revive plus haut reste (sur place : la garde
     // de RandomTeleport la retient). Sans banc : un chargement atomique.
     if (idleBot && CoaDirecteur::CibleDeBanc(botId))
+        idleBot = false;
+    // CoA (25/10/2026, CoaCompagnons.cpp) : un compagnon n'est ni re-randomise (RandomizeFirst tire un niveau au
+    // hasard sous le niveau 3, la refonte refait l'equipement) ni teleporte au hasard : il suit son humain.
+    // Lecture sous verrou partage : ce chemin tourne aussi sur un fil de carte (RandomBotUpdateAction).
+    if (idleBot && CoaCompagnons::EstCompagnon(botId))
         idleBot = false;
 
     if (idleBot)
@@ -1872,6 +1886,11 @@ void RandomPlayerbotMgr::Init()
         sRandomPlayerbotMgr.LoadBattleMastersCache();
 
     PlayerbotsDatabase.Execute("DELETE FROM playerbots_random_bots WHERE event = 'add'");
+
+    // CoA (25/10/2026, CoaCompagnons.cpp) : le registre des compagnons, tout entier remis en sommeil AVANT le
+    // premier tirage. Un compagnon eveille au moment de l'arret (ou d'un plantage) n'a plus de « logout » :
+    // sans ceci, AddRandomBots le reprendrait comme un bot ordinaire. Option eteinte : rien n'est lu.
+    CoaCompagnons::ChargerEtEndormir();
 }
 
 void RandomPlayerbotMgr::InitArenaTeams()
@@ -2543,17 +2562,66 @@ CachedEvent* RandomPlayerbotMgr::FindEvent(uint32 bot, std::string const& event)
 // l'evenement « add » pour que le prochain tour ne le ressorte pas.
 bool RandomPlayerbotMgr::CoaEnroler(ObjectGuid guid)
 {
+    return CoaEnroler(guid, sPlayerbotAIConfig.maxRandomBotInWorldTime);
+}
+
+// CoA (25/10/2026, CoaCompagnons.cpp) : la forme d'origine, avec une duree de presence choisie. Les compagnons
+// posent « add » pour 2 x Renouvellement et le renouvellent : si plus personne ne renouvelle, ProcessBot les
+// deconnecte de lui-meme a l'echeance (et la garde compagnon de ProcessBot repose leur « logout »).
+// GetEventValue d'abord : SetEventValue marque le cache du bot « charge » ; sur un bot jamais lu, ses autres
+// evenements (specNo, randomize...) ne seraient alors jamais relus en base.
+bool RandomPlayerbotMgr::CoaEnroler(ObjectGuid guid, uint32 duree)
+{
     uint32 const bas = guid.GetCounter();
 
+    GetEventValue(bas, "logout");
     SetEventValue(bas, "logout", 0, 0);
 
     if (!GetPlayerBot(guid))
         AddPlayerBot(guid, 0);
 
     currentBots.insert(bas);
-    SetEventValue(bas, "add", 1, sPlayerbotAIConfig.maxRandomBotInWorldTime);
+    SetEventValue(bas, "add", 1, std::max<uint32>(duree, 1));
 
     return GetPlayerBot(guid) != nullptr;
+}
+
+void RandomPlayerbotMgr::CoaEndormir(ObjectGuid guid)
+{
+    uint32 const bas = guid.GetCounter();
+
+    GetEventValue(bas, "logout");   // charge le cache (voir CoaEnroler)
+    SetEventValue(bas, "add", 0, 0);
+    SetEventValue(bas, "logout", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+
+    Player* bot = GetPlayerBot(guid);
+    if (!bot)
+    {
+        // Connexion en cours : le garder dans currentBots, sans quoi il arriverait en jeu hors de la population
+        // geree (IsRandomBot faux) et n'en repartirait jamais ; ProcessBot le deconnecte a son arrivee (« add » leve).
+        if (botLoading.find(guid) == botLoading.end())
+            currentBots.erase(bas);
+        return;
+    }
+
+    // Un humain dans son groupe : ProcessBot ne deconnecte pas un bot groupe, il le fera quand le groupe le lachera.
+    if (Group* groupe = bot->GetGroup())
+        for (GroupReference* ref = groupe->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* membre = ref->GetSource();
+            if (membre && membre != bot && membre->GetSession() && !membre->GetSession()->IsBot())
+                return;
+        }
+
+    currentBots.erase(bas);
+    LogoutPlayerBot(guid);   // nettoie aussi son groupe de bots (BotLogoutGroupCleanupOperation)
+}
+
+void RandomPlayerbotMgr::CoaLiberer(ObjectGuid guid)
+{
+    uint32 const bas = guid.GetCounter();
+    GetEventValue(bas, "logout");   // charge le cache (voir CoaEnroler)
+    SetEventValue(bas, "logout", 0, 0);
 }
 
 bool RandomPlayerbotMgr::IsSpecPvp(uint32 bot, uint8 cls)
@@ -2817,6 +2885,11 @@ void RandomPlayerbotMgr::OnPlayerLogout(Player* player)
     std::vector<Player*>::iterator i = std::find(players.begin(), players.end(), player);
     if (i != players.end())
         players.erase(i);
+
+    // CoA (25/10/2026, CoaCompagnons.cpp) : depart d'un HUMAIN, debut du delai de grace de ses compagnons. Ce crochet
+    // passe pour tout joueur (WorldSession::LogoutPlayer) : les bots sont ecartes par la session.
+    if (player->GetSession() && !player->GetSession()->IsBot())
+        CoaCompagnons::HumainDeconnecte(player);
 }
 
 void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
@@ -2942,12 +3015,23 @@ void RandomPlayerbotMgr::OnPlayerLogin(Player* player)
         players.push_back(player);
         LOG_DEBUG("playerbots", "Including non-random bot player {} into random bot update", player->GetName().c_str());
     }
+
+    // CoA (25/10/2026, CoaCompagnons.cpp) : arrivee d'un HUMAIN (Playerbots.cpp n'appelle ici que pour une session
+    // qui n'est pas celle d'un bot ; la garde est redite pour ne pas en dependre).
+    if (player->GetSession() && !player->GetSession()->IsBot())
+        CoaCompagnons::HumainConnecte(player);
 }
 
 void RandomPlayerbotMgr::OnPlayerLoginError(uint32 bot)
 {
     SetEventValue(bot, "add", 0, 0);
     currentBots.erase(bot);
+    // CoA (25/10/2026) : meme garde que ProcessBot, un compagnon qui n'a pas pu se connecter reste hors du tirage.
+    if (CoaCompagnons::EstCompagnon(bot))
+    {
+        SetEventValue(bot, "logout", 1, sPlayerbotAIConfig.permanentlyInWorldTime);
+        CoaCompagnons::BotSorti(bot);
+    }
 }
 
 Player* RandomPlayerbotMgr::GetRandomPlayer()
