@@ -1162,6 +1162,7 @@ bool PlayerbotAIConfig::Initialize()
         sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Renouvellement", 120), 30, 600);
     coaCompagnonsEchelonnement = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Echelonnement", 2), 60);
     coaCompagnonsMaxEveilles = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.MaxEveilles", 40), 500);
+    coaCompagnonsEcartBas = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.EcartBas", 5), 79);
 
     selfBotLevel =sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
     botTextLocale = sConfigMgr->GetOption<int32>("AiPlayerbot.BotTextLocale", -1);

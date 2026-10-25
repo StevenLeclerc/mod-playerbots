@@ -350,6 +350,13 @@ public:
         // endroit et ne se bat jamais. Mesure du 2026-09-23 : sept paires sur
         // quatorze, au meme metre, points de vie pleins, cinq manches sans un
         // coup. `CoaEnroler` fait les quatre gestes dans le bon ordre.
+        // Bots compagnons (revue du lot 1, m3) : un compagnon ne s'enrole pas, il suit son humain.
+        if (CoaCompagnons::EstCompagnon(bas))
+        {
+            handler->PSendSysMessage("coa enrole: {} (guid {}) est un bot compagnon : refuse (voir .coa compagnon liste).",
+                                     nom, bas);
+            return false;
+        }
         Player* deja = ObjectAccessor::FindPlayerByName(nom, true);
         bool const en_jeu = sRandomPlayerbotMgr.CoaEnroler(guid);
 

@@ -147,14 +147,17 @@ public:
     // connecte s'il ne l'est pas. Voir CoaEnroler dans le .cpp : appeler
     // AddPlayerBot tout seul ne suffit pas, et le manquer coute une campagne
     // de mesure entiere.
+    // CoA (26/10/2026) : cette forme REFUSE (rend faux) un compagnon ; seule la forme a duree ci-dessous, appelee
+    // par CoaCompagnons.cpp, l'enrole.
     bool CoaEnroler(ObjectGuid guid);
     // CoA (25/10/2026, CoaCompagnons.cpp) : meme chose, avec une duree de presence (« add ») choisie. FIL MONDE.
     bool CoaEnroler(ObjectGuid guid, uint32 duree);
     // CoA (25/10/2026, CoaCompagnons.cpp) : endort un bot. « add » leve, « logout » pose pour
     // PermanentlyInWorldTime (hors du tirage, redemarrage compris), deconnexion tout de suite s'il est en jeu
     // et sans humain dans son groupe ; sinon il reste dans la population geree et ProcessBot le deconnecte des
-    // qu'il le peut. FIL MONDE.
-    void CoaEndormir(ObjectGuid guid);
+    // qu'il le peut. Rend faux dans ce seul cas (bot EN JEU, retenu par un humain en ligne de son groupe) :
+    // l'appelant doit redemander plus tard. FIL MONDE.
+    bool CoaEndormir(ObjectGuid guid);
     // CoA (25/10/2026, CoaCompagnons.cpp) : rend un compagnon purge du registre a la vie ordinaire (« logout » leve,
     // sans le connecter : le tirage le reprendra comme les autres). FIL MONDE.
     void CoaLiberer(ObjectGuid guid);

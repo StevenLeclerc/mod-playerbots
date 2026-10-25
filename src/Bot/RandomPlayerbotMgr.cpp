@@ -1699,6 +1699,10 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
     // CoA banc des soins (13/10/2026) : jamais un membre d'essai en cours (il quitterait l'enclos).
     if (CoaBancSoin::MembreEngage(bot->GetGUID().GetCounter()))
         return;
+    // CoA (26/10/2026, revue du lot 1 des compagnons, m2) : jamais un compagnon, quel que soit le chemin (Revive ->
+    // RandomTeleportGrindForLevel, AutoTeleportForLevel a la montee de niveau, refonte...) : il suit son humain.
+    if (CoaCompagnons::EstCompagnon(bot->GetGUID().GetCounter()))
+        return;
 
     // ignore when alrdy teleported or not in the world yet.
     if (bot->IsBeingTeleported() || !bot->IsInWorld())
@@ -2432,6 +2436,10 @@ void RandomPlayerbotMgr::GetBots()
                     continue;
                 if (currentBots.size() >= maxAllowedBotCount)
                     break;
+                // CoA (26/10/2026, revue du lot 1 des compagnons, m3) : un compagnon entre dans une guilde de
+                // reserve ne se connecte pas ici (« logout » leve, en jeu sans son humain) : il dort.
+                if (CoaCompagnons::EstCompagnon(guid))
+                    continue;
                 if (!GetEventValue(guid, "add"))
                 {
                     uint32 const addTime = sPlayerbotAIConfig.enablePeriodicOnlineOffline
@@ -2562,6 +2570,14 @@ CachedEvent* RandomPlayerbotMgr::FindEvent(uint32 bot, std::string const& event)
 // l'evenement « add » pour que le prochain tour ne le ressorte pas.
 bool RandomPlayerbotMgr::CoaEnroler(ObjectGuid guid)
 {
+    // CoA (26/10/2026, revue du lot 1 des compagnons, m3) : `.coa enrole` (bancs) et la remise en ligne des
+    // gladiateurs ne ramenent JAMAIS un compagnon en jeu : il y resterait sans son humain, exempte de tout. Seul
+    // CoaCompagnons.cpp l'enrole, par la forme a duree.
+    if (CoaCompagnons::EstCompagnon(guid.GetCounter()))
+    {
+        LOG_INFO("playerbots", "coa compagnon: refus_enrolement bot={} raison=compagnon", guid.GetCounter());
+        return false;
+    }
     return CoaEnroler(guid, sPlayerbotAIConfig.maxRandomBotInWorldTime);
 }
 
@@ -2586,7 +2602,7 @@ bool RandomPlayerbotMgr::CoaEnroler(ObjectGuid guid, uint32 duree)
     return GetPlayerBot(guid) != nullptr;
 }
 
-void RandomPlayerbotMgr::CoaEndormir(ObjectGuid guid)
+bool RandomPlayerbotMgr::CoaEndormir(ObjectGuid guid)
 {
     uint32 const bas = guid.GetCounter();
 
@@ -2601,7 +2617,7 @@ void RandomPlayerbotMgr::CoaEndormir(ObjectGuid guid)
         // geree (IsRandomBot faux) et n'en repartirait jamais ; ProcessBot le deconnecte a son arrivee (« add » leve).
         if (botLoading.find(guid) == botLoading.end())
             currentBots.erase(bas);
-        return;
+        return true;
     }
 
     // Un humain dans son groupe : ProcessBot ne deconnecte pas un bot groupe, il le fera quand le groupe le lachera.
@@ -2610,11 +2626,12 @@ void RandomPlayerbotMgr::CoaEndormir(ObjectGuid guid)
         {
             Player* membre = ref->GetSource();
             if (membre && membre != bot && membre->GetSession() && !membre->GetSession()->IsBot())
-                return;
+                return false;   // l'appelant le retient et redemande (CoaCompagnons.cpp, gRetenus)
         }
 
     currentBots.erase(bas);
     LogoutPlayerBot(guid);   // nettoie aussi son groupe de bots (BotLogoutGroupCleanupOperation)
+    return true;
 }
 
 void RandomPlayerbotMgr::CoaLiberer(ObjectGuid guid)

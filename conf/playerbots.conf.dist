@@ -2192,14 +2192,18 @@ AiPlayerbot.DeleteRandomBotArenaTeams = 0
 # niveau, de la remise a zero du niveau, de la refonte periodique et de la teleportation
 # aleatoire. Registre : table `coa_compagnon` de la base personnages (migration
 # data/sql/characters/updates/2026_10_25_00_coa_compagnon.sql, A APPLIQUER AVANT d'allumer).
-# Ils s'AJOUTENT a MaxRandomBots. Code : src/Ai/Coa/CoaCompagnons.cpp ; conception :
+# Eveilles, ils comptent dans la population geree (currentBots) : ils prennent des places de
+# MaxRandomBots tant que leur humain est en jeu. Code : src/Ai/Coa/CoaCompagnons.cpp ; conception :
 # coa-project/docs/CONCEPTION-bots-compagnons-directeur.md. Journal : « coa compagnon: ».
 # Commandes (MJ, console) : .coa compagnon liste|eveiller|endormir <humain>
 #
 # Enable : 0 (defaut) = tout est inerte, la table n'est pas lue.
-#          Repasser de 1 a 0 laisse les compagnons endormis HORS du tirage (evenement
-#          `logout` de PermanentlyInWorldTime) : voir la conception pour les liberer.
-# Lues une seule fois, au demarrage.
+#          Lu UNE SEULE FOIS, au demarrage : une recharge de la conf (`.reload config`,
+#          `playerbots rndbot reload`) ne l'allume ni ne l'eteint, et garde le registre en
+#          memoire (les autres options CoaCompagnons suivent la recharge). Changer Enable
+#          demande un redemarrage. Repasser de 1 a 0 (au redemarrage) laisse les compagnons
+#          endormis HORS du tirage (evenement `logout` de PermanentlyInWorldTime) : la requete
+#          qui les libere est en tete de la migration 2026_10_25_00_coa_compagnon.sql.
 AiPlayerbot.CoaCompagnons.Enable = 0
 # Niveau minimal du personnage humain. Defaut : 10
 AiPlayerbot.CoaCompagnons.SeuilNiveau = 10
@@ -2216,6 +2220,10 @@ AiPlayerbot.CoaCompagnons.Renouvellement = 120
 AiPlayerbot.CoaCompagnons.Echelonnement = 2
 # Plafond global de compagnons eveilles en meme temps (0 = aucun reveil). Defaut : 40
 AiPlayerbot.CoaCompagnons.MaxEveilles = 40
+# A la constitution du registre, un candidat n'est jamais plus de EcartBas niveaux sous
+# l'humain (ni plus de 2 au-dessus). Le lot 1 ne rattrape pas le niveau d'un compagnon deja
+# attitre. Defaut : 5
+AiPlayerbot.CoaCompagnons.EcartBas = 5
 
 # ---------------------------------------------------------------------------- Arene1v1 (CoA)
 # Escarmouche 1 contre 1 NON classee : un joueur humain contre un bot d'une classe CoA,
