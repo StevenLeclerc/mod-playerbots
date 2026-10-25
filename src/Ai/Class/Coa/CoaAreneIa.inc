@@ -3602,10 +3602,13 @@ bool CoaAreneEstSoutienAuSol(SpellInfo const* info)
 }
 
 // Ce que le sort a pose est encore la : objet dynamique du sort, ou creature creee par lui (familier, gardien, ou
-// emplacement d'invocation -- totems et etendards).
+// emplacement d'invocation -- totems). G-31 (25/10, coa-project/docs/REVUE-classe-guardian-20261024.md) : l'etendard du
+// Gardien n'est dans aucun des deux (TempSummon sans SummonProperties) : la garde ne le voyait jamais, et Rallying et
+// Recovery se remplacaient en boucle. Il se lit par CoaEtendardDejaTenu (un etendard a la fois, sauf un etendard qui
+// soigne a la place d'un etendard qui ne soigne pas).
 bool CoaAreneSoutienActif(Player* bot, SpellInfo const* info)
 {
-    if (bot->GetDynObject(info->Id))
+    if (bot->GetDynObject(info->Id) || CoaEtendardDejaTenu(bot, info))
         return true;
     auto creeParLui = [info](Unit const* u)
         { return u && u->IsInWorld() && u->IsAlive() && u->GetUInt32Value(UNIT_CREATED_BY_SPELL) == info->Id; };

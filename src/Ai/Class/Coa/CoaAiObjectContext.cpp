@@ -816,6 +816,26 @@ constexpr CoaSurcharge CoaSurcharges[] =
     // I11 du 17/10 (Reaper 55-57) : Jailer's Bargain 805718 absorbe 30 % de la vie maximale par script (effet 0
     // SCHOOL_ABSORB, BasePoints 0 : force lue 1 point, environ 0,02 %, classe dernier). Force 30.
     { 805718, 0, 0, 30 },
+    // G-12 et G-13 du 25/10 (coa-project/docs/REVUE-classe-guardian-20261024.md ; Spell.dbc lu le 25/10, Guardian 18).
+    //   - Standard of Might 706805 : rien de ce qui reste ne vise un ennemi. Son effet 2 (TRIGGER_SPELL -> Might 562372,
+    //     -15 % d'armure en zone ennemie, TargetB 15) le rangeait en attaque de zone (KIND_HOSTILE | KIND_AOE), lance a
+    //     chaque combat (x45 283 au releve de la revue, environ un par combat) ; or le module coupe cet effet sans Field
+    //     Commander 705320 (AscensionGuardianStandards.cpp, RequireFieldCommander), qu'aucun Guardian ne connait. Reste
+    //     l'etendard (+10 % de vie de base des allies, 500602) : plus dans la rotation d'attaque. Il garde KIND_ALLY_CAST
+    //     (Reclaim Standards 801504 -> 801503, TargetA 21), donc le soutien au sol d'arene (kind non nul) le pose encore.
+    { 706805, 0, KIND_HOSTILE | KIND_AOE | KIND_DAMAGE, 0 },
+    //   - Standard of Recovery 500260 : jamais lance hors arene (le soin est l'aura 500266 que l'etendard pose par script,
+    //     invisible a Classify : kind = KIND_ALLY_CAST seul). Un defensif sur soi (« coa defensive », posee aux pieds du
+    //     bot), force 0 : lue dans les effets, rien -> CoaIaForceInconnue. Recharge propre nulle, categorie 1254 a 5 s :
+    //     defensif leger (vie moyenne ou perte rapide). Pas de MARQUE_BALISE : la garde « un etendard a la fois »
+    //     (CoaEtendardDejaTenu) le retient tant qu'il soigne le bot, et le laisse reposer si le bot en est sorti.
+    { 500260, KIND_DEFENSIVE, 0, 0 },
+    //   - Banner of Conquest 500261 et Banner of Swiftness 500259 (Inspiration) : auras sur soi SANS duree (-1), dont
+    //     l'effet 0 est un TRIGGER_SPELL -- ni posture (IsStance exige que tout effet soit une aura sur soi) ni buff
+    //     (KIND_BUFF exige 5 min au moins) : jamais portees (0 aura sauvee chez 18 bots qui les connaissent). Un buff, que
+    //     « coa buff » pose hors combat. Une seule a la fois : les deux sont de la categorie 1254 (HasBuffOfCategory).
+    { 500261, KIND_BUFF, 0, 0 },
+    { 500259, KIND_BUFF, 0, 0 },
 };
 
 /*
@@ -1199,6 +1219,98 @@ bool CoaExigeFamilierAbsent(Player* bot, SpellInfo const* info)
 }
 
 /*
+ * G-35 (coa-project/docs/REVUE-classe-guardian-20261024.md, 25/10) : MONTE, le coeur refuse SPELL_FAILED_NOT_MOUNTED.
+ * Releve de la revue (CoaBots.log, Guardian) : Heroic Resolve 504910 x854, Raise Shield 500168 x639 ; le motif touche toutes
+ * les classes. RECOPIE de Spell::CheckCast (Spell.cpp:6095-6103), branche sans TRIGGERED_IGNORE_CASTER_MOUNTED_OR_ON_VEHICLE,
+ * celle de PlayerbotAI::CastSpell (TRIGGERED_NONE) : lanceur joueur monte, sort ni passif ni SPELL_ATTR0_ALLOW_WHILE_MOUNTED,
+ * hors les trois exceptions du coeur, recopiees telles quelles (monture de Divine Charge 527272 d'un Templar, Mechsuit du
+ * Tinker 801384 + 803451, Starcaller sous 704772). Le coeur rendrait NOT_ON_TAXI en vol : refus aussi. Jamais plus strict
+ * que lui. Ecarte sans banc ni echec consigne : le sort repart des la descente de monture.
+ */
+bool CoaRefuseMonte(Player* bot, SpellInfo const* info)
+{
+    if (!bot->IsMounted() || info->IsPassive() || info->HasAttribute(SPELL_ATTR0_ALLOW_WHILE_MOUNTED))
+        return false;
+    Aura const* divineCharge = bot->GetAura(527272);
+    Unit const* divineCaster = divineCharge ? divineCharge->GetCaster() : nullptr;
+    if (divineCaster && divineCaster->IsPlayer() && divineCaster->getClass() == CLASS_MONK &&
+        bot->GetMountID() == 14584 && !bot->IsInFlight())
+        return false;
+    if (bot->getClass() == CLASS_TINKER && info->SpellFamilyName == 34 && !bot->IsInFlight() &&
+        bot->HasAura(801384, bot->GetGUID()) && bot->HasAura(803451, bot->GetGUID()))
+        return false;
+    if (bot->getClass() == CLASS_STARCALLER && bot->HasAura(704772) && !bot->IsInFlight())
+        return false;
+    return true;
+}
+
+// Defini dans CoaAreneIa.inc (inclus plus bas) : l'etendard du Gardien soigne-t-il (aura posee par l'etendard) ?
+bool CoaAreneSoutienSoigne(SpellInfo const* info);
+
+/*
+ * G-12 et G-31 (coa-project/docs/REVUE-classe-guardian-20261024.md, 25/10) : UN ETENDARD DU GARDIEN A LA FOIS.
+ *
+ * Un seul etendard par Gardien (« Only 1 Standard can be active at a time », Spell.dbc ; le module despawn l'ancien,
+ * AscensionGuardianStandards.cpp, ReplaceStandard). L'etendard est une TempSummon sans SummonProperties
+ * (Player::SummonCreature, ibid. Summon) : ni dans m_Controlled ni dans m_SummonSlot. CoaAreneSoutienActif ne le voyait
+ * donc jamais, et rien ne retenait un second lancer : Standard of Recovery 500260 repose trois fois en 25 s au meme combat
+ * (CoaBots.log du 13/10 10:09:02-10:09:27 UTC, bot 2698) ; Rallying et Recovery en alternance en arene (G-31).
+ *
+ * L'etendard en place se lit sur le Gardien : l'etendard porte et lui applique « Active Standards » 808006 (aura de
+ * proprietaire, SPELL_EFFECT_APPLY_AREA_AURA_OWNER, rayon 100 yd, SpellRadius 12 ; ibid. IsSummonedBy). Le lanceur de cette
+ * aura est l'etendard : son entree donne le contrat (GuardianStandards::Contracts, table generee du module) et le sort
+ * d'etendard. Un etendard AMI (aura de contrat en aura de zone amie, de groupe ou de raid : Recovery 500266, Rallying 500265,
+ * Might 500602 en APPLY_AREA_AURA_FRIEND, Supremacy 500299 en APPLY_AREA_AURA_PARTY ; Spell.dbc lu le 25/10) ne compte que
+ * si son aura tient encore sur le Gardien -- sorti de sa zone, il peut le reposer a ses pieds. Un etendard offensif
+ * (Valiance 800315 et 501538-501545 en APPLY_AURA sur l'etendard, Spellwarding 500548 en APPLY_AREA_AURA_ENEMY) compte des
+ * que le marqueur est la.
+ *
+ * Regle, la meme partout (CastFirst et les tests « pret ») : un sort d'etendard est ecarte quand un etendard du bot est en
+ * place, SAUF un etendard qui soigne (CoaAreneSoutienSoigne : Recovery) a la place d'un etendard qui ne soigne pas. Les
+ * passages ne vont donc que dans un sens : plus de va-et-vient. Ni banc ni echec consigne. Gardien seulement.
+ */
+constexpr uint32 CoaEtendardMarqueur = 808006;
+
+SpellInfo const* CoaEtendardEnPlace(Player* bot)
+{
+    Aura const* marqueur = bot->GetAura(CoaEtendardMarqueur);
+    if (!marqueur)
+        return nullptr;
+    Creature const* etendard = ObjectAccessor::GetCreature(*bot, marqueur->GetCasterGUID());
+    if (!etendard || !etendard->IsAlive() || etendard->GetOwnerGUID() != bot->GetGUID())
+        return nullptr;
+    for (GuardianStandards::Contract const& contrat : GuardianStandards::Contracts)
+    {
+        if (contrat.creature != etendard->GetEntry())
+            continue;
+        bool ami = false;
+        if (SpellInfo const* aura = sSpellMgr->GetSpellInfo(contrat.field))
+            for (SpellEffectInfo const& effect : aura->Effects)
+                if (effect.Effect == SPELL_EFFECT_APPLY_AREA_AURA_FRIEND || effect.Effect == SPELL_EFFECT_APPLY_AREA_AURA_PARTY ||
+                    effect.Effect == SPELL_EFFECT_APPLY_AREA_AURA_RAID)
+                    ami = true;
+        if (ami && !bot->HasAura(contrat.field, etendard->GetGUID()))
+            return nullptr;
+        return sSpellMgr->GetSpellInfo(contrat.spell);
+    }
+    return nullptr;
+}
+
+bool CoaEtendardDejaTenu(Player* bot, SpellInfo const* info)
+{
+    if (bot->getClass() != CLASS_GUARDIAN)
+        return false;
+    bool const etendard = std::any_of(GuardianStandards::Contracts.begin(), GuardianStandards::Contracts.end(),
+        [info](GuardianStandards::Contract const& contrat) { return contrat.spell == info->Id; });
+    if (!etendard)
+        return false;
+    SpellInfo const* enPlace = CoaEtendardEnPlace(bot);
+    if (!enPlace)
+        return false;
+    return CoaAreneSoutienSoigne(enPlace) || !CoaAreneSoutienSoigne(info);
+}
+
+/*
  * Refus CERTAINS du coeur lus sur la cible, pour tous les bots CoA (banc d'arene du 11/10/2026 00:36-00:56 Paris :
  * TARGET_AURASTATE x13 -- Slaughter 500430 et Electrocute 501423 sous 35 % de vie (TargetAuraState 13), Ice Rune 524930
  * sur cible gelee (4), Lunar Lance 502335 et Umbral Blade 681546 sous l'aura 804378 (TargetAuraSpell) ; NOTHING_TO_DISPEL
@@ -1403,8 +1515,8 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
         // on a spell CastFirst then refuses to try, and the action ran for nothing.
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
         // Same caster state and aura test as CastFirst (10/10 soir, 11/10) : a spell CastFirst now skips must not count
-        // as ready.
-        if (CoaRefuseParAuraDuLanceur(bot, info))
+        // as ready. G-35 et G-12/G-31 (25/10) : monture et etendard deja en place, comme CastFirst.
+        if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseMonte(bot, info) || CoaEtendardDejaTenu(bot, info))
             continue;
         // Same form, weapon and resource tests as CastFirst (banc d'arene du 10/10) : skipped there, not ready here.
         if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
@@ -2075,7 +2187,9 @@ enum CoaEcart : uint16
     ECART_DEJA_POSE           = 1017,  // CoaSoinDejaPose
     ECART_RECHARGE_GLOBALE    = 1018,  // recharge globale : CastFirst s'arrete au premier sort qui la subit
     ECART_BANC                = 1019,  // sort au banc (echec recent)
-    ECART_TACTIQUE            = 1020   // CoaAreneRefusTactique (arene 1v1, duel)
+    ECART_TACTIQUE            = 1020,  // CoaAreneRefusTactique (arene 1v1, duel)
+    ECART_MONTE               = 1021,  // CoaRefuseMonte (G-35, 25/10)
+    ECART_ETENDARD_TENU       = 1022   // CoaEtendardDejaTenu (G-12, G-31, 25/10)
 };
 
 struct CoaEcartTrace
@@ -2138,6 +2252,19 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
             !info->HasAttribute(SPELL_ATTR0_PASSIVE))
         {
             CoaNoterEcart(info, ECART_SEULES_CAPACITES);
+            continue;
+        }
+
+        // G-35 (25/10) : monte, refuse d'avance (CoaRefuseMonte) ; G-12 et G-31 : etendard du Gardien deja en place
+        // (CoaEtendardDejaTenu). Ni banc ni echec consigne.
+        if (CoaRefuseMonte(bot, info))
+        {
+            CoaNoterEcart(info, ECART_MONTE);
+            continue;
+        }
+        if (CoaEtendardDejaTenu(bot, info))
+        {
+            CoaNoterEcart(info, ECART_ETENDARD_TENU);
             continue;
         }
 
@@ -3965,6 +4092,9 @@ bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spe
         if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info) ||
             CoaExigeFamilierAbsent(bot, info) || CoaIaEtourdiRefuse(bot, info))
             continue;
+        // G-35 et G-12/G-31 (25/10) : monture et etendard deja en place, comme CastFirst.
+        if (CoaRefuseMonte(bot, info) || CoaEtendardDejaTenu(bot, info))
+            continue;
         if (bot->HasSpellCooldown(info->Id))
             continue;
         bool const auBanc = IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now);
@@ -4820,10 +4950,42 @@ public:
  */
 constexpr uint32 CoaPosturesHorsRegle[] = { 524861, 525031, 800841, 803183 };
 
+/*
+ * G-10 (25/10/2026, coa-project/docs/REVUE-classe-guardian-20261024.md) : LA POSTURE D'UNE SPECIALISATION DE DEGATS, quand
+ * son kit la demande. Guardian Inspiration (classe 18, specialisation 20) : Harrowing Melody 572821 exige Line Formation
+ * 803130 (CasterAuraSpell, Spell.dbc lu le 25/10 ; refus CASTER_AURASTATE, code 22, au journal), comme Linebreaker 806220,
+ * Advance 500170, Shrug It Off 802198, Hold the Line 803830 et Hammer of Kings 503127-503134 ; la regle d'avant (premiere
+ * posture du kit) le laissait en Assault Formation 803417 (niveau 1). Sa strategie de donnees (custom::guardian-inspiration,
+ * acore_playerbots.playerbots_custom_strategy 5838-5876) ne prend aucune formation, mais elle n'est meme pas chargee :
+ * AiPlayerbot.CoaSpecRotations = 0 en service (playerbots.conf, lu par AiFactory.cpp), une ligne de donnees n'aurait rien
+ * change. Le choix est donc fait ici, hors combat, comme la posture du tank (803130 : effets 232, 79 a 0 et 31 sur soi,
+ * duree infinie, lus dans Spell.dbc : KIND_STANCE sans KIND_DAMAGE, comme Assault 803417). Prix : en Line, Battle Rush, Net Throw et Counter Stance (Assault) ne partent plus. Gladiator 19
+ * garde Assault (la regle d'avant). Sous AiPlayerbot.CoaIa.PostureRole, comme le lot 2. La posture doit etre connue
+ * (803130 : niveau 20) ; sinon, la regle d'avant.
+ */
+struct CoaPostureDeSpecialisation
+{
+    uint8 classe;
+    uint32 specialisation;
+    uint32 posture;
+};
+
+constexpr CoaPostureDeSpecialisation CoaPosturesDeSpecialisation[] = { { CLASS_GUARDIAN, 20, 803130 } };
+
 uint32 CoaPostureDeRole(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& postures)
 {
-    if (!sPlayerbotAIConfig.coaIaPostureRole || GetCoaRole(bot) != CoaRole::Tank)
+    if (!sPlayerbotAIConfig.coaIaPostureRole)
         return 0;
+    if (GetCoaRole(bot) != CoaRole::Tank)
+    {
+        uint32 const specialisation = GetAscensionActiveSpecialization(bot);
+        for (CoaPostureDeSpecialisation const& p : CoaPosturesDeSpecialisation)
+            if (p.classe == bot->getClass() && p.specialisation == specialisation)
+                for (Usable const& posture : postures)
+                    if ((posture.kind & KIND_STANCE) && posture.info->Id == p.posture)
+                        return p.posture;
+        return 0;
+    }
     std::vector<Usable> const defensifs =
         KnownAbilities(botAI, bot, [](uint16 kind) { return (kind & KIND_DEFENSIVE) != 0; });
     if (defensifs.empty())
@@ -5510,6 +5672,9 @@ bool CoaIaPretSauf(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* c
     if (!CoaPeutPayer(bot, info) || CoaExigeFamilierAbsent(bot, info))
         return false;
     if (CoaIaPayeEnVieTropCher(bot, info) || CoaIaEtourdiRefuse(bot, info))
+        return false;
+    // G-35 et G-12/G-31 (25/10) : monture et etendard deja en place, comme CastFirst.
+    if (CoaRefuseMonte(bot, info) || CoaEtendardDejaTenu(bot, info))
         return false;
     if (bot->HasSpellCooldown(info->Id) || IsBenched(benched, spell.info->Id, now) || IsBenched(benched, info->Id, now))
         return false;

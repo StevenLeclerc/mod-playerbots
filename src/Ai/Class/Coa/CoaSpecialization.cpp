@@ -899,11 +899,109 @@ std::string CoaArbrePorte(Player const* bot, uint32& voulues, uint32& manquantes
     return texte;
 }
 
+/*
+ * Choix de palier (G-03 lot B, 25/10) : les noeuds gratuits a choisir de CharacterAdvancement (Barbarian Ancestry,
+ * Guardian Inspiration, et toute classe ajoutee a SELECTABLE_FREE_CHOICES de mod-ascension-compat) ne sont plus
+ * accordes d'office, et aucune table de build ne les porte. Le bot en prend UN par groupe de sa specialisation
+ * active, des que le niveau du groupe est atteint, par SetAscensionTalentRank : la meme API que le joueur, qui
+ * retire les autres noeuds du groupe. Le noeud est tire par Hash(guid, groupe) : stable pour un bot (jamais de
+ * bascule d'un appel a l'autre), varie d'un bot a l'autre comme les choix des joueurs. Un bot qui en tient deux
+ * (ancienne regle : les deux etaient donnes) garde celui que ce tirage designe parmi ceux qu'il tient ; un bot qui en
+ * tient un seul le garde, quel qu'il soit. Sous le niveau du noeud, ce qu'il tient redescend a 0, comme l'arbre
+ * paye (G-11). Retourne le nombre de noeuds poses ou retires.
+ */
+static uint32 ApplyCoaFreeChoices(Player* bot, uint32 specializationId)
+{
+    std::vector<AscensionFreeChoice> const choices = GetAscensionFreeChoices(bot->getClass());
+    uint8 const level = bot->GetLevel();
+    uint32 changed = 0;
+
+    // Triee par groupe : un groupe est une suite contigue.
+    for (std::size_t begin = 0; begin < choices.size();)
+    {
+        std::size_t end = begin;
+        while (end < choices.size() && choices[end].GroupId == choices[begin].GroupId)
+            ++end;
+        uint32 const groupId = choices[begin].GroupId;
+
+        std::vector<AscensionFreeChoice const*> eligible, held;
+        for (std::size_t i = begin; i < end; ++i)
+        {
+            AscensionFreeChoice const& choice = choices[i];
+            if (choice.SpecId && choice.SpecId != specializationId)
+                continue;   // une autre specialisation : SwitchSpecialization en a retire les sorts
+            bool const tenu = GetAscensionTalentRank(bot, choice.EntryId) > 0;
+            if (level < choice.RequiredLevel)
+            {
+                if (tenu && SetAscensionTalentRank(bot, choice.EntryId, 0))
+                    ++changed;
+                continue;
+            }
+            eligible.push_back(&choice);
+            if (tenu)
+                held.push_back(&choice);
+        }
+        begin = end;
+
+        if (eligible.empty() || held.size() == 1)
+            continue;
+
+        // Zero tenu : on choisit parmi les eligibles ; deux ou plus : parmi ceux deja tenus. Le premier essai est le
+        // tirage, les suivants (sort absent cote serveur, refus) dans l'ordre des ids.
+        std::vector<AscensionFreeChoice const*> const& pool = held.empty() ? eligible : held;
+        std::size_t const start = Hash(bot->GetGUID().GetCounter(), 0x43484F49u ^ groupId) % pool.size();
+        bool done = false;
+        for (std::size_t k = 0; k < pool.size() && !done; ++k)
+        {
+            AscensionFreeChoice const* choice = pool[(start + k) % pool.size()];
+            // SetAscensionTalentRank answers true even when learnSpell taught nothing: read the rank back.
+            done = SetAscensionTalentRank(bot, choice->EntryId, choice->SpellCount) &&
+                   GetAscensionTalentRank(bot, choice->EntryId) > 0;
+            if (done)
+            {
+                ++changed;
+                LOG_INFO("playerbots", "coa free choice: {} (class {}, level {}, specialization {}) group {}: "
+                         "entry {} {} ({} held before)", bot->GetName(), uint32(bot->getClass()), uint32(level),
+                         specializationId, groupId, choice->EntryId, held.empty() ? "chosen" : "kept",
+                         uint32(held.size()));
+            }
+        }
+
+        // Tout refuse : le trou est dans les donnees, pas dans le bot. Une ligne par groupe.
+        if (!done)
+        {
+            static std::set<uint32> complained;
+            static std::mutex complainedLock;
+            bool first;
+            {
+                std::lock_guard<std::mutex> guard(complainedLock);
+                first = complained.insert(groupId).second;
+            }
+            if (first)
+                LOG_WARN("playerbots", "coa free choice: class {}, specialization {}, group {}: all {} node(s) "
+                         "refused by SetAscensionTalentRank; bots of this specialization get no choice there",
+                         uint32(bot->getClass()), specializationId, groupId, uint32(pool.size()));
+        }
+    }
+    return changed;
+}
+
 uint32 ApplyCoaTalents(Player* bot)
 {
-    if (!bot || !IsAscensionCustomClassId(bot->getClass()) || bot->GetLevel() < SpecializationLevel ||
-        !sRandomPlayerbotMgr.IsRandomBot(bot))
+    if (!bot || !IsAscensionCustomClassId(bot->getClass()) || !sRandomPlayerbotMgr.IsRandomBot(bot))
         return 0;
+
+    /*
+     * G-11 (coa-project/docs/REVUE-classe-guardian-20261024.md, 25/10) : un bot redescendu SOUS SpecializationLevel
+     * gardait les talents payes de son ancien niveau -- la fonction rendait la main avant tout, retour au build compris.
+     * Releve du 25/10 (acore_characters, classes 12-40, niveau 1 a 9, character_spell a specMask non nul, sorts des
+     * entrees des deux tables de build) : 375 personnages, 1 112 rangs, tous comptes confondus (humains compris : seuls
+     * les bots aleatoires passent ici). Sous ce niveau, la specialisation encore notee ramene l'arbre au build de ce
+     * niveau (aucune entree voulue : tout ce que les tables gerent redescend a 0) ; rien n'est achete, rien n'est
+     * signale. Sans specialisation notee, rien ne change. Les rangs de capacites, les paliers gratuits et les passifs de
+     * specialisation sont a SynchronizeProgression (mod-ascension-compat), pas ici.
+     */
+    bool const sousNiveau = bot->GetLevel() < SpecializationLevel;
 
     uint32 const specializationId = GetAscensionActiveSpecialization(bot);
     if (!specializationId)
@@ -1000,6 +1098,14 @@ uint32 ApplyCoaTalents(Player* bot)
         LOG_INFO("playerbots", "coa: {} (class {}, level {}, specialization {}) brought back to build table {}: "
                  "{} entries lowered, {} refused",
                  bot->GetName(), classId, bot->GetLevel(), specializationId, source, lowered, lowerRefused);
+
+    // Choix de palier, avant le retour sous SpecializationLevel : sous le niveau d'un groupe, ce qu'il en tient
+    // redescend aussi (voir ApplyCoaFreeChoices).
+    ApplyCoaFreeChoices(bot, specializationId);
+
+    // G-11 : sous SpecializationLevel, le retour au build seulement (voir plus haut).
+    if (sousNiveau)
+        return 0;
 
     // The three outcomes are counted apart. The old code kept only `raised` and threw the
     // boolean of SetAscensionTalentRank away, which has six distinct refusal causes: a bot
