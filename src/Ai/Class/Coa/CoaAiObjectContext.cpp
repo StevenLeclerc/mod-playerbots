@@ -784,7 +784,13 @@ constexpr CoaSurcharge CoaSurcharges[] =
     //     Commander 705320 (AscensionGuardianStandards.cpp, RequireFieldCommander), qu'aucun Guardian ne connait. Reste
     //     l'etendard (+10 % de vie de base des allies, 500602) : plus dans la rotation d'attaque. Il garde KIND_ALLY_CAST
     //     (Reclaim Standards 801504 -> 801503, TargetA 21), donc le soutien au sol d'arene (kind non nul) le pose encore.
-    { 706805, 0, KIND_HOSTILE | KIND_AOE | KIND_DAMAGE, 0 },
+    //     Hors de la rotation d'attaque, rien ne le posait plus : les allies perdaient les +10 % de vie. Il est pose par
+    //     « coa etendard » (CoaEtendardAction : en combat, bot au-dessus de mediumHealth et sans perte rapide, aucun
+    //     etendard en place). Il est aussi defensif (KIND_DEFENSIVE), force 10 (les +10 % de vie) : sous Recovery (force
+    //     lue CoaIaForceInconnue, 20) dans le tri de CoaIaDefensifs, « coa defensive » ne le pose donc que si Recovery
+    //     est indisponible (non appris, recharge, banc). La garde « un etendard a la fois » (CoaEtendardDejaTenu) laisse
+    //     Recovery le remplacer, jamais l'inverse.
+    { 706805, KIND_DEFENSIVE, KIND_HOSTILE | KIND_AOE | KIND_DAMAGE, 10 },
     //   - Standard of Recovery 500260 : jamais lance hors arene (le soin est l'aura 500266 que l'etendard pose par script,
     //     invisible a Classify : kind = KIND_ALLY_CAST seul). Un defensif sur soi (« coa defensive », posee aux pieds du
     //     bot), force 0 : lue dans les effets, rien -> CoaIaForceInconnue. Recharge propre nulle, categorie 1254 a 5 s :
@@ -4650,6 +4656,81 @@ private:
     bool critique;
 };
 
+/*
+ * G-12 (coa-project/docs/REVUE-classe-guardian-20261024.md, 25/10) : STANDARD OF MIGHT 706805, POSE EN COMBAT.
+ *
+ * Sorti de la rotation d'attaque (surcharge CoaSurcharges : son effet offensif 562372 est coupe sans Field Commander), rien
+ * ne le posait plus, et « coa defensive » le classe sous Recovery 500260 (force 10 contre 20). « coa etendard » le pose aux
+ * pieds du Gardien (CastFirst sur le bot, comme Recovery) quand le combat va bien : bot vivant, en combat, au-dessus de
+ * mediumHealth et sans perte rapide (CoaIaPerteRecente < CoaIaPerteRapidePv, les seuils de la survie), et AUCUN etendard
+ * du bot vivant (marqueur 808006, lu comme CoaEtendardEnPlace mais sans la condition de zone) -- il ne remplace donc ni
+ * Recovery, ni Rallying, ni un etendard offensif. Blesse, le cas reste a « coa defensive » (priorite au-dessus), qui pose
+ * Recovery, autorise a remplacer Might ; l'inverse est refuse par CoaEtendardDejaTenu (CastFirst et CoaIaUnPret) et par
+ * le marqueur ci-dessous. Un seul sens : pas de va-et-vient.
+ *
+ * Gardien seulement, sous AiPlayerbot.CoaIa.Classement (a 0, le classement d'avant le garde dans la rotation d'attaque).
+ * En arene 1v1 et en duel sous la survie d'arene (IaSurvie), rien : « coa arene soutien » et « coa arene survie » y
+ * tiennent les etendards, comme « coa defensive » que le multiplicateur d'arene y coupe. Strategie de combat seulement :
+ * jamais repose en voyageant.
+ */
+constexpr uint32 CoaEtendardMight = 706805;
+
+// Les conditions de vie et de situation, sans le kit (bon marche : le declencheur passe a chaque tick).
+bool CoaEtendardMightVoulu(PlayerbotAI* botAI, Player* bot)
+{
+    if (bot->getClass() != CLASS_GUARDIAN || !sPlayerbotAIConfig.coaIaClassement || !bot->IsAlive() ||
+        !bot->IsInCombat() || !bot->HasSpell(CoaEtendardMight) || (CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot)))
+        return false;
+    if (bot->GetHealthPct() < float(sPlayerbotAIConfig.mediumHealth) ||
+        CoaIaPerteRecente(botAI, bot) >= CoaIaPerteRapidePv)
+        return false;
+    // Plus strict que CoaEtendardEnPlace (relecture) : un etendard AMI dont le bot est sorti n'y compte plus, et Might
+    // remplacerait un Recovery qui soigne encore le groupe a quelques metres. Ici, tout etendard vivant du bot dans le
+    // rayon du marqueur 808006 (100 yd) retient Might ; au-dela, il n'est plus d'aucun secours au groupe du bot.
+    Aura const* marqueur = bot->GetAura(CoaEtendardMarqueur);
+    if (!marqueur)
+        return true;
+    Creature const* etendard = ObjectAccessor::GetCreature(*bot, marqueur->GetCasterGUID());
+    return !etendard || !etendard->IsAlive() || etendard->GetOwnerGUID() != bot->GetGUID();
+}
+
+// Might tel que le kit le connait (niveau requis atteint, sort appris), ou une liste vide.
+std::vector<Usable> CoaEtendardMightKit(PlayerbotAI* botAI, Player* bot)
+{
+    std::vector<Usable> sorts = KnownAbilities(botAI, bot, [](uint16 kind) { return kind != 0; });
+    sorts.erase(std::remove_if(sorts.begin(), sorts.end(),
+        [](Usable const& spell) { return spell.info->Id != CoaEtendardMight; }), sorts.end());
+    return sorts;
+}
+
+class CoaEtendardTrigger : public Trigger
+{
+public:
+    CoaEtendardTrigger(PlayerbotAI* botAI) : Trigger(botAI, "coa etendard") {}
+
+    bool IsActive() override { return CoaEtendardMightVoulu(botAI, bot); }
+};
+
+class CoaEtendardAction : public Action
+{
+public:
+    CoaEtendardAction(PlayerbotAI* botAI) : Action(botAI, "coa etendard") {}
+
+    bool Execute(Event /*event*/) override
+    {
+        if (!CoaEtendardMightVoulu(botAI, bot))
+            return false;
+        return RecordUsage(USAGE_DEFENSIVE, CastFirst(botAI, bot, CoaEtendardMightKit(botAI, bot), bot, USAGE_DEFENSIVE));
+    }
+
+    // Les memes refus que CastFirst (CoaIaUnPret : monture, etendard deja tenu, recharge, banc, ressource...) : jamais
+    // « utile » pour un lancer que CastFirst ecarterait d'avance.
+    bool isUseful() override
+    {
+        return CoaEtendardMightVoulu(botAI, bot) && CoaIaUnPret(botAI, bot, CoaEtendardMightKit(botAI, bot), bot);
+    }
+};
+
 // IA soins/survie, lot 3 : soin sur soi sous mediumHealth (65 %) pour les tanks et les degats, qui n'ont pas « coa heal ».
 // Le soigneur se soigne par « coa heal » (le bot est candidat de « party member to heal ») : exclu ici.
 class CoaSoinSoiAction : public Action
@@ -6147,6 +6228,10 @@ public:
         triggers.push_back(new TriggerNode("coa survie", { NextAction("coa defensive", ACTION_HIGH + 8),
                                                            NextAction("coa soin soi", ACTION_HIGH + 7) }));
         triggers.push_back(new TriggerNode("coa survie critique", { NextAction("coa defensive critique", ACTION_EMERGENCY) }));
+        // G-12 (25/10) : Standard of Might du Gardien, pose quand le combat va bien (CoaEtendardAction). Inerte pour toute
+        // autre classe. ACTION_HIGH + 4 : sous « coa defensive » (26 et 28, qui garde le cas blesse et pose Recovery) et
+        // « coa taunt » (25), devant « coa aoe » (22-23) et la rotation (10).
+        triggers.push_back(new TriggerNode("coa etendard", { NextAction("coa etendard", ACTION_HIGH + 4) }));
         triggers.push_back(new TriggerNode("coa potion", { NextAction("healing potion", ACTION_HIGH + 7.5f) }));
         // IA soins/survie, lot 5 : decisions de jeu du 16/10 (Bloodmage, Venomancer). Inertes pour toute autre classe et
         // sous AiPlayerbot.CoaIa.FormeMaudite = 0 / VenomancerSoin = 0. Au-dessus de « coa defensive » (ACTION_HIGH + 8),
@@ -6374,6 +6459,7 @@ public:
         creators["coa regen mana"] = &CoaActionFactoryInternal::coa_regen_mana;
         creators["coa protection"] = &CoaActionFactoryInternal::coa_protection;
         creators["coa familier defensif"] = &CoaActionFactoryInternal::coa_familier_defensif;
+        creators["coa etendard"] = &CoaActionFactoryInternal::coa_etendard;
     }
 
 private:
@@ -6413,6 +6499,7 @@ private:
     static Action* coa_regen_mana(PlayerbotAI* botAI) { return new CoaRegenManaAction(botAI); }
     static Action* coa_protection(PlayerbotAI* botAI) { return new CoaProtectionAction(botAI); }
     static Action* coa_familier_defensif(PlayerbotAI* botAI) { return new CoaFamilierDefensifAction(botAI); }
+    static Action* coa_etendard(PlayerbotAI* botAI) { return new CoaEtendardAction(botAI); }
 };
 
 class CoaTriggerFactoryInternal : public NamedObjectContext<Trigger>
@@ -6433,6 +6520,7 @@ public:
         creators["coa invalid target"] = &CoaTriggerFactoryInternal::coa_invalid_target;
         creators["coa regen mana"] = &CoaTriggerFactoryInternal::coa_regen_mana;
         creators["coa familier passif"] = &CoaTriggerFactoryInternal::coa_familier_passif;
+        creators["coa etendard"] = &CoaTriggerFactoryInternal::coa_etendard;
     }
 
 private:
@@ -6449,6 +6537,7 @@ private:
     static Trigger* coa_invalid_target(PlayerbotAI* botAI) { return new CoaInvalidTargetTrigger(botAI); }
     static Trigger* coa_regen_mana(PlayerbotAI* botAI) { return new CoaRegenManaTrigger(botAI); }
     static Trigger* coa_familier_passif(PlayerbotAI* botAI) { return new CoaFamilierPassifTrigger(botAI); }
+    static Trigger* coa_etendard(PlayerbotAI* botAI) { return new CoaEtendardTrigger(botAI); }
 };
 
 }  // namespace
