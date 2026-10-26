@@ -67,6 +67,7 @@
 #include "CoaBancSoin.h"
 
 #include "CoaArene1v1.h"
+#include "CoaCompagnons.h"
 #include "CoaDirecteur.h"
 #include "CoaSpecialization.h"
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
@@ -679,6 +680,10 @@ char const* RefusMembre(Player* b, uint32 niveau)
         return "deja_en_essai";
     if (CoaArene1v1::GladiateurEngage(guid))
         return "arene";
+    // CoA (26/10/2026, revue independante des reserves) : un compagnon ou un bot de reserve a le niveau fige ; l'essai le
+    // referait (Randomize) et changerait sa spe.
+    if (CoaCompagnons::EstCompagnon(guid))
+        return "compagnon";
     if (CoaDirecteur::AffectationDe(guid, nullptr) || CoaDirecteur::ChasseurDe(guid) || CoaDirecteur::CibleDeBanc(guid) ||
         CoaDirecteur::CibleImmobile(guid))
         return "directeur";
