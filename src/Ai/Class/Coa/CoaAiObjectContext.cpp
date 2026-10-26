@@ -6639,6 +6639,22 @@ bool CoaEmbusqueur(Player* bot)
     return true;
 }
 
+// Montures (26/10, seconde revue) : voir la declaration dans CoaAiObjectContext.h. Memes trois exceptions que
+// CoaRefuseMonte (plus haut) et Spell::CheckCast, sans le sort : pour le Tinker, ses sorts de famille 34 (son kit) sont
+// permis -- c'est ce qui lui laisse le combat en Mechsuit.
+bool CoaAgitMonte(Player* bot)
+{
+    if (!bot->IsMounted() || bot->IsInFlight())
+        return false;
+    Aura const* divineCharge = bot->GetAura(527272);
+    Unit const* divineCaster = divineCharge ? divineCharge->GetCaster() : nullptr;
+    if (divineCaster && divineCaster->IsPlayer() && divineCaster->getClass() == CLASS_MONK && bot->GetMountID() == 14584)
+        return true;
+    if (bot->getClass() == CLASS_TINKER && bot->HasAura(801384, bot->GetGUID()) && bot->HasAura(803451, bot->GetGUID()))
+        return true;
+    return bot->getClass() == CLASS_STARCALLER && bot->HasAura(704772);
+}
+
 /*
  * Le pont entre la chasse et les compteurs UsageKind, declare dans
  * Ai/Coa/CoaChasse.h. Il est ICI et pas la-bas parce que l'enum USAGE_* et
