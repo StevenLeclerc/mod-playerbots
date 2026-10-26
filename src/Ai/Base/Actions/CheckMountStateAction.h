@@ -63,7 +63,6 @@ private:
     bool coaMonteeLancee = false;
     uint32 coaMonteeLanceeMs = 0;
     static std::unordered_map<uint32, PreferredMountCache> mountCache;
-    static bool preferredMountTableChecked;
     float CalculateDismountDistance() const;
     float CalculateMountDistance() const;
     void Dismount();

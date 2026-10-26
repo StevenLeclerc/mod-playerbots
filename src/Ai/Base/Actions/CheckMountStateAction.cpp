@@ -87,11 +87,20 @@ static bool CoaMonteEnFormeDeClasse(Unit const* unit)
 // Le maitre est-il monte au sens de cette action ? Une forme de classe n'est pas une monture a suivre (revue M3 : un
 // maitre Templar en Divine Charge ou Tinker en Mechsuit faisait monter puis descendre ses compagnons). Classes CoA
 // seulement : pour un bot vanille, master->IsMounted() comme chez l'amont.
+//
+// Seconde revue (mineur 1) : seules les formes TEMPORAIRES (duree finie : Divine Charge, Huntress Saber, Moonchaser
+// Kodo, Mechsuit, Hellbound Charge) sont ignorees. Xorothian Warsteed 804703 et Battlestrider 807383 (duree infinie)
+// sont la monture de voyage du Knight of Xoroth : un maitre dessus compte comme monte, ses compagnons montent.
 static bool CoaMaitreMonte(Player* bot, Player* master)
 {
     if (!master->IsMounted())
         return false;
-    return !IsAscensionCustomClassId(bot->getClass()) || !CoaMonteEnFormeDeClasse(master);
+    if (!IsAscensionCustomClassId(bot->getClass()))
+        return true;
+    for (AuraEffect const* eff : master->GetAuraEffectsByType(SPELL_AURA_MOUNTED))
+        if (eff->GetSpellInfo()->GetMaxDuration() > 0)
+            return false;
+    return true;
 }
 
 // Revue m1 : CastSpell rend vrai au DEBUT de l'incantation. Si le bot n'est pas monte passe ce delai (1,5 s
@@ -109,10 +118,12 @@ static std::once_flag sCoaMonturesPrefereesChargees;
 // tout son grimoire (CollectMountData). Apres une montee ratee, plus d'essai pendant COA_MONTURE_REPIT_MS : au plus un
 // arret par bot et par repit.
 static constexpr uint32 COA_MONTURE_REPIT_MS = 30 * IN_MILLISECONDS;
+// Seconde revue (mineur 4) : compagnon d'un humain, repit court -- il doit suivre la monture de son maitre sans 30 s de
+// retard ; au plus un arret toutes les 5 s s'il echoue sans cesse.
+static constexpr uint32 COA_MONTURE_REPIT_COMPAGNON_MS = 5 * IN_MILLISECONDS;
 
 // Define the static map / init bool for caching bot preferred mount data globally
 std::unordered_map<uint32, PreferredMountCache> CheckMountStateAction::mountCache;
-bool CheckMountStateAction::preferredMountTableChecked = false;
 
 MountData CollectMountData(Player const* bot)
 {
@@ -250,6 +261,14 @@ bool CheckMountStateAction::Execute(Event /*event*/)
 
 bool CheckMountStateAction::isUseful()
 {
+    // CoA (seconde revue, mineur 3) : une montee lancee n'est verifiee (plus bas) que si rien ne l'a rendue caduque. Monte,
+    // mort, en vehicule, en vol, en interieur, en arene, en combat : le controle n'a plus de sens, le drapeau tombe ICI,
+    // avant les gardes de sortie qui l'auraient laisse survivre (et armer plus tard un repit de 30 s a tort).
+    if (coaMonteeLancee &&
+        (bot->IsMounted() || bot->isDead() || botAI->IsInVehicle() || bot->HasUnitState(UNIT_STATE_IN_FLIGHT) ||
+         !bot->IsOutdoors() || bot->InArena() || bot->IsInCombat() || botAI->GetState() == BOT_STATE_COMBAT))
+        coaMonteeLancee = false;
+
     // Not useful when:
     if (botAI->IsInVehicle() || bot->isDead() || bot->HasUnitState(UNIT_STATE_IN_FLIGHT) ||
         !bot->IsOutdoors() || bot->InArena())
@@ -271,10 +290,19 @@ bool CheckMountStateAction::isUseful()
     bool const coa = IsAscensionCustomClassId(bot->getClass());
 
     // CoA (26/10, revue M2) : une forme de classe a aura de monture (Mechsuit, Huntress Saber, Divine Charge,
-    // Xorothian Warsteed...) n'est JAMAIS retiree par cette action, ni en combat ni hors combat :
-    // Dismount -> HandleCancelMountAuraOpcode retire toutes les auras 78. Et rien ne monte par-dessus.
+    // Xorothian Warsteed...) n'est pas retiree par cette action hors combat (Dismount -> HandleCancelMountAuraOpcode
+    // retire toutes les auras 78), et rien ne monte par-dessus.
+    // Seconde revue (MAJEUR) : en combat, on ne la garde QUE si le coeur laisse agir monte (CoaAgitMonte, memes
+    // exceptions que Spell::CheckCast et CoaRefuseMonte : Divine Charge d'un Monk, Mechsuit du Tinker, Starcaller sous
+    // 704772). Sinon -- Xorothian Warsteed 804703, Battlestrider 807383, Moonchaser Kodo 707752... -- la descente
+    // d'origine (noeud « mounted » a 54) revient : monte, le bot n'aurait que Trample et Stomp (Unit::Attack refuse la
+    // melee a un joueur monte), indefiniment pour une forme a duree infinie.
     if (coa && CoaMonteEnFormeDeClasse(bot))
-        return false;
+    {
+        bool const enCombat = bot->IsInCombat() || botAI->GetState() == BOT_STATE_COMBAT;
+        if (!enCombat || CoaAgitMonte(bot))
+            return false;
+    }
 
     // Not useful when in combat and not currently mounted / travel formed
     if ((bot->IsInCombat() || botAI->GetState() == BOT_STATE_COMBAT) &&
@@ -294,14 +322,16 @@ bool CheckMountStateAction::isUseful()
         // Revue m1 : montee lancee (CastSpell vrai au debut de l'incantation) -- verifiee COA_MONTURE_VERIF_MS plus tard.
         if (coaMonteeLancee)
         {
-            if (getMSTimeDiff(coaMonteeLanceeMs, maintenant) < COA_MONTURE_VERIF_MS)
+            // Incantation encore en cours (plus longue que prevu : 3 s ou plus) : on attend, sans conclure.
+            if (getMSTimeDiff(coaMonteeLanceeMs, maintenant) < COA_MONTURE_VERIF_MS || bot->IsNonMeleeSpellCast(false))
                 return false;
             coaMonteeLancee = false;
-            coaEchecMonture = true;   // toujours a pied : la montee a echoue
+            coaEchecMonture = true;   // toujours a pied, plus rien en cours : la montee a echoue
             coaEchecMontureMs = maintenant;
         }
-        // Repit apres une montee ratee.
-        if (coaEchecMonture && getMSTimeDiff(coaEchecMontureMs, maintenant) < COA_MONTURE_REPIT_MS)
+        // Repit apres une montee ratee (court pour le compagnon d'un humain, mineur 4).
+        uint32 const repit = botAI->HasGameClientMaster() ? COA_MONTURE_REPIT_COMPAGNON_MS : COA_MONTURE_REPIT_MS;
+        if (coaEchecMonture && getMSTimeDiff(coaEchecMontureMs, maintenant) < repit)
             return false;
         // Revue m3 : assis (repas, boisson) -- StopMoving et l'incantation le releveraient et couperaient la regeneration.
         if (bot->IsSitState())
@@ -507,14 +537,14 @@ bool CheckMountStateAction::TryPreferredMount(Player* master) const
 {
     uint32 botGUID = bot->GetGUID().GetRawValue();
 
-    // Build cache (only once) -- CoA revue B1 : sous std::call_once, seul ecrivain de mountCache et du drapeau.
+    // Build cache (only once) -- CoA revue B1 : sous std::call_once, seul ecrivain de mountCache (l'ancien drapeau
+    // preferredMountTableChecked, remplace par le std::once_flag, est retire).
     std::call_once(sCoaMonturesPrefereesChargees, []
     {
         // Verify preferred mounts table existance in the database
         QueryResult checkTable = PlayerbotsDatabase.Query(
             "SELECT EXISTS(SELECT * FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'playerbots_preferred_mounts')");
 
-        preferredMountTableChecked = true;
         if (checkTable && checkTable->Fetch()[0].Get<uint32>() == 1)
         {
             // Cache all mounts of both types globally, for all entries

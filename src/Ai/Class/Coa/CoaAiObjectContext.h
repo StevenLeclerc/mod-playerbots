@@ -24,6 +24,12 @@ class Player;
 // Lu par CheckMountStateAction::isUseful : un embusqueur ne monte pas (monte, il ne s'embusque plus).
 bool CoaEmbusqueur(Player* bot);
 
+// Montures (26/10, seconde revue) : ce bot MONTE peut-il agir quand meme (sorts) ? Les exceptions du coeur
+// (Spell::CheckCast, recopiees par CoaRefuseMonte) : Divine Charge posee par un Monk sur la monture 14584, Mechsuit du
+// Tinker (801384 + 803451, sorts de famille 34), Starcaller sous 704772 ; jamais en vol. Lu par
+// CheckMountStateAction::isUseful : en combat, une forme de classe n'est gardee que si c'est vrai.
+bool CoaAgitMonte(Player* bot);
+
 /*
  * One ability of a bot's kit: an ability of its class that it has reached and really
  * knows, kept between ticks by CoaAiObjectContext below.
