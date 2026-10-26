@@ -6646,10 +6646,10 @@ bool CoaAgitMonte(Player* bot)
 {
     if (!bot->IsMounted() || bot->IsInFlight())
         return false;
-    Aura const* divineCharge = bot->GetAura(527272);
-    Unit const* divineCaster = divineCharge ? divineCharge->GetCaster() : nullptr;
-    if (divineCaster && divineCaster->IsPlayer() && divineCaster->getClass() == CLASS_MONK && bot->GetMountID() == 14584)
-        return true;
+    // Quatrieme revue (decision du coordinateur, 26/10) : Divine Charge 527272 n'est PAS retenue, bien que le coeur laisse
+    // lancer des sorts dessus : monte, le Templar n'a aucune attaque de melee (Unit::Attack refuse un joueur monte) pendant
+    // jusqu'a 15 s. En combat il descend donc au contact, comme avant cette branche ; la descente ne retire que la monture
+    // (Dismount, auras 78), pas les auras 527272 / 527270.
     if (bot->getClass() == CLASS_TINKER && bot->HasAura(801384, bot->GetGUID()) && bot->HasAura(803451, bot->GetGUID()))
         return true;
     return bot->getClass() == CLASS_STARCALLER && bot->HasAura(704772);
