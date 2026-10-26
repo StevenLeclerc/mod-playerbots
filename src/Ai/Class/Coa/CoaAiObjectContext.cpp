@@ -6404,6 +6404,37 @@ public:
     }
 };
 
+/*
+ * « coa monture » (26/10/2026, coa-project/docs/DIAG-bots-montures-20261026.md) : LE SEUL DECLENCHEUR HORS COMBAT DE LA
+ * MONTURE. Chez l'amont il vit dans « nc » (NonCombatStrategy.cpp:12, « timer » -> « check mount state » a 1,0), et
+ * « nc » n'a de createur que dans les contextes des 10 classes vanille : posee par son nom seul (AiFactory.cpp), elle ne
+ * produit rien sur un bot CoA. « mount » (MountStrategy::InitTriggers vide) n'est qu'une garde lue par isUseful. Les bots
+ * CoA (100 % du cheptel au 26/10) ne montaient donc que par des chemins occasionnels (paquet de vitesse, fuite du
+ * Directeur, suivi d'un maitre).
+ *
+ * On ne reprend PAS « nc » entiere : elle reactiverait aussi « random » -> « clean quest log » (abandon de quetes), un
+ * autre changement de gameplay. On ne remplit pas MountStrategy::InitTriggers (code amont, doublon si « nc » revenait).
+ * Fabrique a part, SANS freres (CoaMontureStrategyFactoryInternal, construite par defaut) : P-130, sa pose ne retire
+ * rien, et la pose d'une soeur de « coa buff » ne la retire pas non plus.
+ *
+ * « timer » est vrai une fois par seconde (TimerTrigger::IsActive) ; l'action garde toutes les gardes d'isUseful
+ * (interieur, combat, arene, niveau UseGroundMountAtMinLevel, strategie « mount », champ de bataille) plus les gardes CoA
+ * de CheckMountStateAction (furtif, joueur ennemi en vue, forme de classe, repit apres un echec).
+ */
+class CoaMontureStrategy : public Strategy
+{
+public:
+    CoaMontureStrategy(PlayerbotAI* botAI) : Strategy(botAI) {}
+
+    std::string const getName() override { return "coa monture"; }
+    uint32 GetType() const override { return STRATEGY_TYPE_NONCOMBAT; }
+
+    void InitTriggers(std::vector<TriggerNode*>& triggers) override
+    {
+        triggers.push_back(new TriggerNode("timer", { NextAction("check mount state", 1.0f) }));
+    }
+};
+
 class CoaStrategyFactoryInternal : public NamedObjectContext<Strategy>
 {
 public:
@@ -6468,6 +6499,16 @@ public:
 private:
     static Strategy* coa_chasse(PlayerbotAI* botAI) { return new CoaChasseStrategy(botAI); }
     static Strategy* coa_chasseur_prime(PlayerbotAI* botAI) { return new CoaChasseurPrimeStrategy(botAI); }
+};
+
+// « coa monture » : fabrique construite par defaut, donc SANS freres (P-130) -- voir CoaMontureStrategy plus haut.
+class CoaMontureStrategyFactoryInternal : public NamedObjectContext<Strategy>
+{
+public:
+    CoaMontureStrategyFactoryInternal() { creators["coa monture"] = &CoaMontureStrategyFactoryInternal::coa_monture; }
+
+private:
+    static Strategy* coa_monture(PlayerbotAI* botAI) { return new CoaMontureStrategy(botAI); }
 };
 
 class CoaActionFactoryInternal : public NamedObjectContext<Action>
@@ -6800,6 +6841,8 @@ void CoaAiObjectContext::BuildSharedStrategyContexts(SharedNamedObjectContextLis
     strategyContexts.Add(new CoaChasseStrategyFactoryInternal());
     // CoaArene IA : contexte sans freres lui aussi (P-130), sa pose ne retire rien.
     strategyContexts.Add(new CoaAreneStrategyFactoryInternal());
+    // « coa monture » (26/10) : contexte sans freres lui aussi (P-130).
+    strategyContexts.Add(new CoaMontureStrategyFactoryInternal());
 }
 
 void CoaAiObjectContext::BuildSharedActionContexts(SharedNamedObjectContextList<Action>& actionContexts)

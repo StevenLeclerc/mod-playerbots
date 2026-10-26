@@ -17,6 +17,8 @@
 #include "Playerbots.h"
 #include "ServerFacade.h"
 #include "SpellAuraEffects.h"
+#include "Timer.h"
+#include "mod-ascension-compat/src/AscensionSpecialization.h"
 
 static constexpr uint32 SPELL_COLD_WEATHER_FLYING = 54197;
 static constexpr float PARACHUTE_LAND_THRESHOLD = 15.0f;
@@ -39,6 +41,39 @@ static bool CoaChasseurPresDeSonPrime(PlayerbotAI* botAI, Player* bot)
     return prime && prime->IsInWorld() && prime->GetMapId() == bot->GetMapId() &&
            bot->GetExactDist2d(prime) < COA_MONTURE_INTERDITE_YD;
 }
+
+/*
+ * CoA -- montures des bots (26/10/2026, coa-project/docs/DIAG-bots-montures-20261026.md). Ces gardes ne jouent que
+ * pour les classes CoA (IsAscensionCustomClassId) : le comportement des classes vanille reste celui de l'amont.
+ *
+ * FORME DE CLASSE. Cinq sorts du kit CoA posent SPELL_AURA_MOUNTED en effet 0 (Spell.dbc lu le 26/10) : Divine Charge
+ * 527272 (15 s), Huntress Saber 704772 et Moonchaser Kodo 707752 (30 s), Build: Mechsuit 803451 (18 h, pose par
+ * 801384), Hellbound Charge 807248 (3 s). Tous ont une DUREE FINIE ; les vraies montures (5 506 sorts « aura 78 » de
+ * famille vanille) sont a duree infinie, comme Celestial Steed 75614 et Boots of Speed 800284/801315 (CoA, infinies,
+ * gardees). Sans filtre, CollectMountData les range parmi les montures : Divine Charge (vitesse 99) aurait ete tiree au
+ * sort comme monture de voyage, en brulant son temps de recharge. Et Execute descendait (HandleCancelMountAura) le bot
+ * de ces formes des qu'une cible courante etait proche ou que son maitre etait a pied -- un Tinker perdait son Mechsuit.
+ * Les 11 sorts vanille « aura 78 » a duree finie sont des montures de quete ou d'evenement (Rental Racing Ram...).
+ */
+static bool CoaSortFormeDeClasse(SpellInfo const* info)
+{
+    return info && info->GetMaxDuration() > 0;
+}
+
+static bool CoaMonteEnFormeDeClasse(Player* bot)
+{
+    for (AuraEffect const* eff : bot->GetAuraEffectsByType(SPELL_AURA_MOUNTED))
+        if (CoaSortFormeDeClasse(eff->GetSpellInfo()))
+            return true;
+    return false;
+}
+
+// REPIT APRES UN ECHEC. TryRandomMountFiltered arrete le bot (StopMoving) AVANT CanCastSpell -- il le faut : CanCastSpell
+// refuse tout sort a incantation tant que le bot bouge (PlayerbotAI.cpp, « Casting time and bot is moving »). Un bot
+// eligible dont tous les essais echouent etait donc arrete net a chaque seconde (« timer »), et refaisait le parcours de
+// tout son grimoire (CollectMountData). Apres une montee ratee, plus d'essai pendant COA_MONTURE_REPIT_MS : au plus un
+// arret par bot et par repit.
+static constexpr uint32 COA_MONTURE_REPIT_MS = 30 * IN_MILLISECONDS;
 
 // Define the static map / init bool for caching bot preferred mount data globally
 std::unordered_map<uint32, PreferredMountCache> CheckMountStateAction::mountCache;
@@ -187,6 +222,10 @@ bool CheckMountStateAction::isUseful()
 
     master = GetMaster();
 
+    // CoA (26/10) : jamais une valeur d'un appel precedent, ni indeterminee (sans maitre, rien ne les ecrivait).
+    botInShapeshiftForm = FORM_NONE;
+    masterInShapeshiftForm = FORM_NONE;
+
     // Get shapeshift states, only applicable when there's a master
     if (master)
     {
@@ -215,6 +254,31 @@ bool CheckMountStateAction::isUseful()
     if (bot->GetLevel() < sPlayerbotAIConfig.useGroundMountAtMinLevel)
         return false;
 
+    // CoA (26/10) -- gardes de classe CoA, voir l'en-tete CoaSortFormeDeClasse.
+    if (IsAscensionCustomClassId(bot->getClass()))
+    {
+        bool const enCombat = bot->IsInCombat() || botAI->GetState() == BOT_STATE_COMBAT;
+        // Forme de classe hors combat : ni descente (Mechsuit, Saber...), ni monture par-dessus. En combat, le chemin
+        // d'avant reste (noeud « mounted » a 54 de CombatStrategy) : c'est lui qui rend la main a un Templar sous
+        // Divine Charge, dont CoaRefuseMonte ecarte tous les sorts.
+        if (!enCombat && CoaMonteEnFormeDeClasse(bot))
+            return false;
+        if (!bot->IsMounted())
+        {
+            // Mercenaire furtif (WildPvp.StealthAmbush) : l'incantation romprait la furtivite, et monte il ne
+            // s'embusque plus (CoaAmbushTrigger, CoaStealthAction refusent un bot monte).
+            if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+                return false;
+            // Joueur ennemi retenu comme cible (EnemyPlayerValue, calcule au plus une fois par seconde) : on ne
+            // s'arrete pas 1,5 s pour monter devant lui ; « attack enemy player » (55) a la main.
+            if (AI_VALUE(Unit*, "enemy player target"))
+                return false;
+            // Repit apres une montee ratee.
+            if (coaEchecMonture && getMSTimeDiff(coaEchecMontureMs, getMSTime()) < COA_MONTURE_REPIT_MS)
+                return false;
+        }
+    }
+
     // Allow mounting while transformed only if the form allows it
     if (bot->HasAuraType(SPELL_AURA_TRANSFORM) && bot->IsInDisallowedMountForm())
         return false;
@@ -236,6 +300,19 @@ bool CheckMountStateAction::isUseful()
 }
 
 bool CheckMountStateAction::Mount()
+{
+    bool const monte = MountInterne();
+    // CoA (26/10) : repit apres un echec (voir COA_MONTURE_REPIT_MS) ; un succes le leve.
+    if (IsAscensionCustomClassId(bot->getClass()))
+    {
+        coaEchecMonture = !monte;
+        if (!monte)
+            coaEchecMontureMs = getMSTime();
+    }
+    return monte;
+}
+
+bool CheckMountStateAction::MountInterne()
 {
     // Remove current Shapeshift if need be
     if (botInShapeshiftForm != FORM_TRAVEL &&
@@ -467,7 +544,15 @@ bool CheckMountStateAction::TryRandomMountFiltered(std::map<int32, std::vector<u
             continue;
 
         // Pick a random mount from the candidate group.
-        auto const& ids = it->second;
+        auto const& idsBruts = it->second;
+        // CoA (26/10) : un bot CoA ne tire jamais une forme de classe (duree finie) comme monture de voyage.
+        std::vector<uint32> idsCoa;
+        bool const coa = IsAscensionCustomClassId(bot->getClass());
+        if (coa)
+            for (uint32 id : idsBruts)
+                if (!CoaSortFormeDeClasse(sSpellMgr->GetSpellInfo(id)))
+                    idsCoa.push_back(id);
+        auto const& ids = coa ? idsCoa : idsBruts;
         if (!ids.empty())
         {
             // Required here as otherwise bots won't mount in BGs due to them constant moving
@@ -478,8 +563,10 @@ bool CheckMountStateAction::TryRandomMountFiltered(std::map<int32, std::vector<u
 
             if (botAI->CanCastSpell(ids[index], bot))
             {
-                botAI->CastSpell(ids[index], bot);
-                return true;
+                // CoA (26/10) : le resultat de CastSpell compte. Ignore, un lancement refuse rendait « monte » et
+                // aucun repit ne s'armait. Vanille : inchange.
+                if (botAI->CastSpell(ids[index], bot) || !coa)
+                    return true;
             }
         }
     }

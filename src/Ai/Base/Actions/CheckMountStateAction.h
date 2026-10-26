@@ -42,12 +42,23 @@ public:
     bool isPossible() override { return true; }
     bool Mount();
 
+private:
+    bool MountInterne();
+
+public:
+
     static void CompleteDismount(Player* bot);
 
 private:
-    Player* master;
-    ShapeshiftForm masterInShapeshiftForm;
-    ShapeshiftForm botInShapeshiftForm;
+    // CoA (26/10) : initialises. Sans maitre, isUseful ne les ecrivait jamais, et Execute/Mount lisaient une valeur
+    // indeterminee ; isUseful les remet desormais a FORM_NONE a chaque appel avant de lire le maitre.
+    Player* master = nullptr;
+    ShapeshiftForm masterInShapeshiftForm = FORM_NONE;
+    ShapeshiftForm botInShapeshiftForm = FORM_NONE;
+    // CoA (26/10) : repit apres une montee ratee (COA_MONTURE_REPIT_MS, CheckMountStateAction.cpp). Une instance
+    // d'action par bot (AiObjectContext par bot) : aucun partage entre fils.
+    bool coaEchecMonture = false;
+    uint32 coaEchecMontureMs = 0;
     static std::unordered_map<uint32, PreferredMountCache> mountCache;
     static bool preferredMountTableChecked;
     float CalculateDismountDistance() const;
