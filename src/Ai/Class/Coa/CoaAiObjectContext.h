@@ -17,6 +17,12 @@
 
 class PlayerbotAI;
 class SpellInfo;
+class Player;
+
+// Montures (26/10, revue M1) : ce bot est-il un embusqueur -- mercenaire d'une classe a furtivite, WildPvp.StealthAmbush
+// arme, hors chasseur de prime en traque ? Memes conditions que CoaAmbushTrigger (CoaAiObjectContext.cpp), sans la proie.
+// Lu par CheckMountStateAction::isUseful : un embusqueur ne monte pas (monte, il ne s'embusque plus).
+bool CoaEmbusqueur(Player* bot);
 
 /*
  * One ability of a bot's kit: an ability of its class that it has reached and really

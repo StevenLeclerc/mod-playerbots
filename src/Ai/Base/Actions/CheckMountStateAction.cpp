@@ -18,6 +18,8 @@
 #include "ServerFacade.h"
 #include "SpellAuraEffects.h"
 #include "Timer.h"
+#include "CoaAiObjectContext.h"
+#include <mutex>
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
 
 static constexpr uint32 SPELL_COLD_WEATHER_FLYING = 54197;
@@ -55,18 +57,51 @@ static bool CoaChasseurPresDeSonPrime(PlayerbotAI* botAI, Player* bot)
  * de ces formes des qu'une cible courante etait proche ou que son maitre etait a pied -- un Tinker perdait son Mechsuit.
  * Les 11 sorts vanille « aura 78 » a duree finie sont des montures de quete ou d'evenement (Rental Racing Ram...).
  */
+//
+// Revue du 26/10 (M2) : deux autres sorts de classe posent l'aura 78 en effet 1, avec une duree INFINIE, et le filtre par
+// duree ne les voyait pas : Xorothian Warsteed 804703 et Battlestrider 807383 (Knight of Xoroth, famille 23 ; sans eux
+// pas de Hellfire Trample ni de Dreadrider's Stomp). Critere complet, verifie sur Spell.dbc le 26/10 : aura de monture,
+// ET (duree finie, OU famille CoA (> SPELLFAMILY_PET) sans l'aura de monture en effet 0). Il retient exactement ces sept
+// sorts parmi les sorts CoA ; Celestial Steed 75614 et Boots of Speed 800284/801315 (aura en effet 0, infinies) restent
+// des montures. CollectMountData ne range que les sorts a aura de monture en effet 0 : 804703/807383 n'y entrent pas.
 static bool CoaSortFormeDeClasse(SpellInfo const* info)
 {
-    return info && info->GetMaxDuration() > 0;
+    if (!info || !info->HasAura(SPELL_AURA_MOUNTED))
+        return false;
+    if (info->GetMaxDuration() > 0)
+        return true;
+    return info->SpellFamilyName > SPELLFAMILY_PET && info->Effects[0].ApplyAuraName != SPELL_AURA_MOUNTED;
 }
 
-static bool CoaMonteEnFormeDeClasse(Player* bot)
+// Monte par une forme de classe ? Vaut pour le bot comme pour son maitre (revue M3).
+static bool CoaMonteEnFormeDeClasse(Unit const* unit)
 {
-    for (AuraEffect const* eff : bot->GetAuraEffectsByType(SPELL_AURA_MOUNTED))
+    if (!unit || !unit->IsMounted())
+        return false;
+    for (AuraEffect const* eff : unit->GetAuraEffectsByType(SPELL_AURA_MOUNTED))
         if (CoaSortFormeDeClasse(eff->GetSpellInfo()))
             return true;
     return false;
 }
+
+// Le maitre est-il monte au sens de cette action ? Une forme de classe n'est pas une monture a suivre (revue M3 : un
+// maitre Templar en Divine Charge ou Tinker en Mechsuit faisait monter puis descendre ses compagnons). Classes CoA
+// seulement : pour un bot vanille, master->IsMounted() comme chez l'amont.
+static bool CoaMaitreMonte(Player* bot, Player* master)
+{
+    if (!master->IsMounted())
+        return false;
+    return !IsAscensionCustomClassId(bot->getClass()) || !CoaMonteEnFormeDeClasse(master);
+}
+
+// Revue m1 : CastSpell rend vrai au DEBUT de l'incantation. Si le bot n'est pas monte passe ce delai (1,5 s
+// d'incantation, plus la marge), la montee a echoue (interrompue, refusee par le coeur) : le repit s'arme.
+static constexpr uint32 COA_MONTURE_VERIF_MS = 3 * IN_MILLISECONDS;
+
+// Revue B1 : la table des montures preferees (statique, partagee par tous les bots) est remplie UNE fois, sous
+// std::call_once, puis seulement lue par find(). Avant : un `mountCache[guid]` par appel (insertion dans un
+// unordered_map statique, sans verrou) depuis les fils de carte (MapUpdate.Threads) -- forme de P-050.
+static std::once_flag sCoaMonturesPrefereesChargees;
 
 // REPIT APRES UN ECHEC. TryRandomMountFiltered arrete le bot (StopMoving) AVANT CanCastSpell -- il le faut : CanCastSpell
 // refuse tout sort a incantation tant que le bot bouge (PlayerbotAI.cpp, « Casting time and bot is moving »). Un bot
@@ -233,10 +268,60 @@ bool CheckMountStateAction::isUseful()
         masterInShapeshiftForm = master->GetShapeshiftForm();
     }
 
+    bool const coa = IsAscensionCustomClassId(bot->getClass());
+
+    // CoA (26/10, revue M2) : une forme de classe a aura de monture (Mechsuit, Huntress Saber, Divine Charge,
+    // Xorothian Warsteed...) n'est JAMAIS retiree par cette action, ni en combat ni hors combat :
+    // Dismount -> HandleCancelMountAuraOpcode retire toutes les auras 78. Et rien ne monte par-dessus.
+    if (coa && CoaMonteEnFormeDeClasse(bot))
+        return false;
+
     // Not useful when in combat and not currently mounted / travel formed
     if ((bot->IsInCombat() || botAI->GetState() == BOT_STATE_COMBAT) &&
         !bot->IsMounted() && botInShapeshiftForm != FORM_TRAVEL && botInShapeshiftForm != FORM_FLIGHT && botInShapeshiftForm != FORM_FLIGHT_EPIC)
         return false;
+
+    // Not useful when level lower than minimum required
+    // (CoA revue m5 : remonte avant GetMapWaterOrGroundLevel, plus cher ; meme resultat, toutes ces gardes rendent faux)
+    if (bot->GetLevel() < sPlayerbotAIConfig.useGroundMountAtMinLevel)
+        return false;
+
+    // CoA (26/10) -- gardes de montee des classes CoA, les moins cheres d'abord (revue m5). Un bot deja monte n'est pas
+    // concerne : la descente reste celle de l'amont.
+    if (coa && !bot->IsMounted())
+    {
+        uint32 const maintenant = getMSTime();
+        // Revue m1 : montee lancee (CastSpell vrai au debut de l'incantation) -- verifiee COA_MONTURE_VERIF_MS plus tard.
+        if (coaMonteeLancee)
+        {
+            if (getMSTimeDiff(coaMonteeLanceeMs, maintenant) < COA_MONTURE_VERIF_MS)
+                return false;
+            coaMonteeLancee = false;
+            coaEchecMonture = true;   // toujours a pied : la montee a echoue
+            coaEchecMontureMs = maintenant;
+        }
+        // Repit apres une montee ratee.
+        if (coaEchecMonture && getMSTimeDiff(coaEchecMontureMs, maintenant) < COA_MONTURE_REPIT_MS)
+            return false;
+        // Revue m3 : assis (repas, boisson) -- StopMoving et l'incantation le releveraient et couperaient la regeneration.
+        if (bot->IsSitState())
+            return false;
+        // Furtif : l'incantation romprait la furtivite.
+        if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
+            return false;
+        // Revue M1 : un embusqueur (mercenaire d'une classe a furtivite, WildPvp.StealthAmbush) reste a pied. Monte,
+        // CoaAmbushTrigger et CoaStealthAction le refusent, et il descendait au contact sans ouverture. Sauf le
+        // compagnon d'un humain : il suit l'etat monte de son maitre (ShouldFollowMasterMountState).
+        if (!botAI->HasGameClientMaster() && CoaEmbusqueur(bot))
+            return false;
+        // Joueur ennemi retenu comme cible (EnemyPlayerValue, au plus un calcul par seconde) : pas d'arret de 1,5 s
+        // devant lui ; « attack enemy player » (55) a la main. Garde P-035 : jamais AI_VALUE sur un nom non verifie.
+        if (Value<Unit*>* ennemi = context->GetValue<Unit*>("enemy player target"))
+            if (ennemi->Get())
+                return false;
+    }
+    else if (coa)
+        coaMonteeLancee = false;   // monte : la montee lancee a abouti
 
     // In addition to checking IsOutdoors, also check whether bot is clipping below floor slightly because that will
     // cause bot to falsly indicate they are outdoors. This fixes bug where bot tries to mount indoors (which seems
@@ -249,35 +334,6 @@ bool CheckMountStateAction::isUseful()
     // Not useful when bot does not have mount strat and is not currently mounted
     if (!GET_PLAYERBOT_AI(bot)->HasStrategy("mount", BOT_STATE_NON_COMBAT) && !bot->IsMounted())
         return false;
-
-    // Not useful when level lower than minimum required
-    if (bot->GetLevel() < sPlayerbotAIConfig.useGroundMountAtMinLevel)
-        return false;
-
-    // CoA (26/10) -- gardes de classe CoA, voir l'en-tete CoaSortFormeDeClasse.
-    if (IsAscensionCustomClassId(bot->getClass()))
-    {
-        bool const enCombat = bot->IsInCombat() || botAI->GetState() == BOT_STATE_COMBAT;
-        // Forme de classe hors combat : ni descente (Mechsuit, Saber...), ni monture par-dessus. En combat, le chemin
-        // d'avant reste (noeud « mounted » a 54 de CombatStrategy) : c'est lui qui rend la main a un Templar sous
-        // Divine Charge, dont CoaRefuseMonte ecarte tous les sorts.
-        if (!enCombat && CoaMonteEnFormeDeClasse(bot))
-            return false;
-        if (!bot->IsMounted())
-        {
-            // Mercenaire furtif (WildPvp.StealthAmbush) : l'incantation romprait la furtivite, et monte il ne
-            // s'embusque plus (CoaAmbushTrigger, CoaStealthAction refusent un bot monte).
-            if (bot->HasAuraType(SPELL_AURA_MOD_STEALTH))
-                return false;
-            // Joueur ennemi retenu comme cible (EnemyPlayerValue, calcule au plus une fois par seconde) : on ne
-            // s'arrete pas 1,5 s pour monter devant lui ; « attack enemy player » (55) a la main.
-            if (AI_VALUE(Unit*, "enemy player target"))
-                return false;
-            // Repit apres une montee ratee.
-            if (coaEchecMonture && getMSTimeDiff(coaEchecMontureMs, getMSTime()) < COA_MONTURE_REPIT_MS)
-                return false;
-        }
-    }
 
     // Allow mounting while transformed only if the form allows it
     if (bot->HasAuraType(SPELL_AURA_TRANSFORM) && bot->IsInDisallowedMountForm())
@@ -302,11 +358,15 @@ bool CheckMountStateAction::isUseful()
 bool CheckMountStateAction::Mount()
 {
     bool const monte = MountInterne();
-    // CoA (26/10) : repit apres un echec (voir COA_MONTURE_REPIT_MS) ; un succes le leve.
+    // CoA (26/10) : repit apres un echec (voir COA_MONTURE_REPIT_MS). Un lancement reussi n'est qu'un debut
+    // d'incantation : il est verifie par isUseful COA_MONTURE_VERIF_MS plus tard (revue m1).
     if (IsAscensionCustomClassId(bot->getClass()))
     {
         coaEchecMonture = !monte;
-        if (!monte)
+        coaMonteeLancee = monte && !bot->IsMounted();
+        if (monte)
+            coaMonteeLanceeMs = getMSTime();
+        else
             coaEchecMontureMs = getMSTime();
     }
     return monte;
@@ -447,25 +507,25 @@ bool CheckMountStateAction::TryPreferredMount(Player* master) const
 {
     uint32 botGUID = bot->GetGUID().GetRawValue();
 
-    // Build cache (only once)
-    if (!preferredMountTableChecked)
+    // Build cache (only once) -- CoA revue B1 : sous std::call_once, seul ecrivain de mountCache et du drapeau.
+    std::call_once(sCoaMonturesPrefereesChargees, []
     {
         // Verify preferred mounts table existance in the database
         QueryResult checkTable = PlayerbotsDatabase.Query(
             "SELECT EXISTS(SELECT * FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'playerbots_preferred_mounts')");
 
+        preferredMountTableChecked = true;
         if (checkTable && checkTable->Fetch()[0].Get<uint32>() == 1)
         {
-            preferredMountTableChecked = true;
-
             // Cache all mounts of both types globally, for all entries
             QueryResult result = PlayerbotsDatabase.Query("SELECT guid, spellid, type FROM playerbots_preferred_mounts");
 
             if (result)
             {
                 uint32 totalResults = 0;
-                while (auto row = result->Fetch())
+                do
                 {
+                    Field* row = result->Fetch();
                     uint32 guid = row[0].Get<uint32>();
                     uint32 spellId = row[1].Get<uint32>();
                     uint32 mountType = row[2].Get<uint32>();
@@ -477,35 +537,33 @@ bool CheckMountStateAction::TryPreferredMount(Player* master) const
                         mountCache[guid].flightMounts.push_back(spellId);
 
                     totalResults++;
-
-                    result->NextRow();
-                }
+                } while (result->NextRow());
                 LOG_INFO("playerbots", "Preferred mounts initialized | Total records: {}", totalResults);
             }
         }
-        else // If the SQL table is missing, log an error and return false
-        {
-            preferredMountTableChecked = true;
-
+        else // If the SQL table is missing, log an error
             LOG_DEBUG("playerbots", "Preferred mounts SQL table playerbots_preferred_mounts does not exist!");
+    });
 
-            return false;
-        }
-    }
+    // Lecture seule apres le chargement : find(), jamais operator[] (qui insererait).
+    auto const entree = mountCache.find(botGUID);
+    if (entree == mountCache.end())
+        return false;
+    PreferredMountCache const& preferees = entree->second;
 
     // Pick a random preferred mount from the selection, if available
     uint32 chosenMountId = 0;
 
-    if (GetMountType(master) == 0 && !mountCache[botGUID].groundMounts.empty())
+    if (GetMountType(master) == 0 && !preferees.groundMounts.empty())
     {
-        uint32 index = urand(0, mountCache[botGUID].groundMounts.size() - 1);
-        chosenMountId = mountCache[botGUID].groundMounts[index];
+        uint32 index = urand(0, preferees.groundMounts.size() - 1);
+        chosenMountId = preferees.groundMounts[index];
     }
 
-    else if (GetMountType(master) == 1 && !mountCache[botGUID].flightMounts.empty())
+    else if (GetMountType(master) == 1 && !preferees.flightMounts.empty())
     {
-        uint32 index = urand(0, mountCache[botGUID].flightMounts.size() - 1);
-        chosenMountId = mountCache[botGUID].flightMounts[index];
+        uint32 index = urand(0, preferees.flightMounts.size() - 1);
+        chosenMountId = preferees.flightMounts[index];
     }
 
     // No suitable preferred mount found
@@ -595,7 +653,8 @@ float CheckMountStateAction::CalculateMountDistance() const
 
 bool CheckMountStateAction::ShouldFollowMasterMountState(Player* master, bool noAttackers, bool shouldMount) const
 {
-    bool isMasterMounted = master->IsMounted() || (masterInShapeshiftForm == FORM_FLIGHT ||
+    // CoA revue M3 : une forme de classe du maitre n'est pas une monture a suivre (CoaMaitreMonte).
+    bool isMasterMounted = CoaMaitreMonte(bot, master) || (masterInShapeshiftForm == FORM_FLIGHT ||
                                                     masterInShapeshiftForm == FORM_FLIGHT_EPIC ||
                                                     masterInShapeshiftForm == FORM_TRAVEL);
     bool isBotMountedOrForm = bot->IsMounted() || botInShapeshiftForm == FORM_FLIGHT ||
@@ -606,7 +665,8 @@ bool CheckMountStateAction::ShouldFollowMasterMountState(Player* master, bool no
 
 bool CheckMountStateAction::ShouldDismountForMaster(Player* master) const
 {
-    bool isMasterMounted = master->IsMounted() || (masterInShapeshiftForm == FORM_FLIGHT ||
+    // CoA revue M3 : un maitre en forme de classe est a pied pour cette action (CoaMaitreMonte).
+    bool isMasterMounted = CoaMaitreMonte(bot, master) || (masterInShapeshiftForm == FORM_FLIGHT ||
                                                    masterInShapeshiftForm == FORM_FLIGHT_EPIC ||
                                                    masterInShapeshiftForm == FORM_TRAVEL);
     return !isMasterMounted && bot->IsMounted();

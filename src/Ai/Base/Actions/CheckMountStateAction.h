@@ -59,6 +59,9 @@ private:
     // d'action par bot (AiObjectContext par bot) : aucun partage entre fils.
     bool coaEchecMonture = false;
     uint32 coaEchecMontureMs = 0;
+    // Revue m1 : montee lancee (debut d'incantation), a verifier COA_MONTURE_VERIF_MS plus tard.
+    bool coaMonteeLancee = false;
+    uint32 coaMonteeLanceeMs = 0;
     static std::unordered_map<uint32, PreferredMountCache> mountCache;
     static bool preferredMountTableChecked;
     float CalculateDismountDistance() const;

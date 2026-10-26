@@ -6583,6 +6583,23 @@ private:
 
 }  // namespace
 
+// Montures (26/10, revue M1) : voir la declaration dans CoaAiObjectContext.h. Les quatre premieres conditions de
+// CoaAmbushTrigger::IsActive, dans le meme ordre (les moins cheres d'abord), plus son exclusion du chasseur de prime
+// (P-167) ; ni l'etat du moment (combat, monte, furtif) ni la proie : c'est un role, pas une situation.
+bool CoaEmbusqueur(Player* bot)
+{
+    if (!sPlayerbotAIConfig.wildPvpStealthAmbush)
+        return false;
+    if (!ClassHas(bot, KIND_STEALTH))
+        return false;
+    if (!sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
+        return false;
+    if (sPlayerbotAIConfig.wildPvpChasse && sPlayerbotAIConfig.wildPvpTraque &&
+        CoaDirecteur::ChasseurDe(bot->GetGUID().GetCounter()))
+        return false;
+    return true;
+}
+
 /*
  * Le pont entre la chasse et les compteurs UsageKind, declare dans
  * Ai/Coa/CoaChasse.h. Il est ICI et pas la-bas parce que l'enum USAGE_* et
