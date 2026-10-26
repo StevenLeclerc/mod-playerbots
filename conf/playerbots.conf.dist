@@ -2233,9 +2233,12 @@ AiPlayerbot.DeleteRandomBotArenaTeams = 0
 AiPlayerbot.CoaCompagnons.Enable = 0
 # Niveau minimal du personnage humain. Defaut : 10
 AiPlayerbot.CoaCompagnons.SeuilNiveau = 10
-# Taille du registre, par personnage (0 a 5 chacun). Defaut : 2 et 2
-AiPlayerbot.CoaCompagnons.Allies = 2
-AiPlayerbot.CoaCompagnons.VisAVis = 2
+# Taille du registre, par personnage (0 a 5 chacun). Defaut : 1 et 0 (revision du 26/10/2026 :
+# un seul compagnon par personnage ; les visages de l'autre faction viennent des reserves
+# par tranche, ci-dessous). Un registre deja plus grand garde ses membres en trop ENDORMIS
+# (rang au-dela de la taille : jamais reveilles, toujours exemptes).
+AiPlayerbot.CoaCompagnons.Allies = 1
+AiPlayerbot.CoaCompagnons.VisAVis = 0
 # Secondes entre le depart de l'humain et le sommeil de ses compagnons. Un changement de
 # personnage sur le meme compte les endort tout de suite. Defaut : 900
 AiPlayerbot.CoaCompagnons.Grace = 900
@@ -2250,6 +2253,40 @@ AiPlayerbot.CoaCompagnons.MaxEveilles = 40
 # l'humain (ni plus de 2 au-dessus). Le lot 1 ne rattrape pas le niveau d'un compagnon deja
 # attitre. Defaut : 5
 AiPlayerbot.CoaCompagnons.EcartBas = 5
+
+# ---- Reserves par tranche de niveau (revision du 26/10/2026)
+# Six tranches (1-10, 11-20, ... 51-60 ; tranche = (niveau - 1) / 10, de 0 a 5), une reserve
+# par tranche ET par faction, toujours les memes bots. Un humain de la tranche, quel que soit
+# son camp, reveille les DEUX reserves de sa tranche ; elles s'endorment Grace secondes apres
+# le depart du dernier humain de la tranche (un humain qui change de tranche en seance compte
+# dans la nouvelle). Niveau FIGE : PLAYER_FLAGS_NO_XP_GAIN repose a chaque connexion, et les
+# memes exemptions que les compagnons (paliers, ResetBotLevel, remise periodique,
+# teleportation aleatoire). Niveaux etales dans la tranche et classes variees a la
+# constitution ; une tranche trop maigre est completee par MONTEE en niveau (GiveLevel +
+# sorts + equipement, comme .coa niveau ; jamais de baisse, ni de changement de spe).
+# Placement au reveil : la reserve de la faction d'un humain de la tranche a 600-1 200 yd de
+# lui, hors de vue ; l'autre faction dans une zone de son niveau. Memes Grace,
+# Renouvellement et Echelonnement que les compagnons. Un bot n'est jamais a la fois
+# compagnon et reserve. Vivier : comptes de bots aleatoires (type 1) seulement, hors
+# guildes de reserve du Directeur, ExcludeNames, gladiateurs, equipes d'arene, mercenaires,
+# bots en ligne. Table `coa_reserve` de la base personnages (migration
+# data/sql/characters/updates/2026_10_26_00_coa_reserve.sql, A APPLIQUER AVANT d'allumer).
+# Journal : « coa reserve: ». Commandes (MJ, console) :
+#   .coa reserve liste [tranche] | eveiller <tranche> | endormir <tranche> | constituer
+#
+# Enable : 0 (defaut) = inerte, la table n'est pas lue. Lu UNE SEULE FOIS, au demarrage
+#          (comme CoaCompagnons.Enable). Repasser a 0 laisse les endormis HORS du tirage :
+#          requete de liberation en tete de la migration.
+AiPlayerbot.CoaCompagnons.Reserve.Enable = 0
+# Bots par tranche et par faction (0 a 30). Defaut : 8
+AiPlayerbot.CoaCompagnons.Reserve.ParTranche = 8
+# Plafond global de bots de reserve eveilles en meme temps (0 = aucun reveil). Ils s'ajoutent
+# a MaxRandomBots tant que leur tranche est eveillee. Defaut : 48
+AiPlayerbot.CoaCompagnons.Reserve.MaxEveilles = 48
+# Une reserve (tranche, faction) est completee quand elle compte moins de SeuilConstitution
+# membres valides (0 = ParTranche : des qu'il en manque un). Un essai qui ne trouve pas assez
+# de bots n'est pas repris avant 15 min. Defaut : 0
+AiPlayerbot.CoaCompagnons.Reserve.SeuilConstitution = 0
 
 # ---------------------------------------------------------------------------- Arene1v1 (CoA)
 # Escarmouche 1 contre 1 NON classee : un joueur humain contre un bot d'une classe CoA,

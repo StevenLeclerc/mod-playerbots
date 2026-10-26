@@ -1162,14 +1162,22 @@ bool PlayerbotAIConfig::Initialize()
     // seconde, trop long laisserait « add » (2 x Renouvellement) expirer entre deux passes.
     coaCompagnonsEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaCompagnons.Enable", false);
     coaCompagnonsSeuilNiveau = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.SeuilNiveau", 10));
-    coaCompagnonsAllies = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Allies", 2), 5);
-    coaCompagnonsVisAVis = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.VisAVis", 2), 5);
+    coaCompagnonsAllies = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Allies", 1), 5);
+    coaCompagnonsVisAVis = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.VisAVis", 0), 5);
     coaCompagnonsGrace = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Grace", 900), 86400);
     coaCompagnonsRenouvellement = std::clamp<uint32>(
         sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Renouvellement", 120), 30, 600);
     coaCompagnonsEchelonnement = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Echelonnement", 2), 60);
     coaCompagnonsMaxEveilles = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.MaxEveilles", 40), 500);
     coaCompagnonsEcartBas = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.EcartBas", 5), 79);
+    // Revision du 26/10/2026 : reserves par tranche de niveau (CoaCompagnons.cpp, partie « reserve »). Inertes par defaut.
+    coaReserveEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaCompagnons.Reserve.Enable", false);
+    coaReserveParTranche = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Reserve.ParTranche", 8), 30);
+    coaReserveMaxEveilles = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Reserve.MaxEveilles", 48), 500);
+    // 0 : ParTranche (une reserve est completee des qu'il lui manque un membre). Jamais au-dessus de ParTranche.
+    coaReserveSeuilConstitution = sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Reserve.SeuilConstitution", 0);
+    if (!coaReserveSeuilConstitution || coaReserveSeuilConstitution > coaReserveParTranche)
+        coaReserveSeuilConstitution = coaReserveParTranche;
 
     selfBotLevel =sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
     botTextLocale = sConfigMgr->GetOption<int32>("AiPlayerbot.BotTextLocale", -1);

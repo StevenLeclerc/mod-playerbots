@@ -106,6 +106,14 @@ public:
             { "eveiller", HandleCoaCompagnonEveillerCommand, SEC_GAMEMASTER, Console::Yes },
             { "endormir", HandleCoaCompagnonEndormirCommand, SEC_GAMEMASTER, Console::Yes },
         };
+        // CoA (26/10/2026, CoaCompagnons.cpp) : reserves de bots par tranche de niveau.
+        static ChatCommandTable reserveTable =
+        {
+            { "liste",      HandleCoaReserveListeCommand,      SEC_GAMEMASTER, Console::Yes },
+            { "eveiller",   HandleCoaReserveEveillerCommand,   SEC_GAMEMASTER, Console::Yes },
+            { "endormir",   HandleCoaReserveEndormirCommand,   SEC_GAMEMASTER, Console::Yes },
+            { "constituer", HandleCoaReserveConstituerCommand, SEC_GAMEMASTER, Console::Yes },
+        };
         static ChatCommandTable coaTable =
         {
             // Console::Yes : la console RA n'a ni personnage ni cible
@@ -115,6 +123,7 @@ public:
             { "enrole", HandleCoaEnroleCommand, SEC_GAMEMASTER, Console::Yes },
             { "groupe", HandleCoaGroupeCommand, SEC_GAMEMASTER, Console::Yes },
             { "compagnon", compagnonTable },
+            { "reserve", reserveTable },
         };
         static ChatCommandTable commandTable =
         {
@@ -353,8 +362,8 @@ public:
         // Bots compagnons (revue du lot 1, m3) : un compagnon ne s'enrole pas, il suit son humain.
         if (CoaCompagnons::EstCompagnon(bas))
         {
-            handler->PSendSysMessage("coa enrole: {} (guid {}) est un bot compagnon : refuse (voir .coa compagnon liste).",
-                                     nom, bas);
+            handler->PSendSysMessage("coa enrole: {} (guid {}) est un bot compagnon ou de reserve : refuse (voir .coa "
+                                     "compagnon liste, .coa reserve liste).", nom, bas);
             return false;
         }
         Player* deja = ObjectAccessor::FindPlayerByName(nom, true);
@@ -472,6 +481,27 @@ public:
     static bool HandleCoaCompagnonEndormirCommand(ChatHandler* handler, char const* args)
     {
         return CoaCompagnons::CommandeEndormir(handler, PremierMot(args));
+    }
+
+    // .coa reserve liste [tranche] | eveiller <tranche> | endormir <tranche> | constituer   (CoaCompagnons.cpp)
+    static bool HandleCoaReserveListeCommand(ChatHandler* handler, char const* args)
+    {
+        return CoaCompagnons::CommandeReserveListe(handler, PremierMot(args));
+    }
+
+    static bool HandleCoaReserveEveillerCommand(ChatHandler* handler, char const* args)
+    {
+        return CoaCompagnons::CommandeReserveEveiller(handler, PremierMot(args));
+    }
+
+    static bool HandleCoaReserveEndormirCommand(ChatHandler* handler, char const* args)
+    {
+        return CoaCompagnons::CommandeReserveEndormir(handler, PremierMot(args));
+    }
+
+    static bool HandleCoaReserveConstituerCommand(ChatHandler* handler, char const* /*args*/)
+    {
+        return CoaCompagnons::CommandeReserveConstituer(handler);
     }
 
     // Le remplissage, partage par les deux commandes. L'ordre compte : voir

@@ -11369,6 +11369,25 @@ bool CoaDirecteur::Sauter(Player* bot, WorldLocation const& dest)
     return bot->TeleportTo(dest);
 }
 
+bool CoaDirecteur::PointHorsDeVue(Player* joueur, Player* bot, uint32 niveau, float& x, float& y, float& z,
+                                  uint32& essais)
+{
+    essais = 0;
+    if (!joueur || !bot || !joueur->IsInWorld())
+        return false;
+    Map* map = joueur->GetMap();
+    if (!map)
+        return false;
+    PointCarte const r = ChercherPointCarte(map, joueur, bot, niveau);
+    essais = r.essais;
+    if (!r.trouve)
+        return false;
+    x = r.x;
+    y = r.y;
+    z = r.z;
+    return true;
+}
+
 bool CoaDirecteur::MortEnTrajet(uint32 guidLow)
 {
     if (!nbMortsEnTrajet.load(std::memory_order_relaxed))

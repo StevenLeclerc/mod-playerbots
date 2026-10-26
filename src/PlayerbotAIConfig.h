@@ -988,13 +988,20 @@ public:
     // EstCompagnon rend toujours faux, aucun effet.
     bool coaCompagnonsEnable;
     uint32 coaCompagnonsSeuilNiveau;       // niveau minimal de l'humain (defaut 10)
-    uint32 coaCompagnonsAllies;            // allies par personnage (defaut 2, borne a 5)
-    uint32 coaCompagnonsVisAVis;           // vis-a-vis par personnage (defaut 2, borne a 5)
+    uint32 coaCompagnonsAllies;            // allies par personnage (defaut 1 depuis la revision du 26/10, borne a 5)
+    uint32 coaCompagnonsVisAVis;           // vis-a-vis par personnage (defaut 0 depuis la revision du 26/10, borne a 5)
     uint32 coaCompagnonsGrace;             // secondes entre le depart de l'humain et le sommeil (defaut 900)
     uint32 coaCompagnonsRenouvellement;    // secondes entre deux renouvellements de « add » (defaut 120, 30..600)
     uint32 coaCompagnonsEchelonnement;     // secondes entre deux reveils (defaut 2, 0..60)
     uint32 coaCompagnonsMaxEveilles;       // plafond global de compagnons eveilles (defaut 40 ; 0 = aucun reveil)
     uint32 coaCompagnonsEcartBas;          // a la constitution, jamais plus de N niveaux sous l'humain (defaut 5)
+    // Revision du 26/10/2026 (conception, en tete) : une reserve de bots par tranche de niveau (1-10 ... 51-60) ET par
+    // faction, toujours les memes, reveillee des qu'un humain de la tranche est en jeu, endormie Grace secondes apres
+    // le dernier. Niveau fige (PLAYER_FLAGS_NO_XP_GAIN, memes exemptions que les compagnons). Enable fige au demarrage.
+    bool coaReserveEnable;                 // defaut faux : table coa_reserve non lue, aucun effet
+    uint32 coaReserveParTranche;           // bots par tranche et par faction (defaut 8, borne a 30)
+    uint32 coaReserveMaxEveilles;          // plafond global de bots de reserve eveilles (defaut 48 ; 0 = aucun reveil)
+    uint32 coaReserveSeuilConstitution;    // reserve completee quand elle compte moins de N membres (defaut = ParTranche)
 
 private:
     PlayerbotAIConfig() = default;
