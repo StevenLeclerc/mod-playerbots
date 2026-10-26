@@ -48,29 +48,33 @@ static bool CoaChasseurPresDeSonPrime(PlayerbotAI* botAI, Player* bot)
  * CoA -- montures des bots (26/10/2026, coa-project/docs/DIAG-bots-montures-20261026.md). Ces gardes ne jouent que
  * pour les classes CoA (IsAscensionCustomClassId) : le comportement des classes vanille reste celui de l'amont.
  *
- * FORME DE CLASSE. Cinq sorts du kit CoA posent SPELL_AURA_MOUNTED en effet 0 (Spell.dbc lu le 26/10) : Divine Charge
- * 527272 (15 s), Huntress Saber 704772 et Moonchaser Kodo 707752 (30 s), Build: Mechsuit 803451 (18 h, pose par
- * 801384), Hellbound Charge 807248 (3 s). Tous ont une DUREE FINIE ; les vraies montures (5 506 sorts « aura 78 » de
- * famille vanille) sont a duree infinie, comme Celestial Steed 75614 et Boots of Speed 800284/801315 (CoA, infinies,
- * gardees). Sans filtre, CollectMountData les range parmi les montures : Divine Charge (vitesse 99) aurait ete tiree au
- * sort comme monture de voyage, en brulant son temps de recharge. Et Execute descendait (HandleCancelMountAura) le bot
- * de ces formes des qu'une cible courante etait proche ou que son maitre etait a pied -- un Tinker perdait son Mechsuit.
- * Les 11 sorts vanille « aura 78 » a duree finie sont des montures de quete ou d'evenement (Rental Racing Ram...).
+ * FORMES DE CLASSE, MODELE A L'EXECUTION (troisieme revue, 26/10). Spell.dbc seul ne suffit pas : les contrats de
+ * mod-ascension-compat reecrivent ces sorts au chargement (memes contrats dans core-main, core-ptr, core-armageddon) :
+ *   - Divine Charge 527272 (Templar, CLASS_MONK) : effet 0 rendu factice, la monture est posee par script,
+ *     Mount(14584) (AscensionTemplarContracts.cpp, AscensionTemplarAuras.cpp). Monte SANS aura 78 ;
+ *   - Huntress Saber 704772 (Starcaller) : idem, Mount(9991) (AscensionStarcallerContracts.cpp, ...Auras.cpp) ;
+ *   - Mechsuit 803451 (Tinker) : l'aura 78 devient une TRANSFORMATION (AscensionTinkerContracts.cpp) : le Tinker en
+ *     Mechsuit n'est jamais « monte ». Mais une monture retire 801384 (drapeau d'interruption MOUNT) et l'ejecte
+ *     (T-27) : un bot qui porte 801384 ne monte jamais (isUseful) ;
+ *   - aura 78 reelle : Moonchaser Kodo 707752 (30 s), Hellbound Charge 807248 (3 s), Dreadsteed Portal 804775
+ *     (60 s, aura 78 posee par contrat), Xorothian Warsteed 804703 et Battlestrider 807383 (aura 78 en effet 1, duree
+ *     INFINIE : la monture de voyage du Knight of Xoroth).
+ * Une forme de classe a aura 78 se reconnait donc a : famille CoA (> SPELLFAMILY_PET) ET (duree finie OU aura 78 hors
+ * effet 0). Celestial Steed 75614 (famille 32) et Boots of Speed 800284/801315 (famille 27) -- aura 78 en effet 0,
+ * infinies -- restent des montures. Les deux formes scriptees se reconnaissent a leur aura (527272, 704772), jamais au
+ * seul numero de monture (14584 est aussi le destrier classique).
  */
-//
-// Revue du 26/10 (M2) : deux autres sorts de classe posent l'aura 78 en effet 1, avec une duree INFINIE, et le filtre par
-// duree ne les voyait pas : Xorothian Warsteed 804703 et Battlestrider 807383 (Knight of Xoroth, famille 23 ; sans eux
-// pas de Hellfire Trample ni de Dreadrider's Stomp). Critere complet, verifie sur Spell.dbc le 26/10 : aura de monture,
-// ET (duree finie, OU famille CoA (> SPELLFAMILY_PET) sans l'aura de monture en effet 0). Il retient exactement ces sept
-// sorts parmi les sorts CoA ; Celestial Steed 75614 et Boots of Speed 800284/801315 (aura en effet 0, infinies) restent
-// des montures. CollectMountData ne range que les sorts a aura de monture en effet 0 : 804703/807383 n'y entrent pas.
 static bool CoaSortFormeDeClasse(SpellInfo const* info)
 {
-    if (!info || !info->HasAura(SPELL_AURA_MOUNTED))
+    if (!info || info->SpellFamilyName <= SPELLFAMILY_PET || !info->HasAura(SPELL_AURA_MOUNTED))
         return false;
-    if (info->GetMaxDuration() > 0)
-        return true;
-    return info->SpellFamilyName > SPELLFAMILY_PET && info->Effects[0].ApplyAuraName != SPELL_AURA_MOUNTED;
+    return info->GetMaxDuration() > 0 || info->Effects[0].ApplyAuraName != SPELL_AURA_MOUNTED;
+}
+
+// Les deux formes dont la monture est posee par script, sans aura 78.
+static bool CoaFormeScripteeActive(Unit const* unit)
+{
+    return unit->HasAura(527272) || unit->HasAura(704772);
 }
 
 // Monte par une forme de classe ? Vaut pour le bot comme pour son maitre (revue M3).
@@ -78,27 +82,29 @@ static bool CoaMonteEnFormeDeClasse(Unit const* unit)
 {
     if (!unit || !unit->IsMounted())
         return false;
+    if (CoaFormeScripteeActive(unit))
+        return true;
     for (AuraEffect const* eff : unit->GetAuraEffectsByType(SPELL_AURA_MOUNTED))
         if (CoaSortFormeDeClasse(eff->GetSpellInfo()))
             return true;
     return false;
 }
 
-// Le maitre est-il monte au sens de cette action ? Une forme de classe n'est pas une monture a suivre (revue M3 : un
-// maitre Templar en Divine Charge ou Tinker en Mechsuit faisait monter puis descendre ses compagnons). Classes CoA
-// seulement : pour un bot vanille, master->IsMounted() comme chez l'amont.
-//
-// Seconde revue (mineur 1) : seules les formes TEMPORAIRES (duree finie : Divine Charge, Huntress Saber, Moonchaser
-// Kodo, Mechsuit, Hellbound Charge) sont ignorees. Xorothian Warsteed 804703 et Battlestrider 807383 (duree infinie)
-// sont la monture de voyage du Knight of Xoroth : un maitre dessus compte comme monte, ses compagnons montent.
+// Le maitre est-il monte au sens de cette action ? Une forme de classe TEMPORAIRE n'est pas une monture a suivre (revue
+// M3 : un maitre Templar en Divine Charge faisait monter puis descendre ses compagnons). Les formes de classe a duree
+// infinie (Xorothian Warsteed 804703, Battlestrider 807383) sont la monture de voyage du Knight of Xoroth : un maitre
+// dessus compte comme monte (seconde revue, mineur 1). Une vraie monture temporaire (Rental Racing Ram, famille 0)
+// compte comme monture (troisieme revue, mineur 1). Classes CoA seulement : pour un bot vanille, master->IsMounted().
 static bool CoaMaitreMonte(Player* bot, Player* master)
 {
     if (!master->IsMounted())
         return false;
     if (!IsAscensionCustomClassId(bot->getClass()))
         return true;
+    if (CoaFormeScripteeActive(master))
+        return false;
     for (AuraEffect const* eff : master->GetAuraEffectsByType(SPELL_AURA_MOUNTED))
-        if (eff->GetSpellInfo()->GetMaxDuration() > 0)
+        if (CoaSortFormeDeClasse(eff->GetSpellInfo()) && eff->GetSpellInfo()->GetMaxDuration() > 0)
             return false;
     return true;
 }
@@ -311,7 +317,8 @@ bool CheckMountStateAction::isUseful()
 
     // Not useful when level lower than minimum required
     // (CoA revue m5 : remonte avant GetMapWaterOrGroundLevel, plus cher ; meme resultat, toutes ces gardes rendent faux)
-    if (bot->GetLevel() < sPlayerbotAIConfig.useGroundMountAtMinLevel)
+    // Troisieme revue (mineur 3) : un bot CoA deja monte (forme de classe en combat, sous le niveau 20) garde la descente.
+    if (bot->GetLevel() < sPlayerbotAIConfig.useGroundMountAtMinLevel && !(coa && bot->IsMounted()))
         return false;
 
     // CoA (26/10) -- gardes de montee des classes CoA, les moins cheres d'abord (revue m5). Un bot deja monte n'est pas
@@ -332,6 +339,10 @@ bool CheckMountStateAction::isUseful()
         // Repit apres une montee ratee (court pour le compagnon d'un humain, mineur 4).
         uint32 const repit = botAI->HasGameClientMaster() ? COA_MONTURE_REPIT_COMPAGNON_MS : COA_MONTURE_REPIT_MS;
         if (coaEchecMonture && getMSTimeDiff(coaEchecMontureMs, maintenant) < repit)
+            return false;
+        // Troisieme revue (MAJEUR) : Tinker en Mechsuit (801384, 7 jours) -- la monture retirerait 801384 et l'ejecterait
+        // (T-27) a chaque fin de combat. Et une forme scriptee encore active sans monture : rien par-dessus.
+        if (bot->HasAura(801384) || CoaFormeScripteeActive(bot))
             return false;
         // Revue m3 : assis (repas, boisson) -- StopMoving et l'incantation le releveraient et couperaient la regeneration.
         if (bot->IsSitState())
@@ -633,13 +644,14 @@ bool CheckMountStateAction::TryRandomMountFiltered(std::map<int32, std::vector<u
 
         // Pick a random mount from the candidate group.
         auto const& idsBruts = it->second;
-        // CoA (26/10) : un bot CoA ne tire jamais une forme de classe (duree finie) comme monture de voyage.
+        // CoA (26/10) : un bot CoA ne tire jamais une forme de classe ni une monture a duree finie comme monture de voyage.
         std::vector<uint32> idsCoa;
         bool const coa = IsAscensionCustomClassId(bot->getClass());
         if (coa)
             for (uint32 id : idsBruts)
-                if (!CoaSortFormeDeClasse(sSpellMgr->GetSpellInfo(id)))
-                    idsCoa.push_back(id);
+                if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id))
+                    if (info->GetMaxDuration() <= 0 && !CoaSortFormeDeClasse(info))
+                        idsCoa.push_back(id);
         auto const& ids = coa ? idsCoa : idsBruts;
         if (!ids.empty())
         {
