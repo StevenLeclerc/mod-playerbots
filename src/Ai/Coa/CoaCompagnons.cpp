@@ -44,6 +44,7 @@
 #include "Player.h"
 #include "PlayerbotAIConfig.h"
 #include "PlayerbotFactory.h"
+#include "Playerbots.h"
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
 #include "World.h"
@@ -472,12 +473,26 @@ void Programmer(uint32 humain, time_t maintenant)
     auto it = gRegistres.find(humain);
     if (it == gRegistres.end())
         return;
+    // Revision du 26/10 (Allies = 1, VisAVis = 0) : seuls les N premiers membres NON retires de chaque camp, dans l'ordre
+    // des rangs, se reveillent ; un registre plus grand garde les autres endormis. (Revue independante, M1 : comparer le
+    // rang a la taille laissait un remplacant de rang 2 endormi pour toujours.)
+    std::unordered_set<uint32> retenusParTaille;
+    for (Camp camp : {Camp::Allie, Camp::VisAVis})
+    {
+        std::vector<std::pair<uint8, uint32>> rangs;
+        for (Membre const& m : it->second)
+            if (m.camp == camp && m.etat != Etat::Retire)
+                rangs.emplace_back(m.rang, m.bot);
+        std::sort(rangs.begin(), rangs.end());
+        uint32 const taille = camp == Camp::Allie ? sPlayerbotAIConfig.coaCompagnonsAllies : sPlayerbotAIConfig.coaCompagnonsVisAVis;
+        for (uint32 k = 0; k < rangs.size() && k < taille; ++k)
+            retenusParTaille.insert(rangs[k].second);
+    }
     for (Membre const& m : it->second)
     {
         if (m.etat == Etat::Retire || gEveilles.count(m.bot) || gEnFile.count(m.bot))
             continue;
-        // Revision du 26/10 (Allies = 1, VisAVis = 0) : un registre plus grand garde ses membres en trop endormis.
-        if (m.rang > (m.camp == Camp::Allie ? sPlayerbotAIConfig.coaCompagnonsAllies : sPlayerbotAIConfig.coaCompagnonsVisAVis))
+        if (!retenusParTaille.count(m.bot))
             continue;
         if (gEveilles.size() + gEnFile.size() >= sPlayerbotAIConfig.coaCompagnonsMaxEveilles)
         {
@@ -716,6 +731,7 @@ constexpr time_t PLACEMENT_LIMITE_S = 120;      // un bot reveille qui n'est pas
 constexpr uint32 PLACEMENTS_PAR_SECONDE = 2;    // ChercherPointCarte : jusqu'a 36 sondes de terrain par recherche
 constexpr uint32 MONTEES_PAR_SECONDE = 1;       // la fabrique refait l'equipement : couteux
 constexpr time_t REESSAI_BOT_S = 300;           // un bot sorti seul (connexion ratee, presence expiree) : pas avant
+constexpr float DEPART_A_VUE_YD = 150.0f;       // SAUT_HUMAIN_YD du Directeur : visibilite 100 yd + marge
 
 enum : uint8
 {
@@ -1108,6 +1124,19 @@ std::vector<ResultatR> ConstituerR(std::vector<std::pair<uint8, uint8>> const& v
         b.cibles = restantes;
     }
     // 2. Tranche trop maigre : MONTEE d'un bot plus bas (le plus haut d'abord, classe variee), au premier reveil.
+    // Revue independante (m5) : une montee ne doit pas vider une tranche plus basse dont la reserve a encore besoin de
+    // ses bots naturels. Surplus par (tranche, faction) = candidats naturels restants - places encore vides ; un
+    // candidat d'une tranche sans surplus n'est pris qu'en dernier recours.
+    int surplus[NB_TRANCHES][2];
+    for (uint8 u = 0; u < NB_TRANCHES; ++u)
+        for (uint8 f = 0; f < 2; ++f)
+        {
+            uint32 const actifs = ActifsDe(u, f);
+            surplus[u][f] = -int(actifs < parTranche ? parTranche - actifs : 0);
+        }
+    for (CandidatR const& c : pool)
+        if (!c.pris && TrancheDe(c.niveau) < NB_TRANCHES)
+            ++surplus[TrancheDe(c.niveau)][c.faction];
     std::vector<Besoin*> ordre;
     for (Besoin& b : besoins)
         ordre.push_back(&b);
@@ -1119,7 +1148,10 @@ std::vector<ResultatR> ConstituerR(std::vector<std::pair<uint8, uint8>> const& v
         {
             CandidatR* meilleur = nullptr;
             auto cle = [&](CandidatR const& c)
-            { return std::make_tuple(-int(c.niveau), b->classes.count(c.classe) ? 1 : 0, c.alea); };
+            {
+                bool const protege = surplus[TrancheDe(c.niveau)][c.faction] <= 0;
+                return std::make_tuple(protege ? 1 : 0, -int(c.niveau), b->classes.count(c.classe) ? 1 : 0, c.alea);
+            };
             for (CandidatR& c : pool)
             {
                 if (c.pris || c.faction != b->f || c.niveau >= BasDe(b->t))
@@ -1131,7 +1163,10 @@ std::vector<ResultatR> ConstituerR(std::vector<std::pair<uint8, uint8>> const& v
                     meilleur = &c;
             }
             if (meilleur)
+            {
+                --surplus[TrancheDe(meilleur->niveau)][meilleur->faction];
                 prendre(*b, *meilleur, cible, true);
+            }
             else
                 restantes.push_back(cible);
         }
@@ -1160,6 +1195,24 @@ void ProgrammerR(uint8 t, uint8 f, time_t maintenant)
         aReveiller.emplace_back(m.rang, bot);
     }
     std::sort(aReveiller.begin(), aReveiller.end());
+    // Au plus ParTranche eveilles par reserve (une recharge qui le baisse n'endort personne, mais n'en reveille plus).
+    uint32 dejaEveilles = 0;
+    for (uint32 bot : gEveillesR)
+    {
+        auto m = gReserve.find(bot);
+        if (m != gReserve.end() && m->second.tranche == t && m->second.faction == f)
+            ++dejaEveilles;
+    }
+    for (uint32 bot : gEnFileR)
+    {
+        auto m = gReserve.find(bot);
+        if (m != gReserve.end() && m->second.tranche == t && m->second.faction == f)
+            ++dejaEveilles;
+    }
+    if (dejaEveilles >= sPlayerbotAIConfig.coaReserveParTranche)
+        return;
+    if (aReveiller.size() > sPlayerbotAIConfig.coaReserveParTranche - dejaEveilles)
+        aReveiller.resize(sPlayerbotAIConfig.coaReserveParTranche - dejaEveilles);
     for (auto const& [rang, bot] : aReveiller)
     {
         if (gEveillesR.size() + gEnFileR.size() >= sPlayerbotAIConfig.coaReserveMaxEveilles)
@@ -1185,6 +1238,8 @@ void EveillerTranche(uint8 t, char const* motif, time_t maintenant)
         LOG_INFO("playerbots", "coa reserve: reveil_tranche tranche={} niveaux={}-{} motif={} humains={} alliance={} horde={}",
                  uint32(t), BasDe(t), HautDe(t), motif, tr.humains, tr.humainsF[F_ALLIANCE], tr.humainsF[F_HORDE]);
     tr.eveillee = true;
+    if (!sPlayerbotAIConfig.coaReserveMaxEveilles)
+        return;   // aucun reveil permis : ne pas sortir des bots du tirage pour rien (revue independante, d7)
     ConstituerR({{t, F_ALLIANCE}, {t, F_HORDE}}, maintenant, false);
     ProgrammerR(t, F_ALLIANCE, maintenant);
     ProgrammerR(t, F_HORDE, maintenant);
@@ -1194,9 +1249,12 @@ void EveillerTranche(uint8 t, char const* motif, time_t maintenant)
 void ScanTranches(time_t maintenant)
 {
     uint32 avant[NB_TRANCHES];
+    uint32 avantF[NB_TRANCHES][2];
     for (uint8 t = 0; t < NB_TRANCHES; ++t)
     {
         avant[t] = gTranches[t].humains;
+        avantF[t][0] = gTranches[t].humainsF[0];
+        avantF[t][1] = gTranches[t].humainsF[1];
         gTranches[t].humains = 0;
         gTranches[t].humainsF[0] = gTranches[t].humainsF[1] = 0;
     }
@@ -1243,6 +1301,18 @@ void ScanTranches(time_t maintenant)
             continue;
         }
         // Eveillee : complement (membre retire, bot supprime) et reveils manquants (plafond libere, bot sorti).
+        if (!sPlayerbotAIConfig.coaReserveMaxEveilles)
+            continue;
+        // Revue independante (M2) : une faction qui gagne son premier humain dans une tranche DEJA eveillee fait
+        // replacer sa reserve pres de lui (au reveil, elle etait partie dans une zone de son niveau).
+        for (uint8 f : {uint8(F_ALLIANCE), uint8(F_HORDE)})
+            if (!avantF[t][f] && tr.humainsF[f])
+                for (uint32 bot : gEveillesR)
+                {
+                    auto m = gReserve.find(bot);
+                    if (m != gReserve.end() && m->second.tranche == t && m->second.faction == f && !gAPlacer.count(bot))
+                        gAPlacer[bot] = maintenant + PLACEMENT_LIMITE_S;
+                }
         ConstituerR({{t, F_ALLIANCE}, {t, F_HORDE}}, maintenant, false);
         ProgrammerR(t, F_ALLIANCE, maintenant);
         ProgrammerR(t, F_HORDE, maintenant);
@@ -1300,6 +1370,10 @@ void Monter(Player* p, MembreR& m)
     uint32 const cible = m.niveauCible;
     if (p->IsMounted())
         p->Dismount();
+    // Comme `.coa niveau` (revue independante, d10) : la refonte « randomize » repoussee et le niveau note, pour le jour
+    // ou ce bot quitterait la reserve.
+    sRandomPlayerbotMgr.SetValue(p, "randomize", 1);
+    sRandomPlayerbotMgr.SetValue(p, "level", cible);
     p->GiveLevel(uint8(cible));
     PlayerbotFactory fabrique(p, cible, 0);
     fabrique.InitSkills();
@@ -1318,8 +1392,24 @@ void Monter(Player* p, MembreR& m)
              NomFaction(m.faction), p->GetName(), avant, uint32(p->GetLevel()), uint32(p->GetSpellMap().size()));
 }
 
-void PlacerBot(Player* p, MembreR const& m)
+// Rend vrai si le bot est parti (ou n'a plus a partir) ; faux : a retenter au tour suivant, jusqu'a la limite.
+bool PlacerBot(Player* p, MembreR const& m, bool dernierEssai)
 {
+    // Les refus de depart de la preparation du Directeur (revue independante, m3) : en vol, en combat, ou un humain qui
+    // le verrait disparaitre. Au dernier essai, on renonce (il reste ou il s'est connecte).
+    PlayerbotAI* ia = GET_PLAYERBOT_AI(p);
+    char const* refus = p->IsInFlight() ? "en_vol"
+                        : p->IsInCombat() ? "combat"
+                        : (ia && ia->HasPlayerNearby(DEPART_A_VUE_YD)) ? "depart_a_vue"
+                                                                        : nullptr;
+    if (refus)
+    {
+        if (dernierEssai)
+            LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=abandon raison={}",
+                     uint32(m.tranche), NomFaction(m.faction), p->GetName(), refus);
+        return dernierEssai;
+    }
+    bool presEchoue = false;
     // Pres d'un humain de la tranche de SA faction, en monde ouvert.
     std::vector<Player*> humains;
     for (uint32 h : gHumainsR)
@@ -1346,20 +1436,26 @@ void PlacerBot(Player* p, MembreR const& m)
                 LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=pres humain={} carte={}"
                          " distance={:.0f} essais={}", uint32(m.tranche), NomFaction(m.faction), p->GetName(),
                          hp->GetName(), hp->GetMapId(), std::sqrt(dx * dx + dy * dy), essais);
-                return;
+                return true;
             }
         }
-        LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=pres_echoue humain={} essais={}",
-                 uint32(m.tranche), NomFaction(m.faction), p->GetName(), hp->GetName(), essais);
+        presEchoue = true;   // dit dans la ligne finale (pas une ligne par seconde de nouvel essai)
     }
     // L'autre faction (ou aucun point sur) : une zone de son niveau. RandomTeleport refuse un bot de reserve, sauf
     // celui que ce fil place ici (PlacementAutorise).
     uint32 const carteAvant = p->GetMapId();
+    float const xAvant = p->GetPositionX(), yAvant = p->GetPositionY();
     tPlacement = m.bot;
     sRandomPlayerbotMgr.RandomTeleportGrindForLevel(p);
     tPlacement = 0;
-    LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=niveau carte_avant={} teleporte={}",
-             uint32(m.tranche), NomFaction(m.faction), p->GetName(), carteAvant, p->IsBeingTeleported() ? 1 : 0);
+    // TeleportTo proche (meme carte) ne pose pas IsBeingTeleported : la position a change, ou la carte est en cours.
+    bool const parti = p->IsBeingTeleported() || p->GetMapId() != carteAvant ||
+                       p->GetExactDist2d(xAvant, yAvant) > 50.0f;
+    if (parti || dernierEssai)
+        LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode={} carte_avant={} pres_echoue={}",
+                 uint32(m.tranche), NomFaction(m.faction), p->GetName(), parti ? "niveau" : "abandon", carteAvant,
+                 presEchoue ? 1 : 0);
+    return parti || dernierEssai;
 }
 
 // Les bots reveilles, une fois en jeu : niveau fige, controle de faction (GetTeamId), montee, placement.
@@ -1421,8 +1517,8 @@ void Placer(time_t maintenant)
         }
         p->SetPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);   // ceinture : PlayerbotHolder::OnBotLogin le repose deja
         ++places;
-        gAPlacer.erase(bot);
-        PlacerBot(p, m);
+        if (PlacerBot(p, m, maintenant >= limite))
+            gAPlacer.erase(bot);
     }
 }
 
@@ -1430,7 +1526,13 @@ void RenouvelerR(time_t maintenant)
 {
     std::vector<uint32> eveilles(gEveillesR.begin(), gEveillesR.end());
     for (uint32 bot : eveilles)
+    {
         sRandomPlayerbotMgr.CoaEnroler(Guid(bot), DureePresence());   // reconnecte aussi un bot tombe
+        // Revue independante (d9) : une connexion sans IA n'a pas repasse par OnBotLogin ; le niveau reste fige.
+        if (Player* p = ObjectAccessor::FindConnectedPlayer(Guid(bot)))
+            if (p->IsInWorld() && !p->HasPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN))
+                p->SetPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);
+    }
     std::vector<uint32> retenus(gRetenusR.begin(), gRetenusR.end());
     for (uint32 bot : retenus)
     {
