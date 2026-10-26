@@ -24,11 +24,12 @@ class Player;
 // Lu par CheckMountStateAction::isUseful : un embusqueur ne monte pas (monte, il ne s'embusque plus).
 bool CoaEmbusqueur(Player* bot);
 
-// Montures (26/10, seconde revue) : ce bot MONTE peut-il agir quand meme (sorts) ? Les exceptions du coeur
-// (Spell::CheckCast, recopiees par CoaRefuseMonte) : Divine Charge posee par un Monk, monte sur 14584 (monture posee par
-// script, sans aura 78), Mechsuit du Tinker (801384 + 803451, sorts de famille 34 ; jamais monte a l'execution, 803451
-// est une transformation), Starcaller sous 704772 (Mount(9991) par script) ; jamais en vol. Lu par
-// CheckMountStateAction::isUseful : en combat, une forme de classe n'est gardee que si c'est vrai.
+// Montures (26/10, seconde revue) : ce bot MONTE garde-t-il sa forme en combat ? Parmi les exceptions du coeur
+// (Spell::CheckCast, recopiees par CoaRefuseMonte) : Mechsuit du Tinker (801384 + 803451, sorts de famille 34 ; jamais
+// monte a l'execution, 803451 est une transformation) et Starcaller sous 704772 (Mount(9991) par script) ; jamais en vol.
+// Divine Charge (posee par un Monk, monture 14584) en est EXCLUE (quatrieme revue : sans melee montee, le Templar
+// descend au contact). Lu par CheckMountStateAction::isUseful : en combat, une forme de classe n'est gardee que si c'est
+// vrai.
 bool CoaAgitMonte(Player* bot);
 
 /*

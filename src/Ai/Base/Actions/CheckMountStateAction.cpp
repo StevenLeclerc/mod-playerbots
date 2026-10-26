@@ -298,9 +298,10 @@ bool CheckMountStateAction::isUseful()
     // CoA (26/10, revue M2) : une forme de classe a aura de monture (Mechsuit, Huntress Saber, Divine Charge,
     // Xorothian Warsteed...) n'est pas retiree par cette action hors combat (Dismount -> HandleCancelMountAuraOpcode
     // retire toutes les auras 78), et rien ne monte par-dessus.
-    // Seconde revue (MAJEUR) : en combat, on ne la garde QUE si le coeur laisse agir monte (CoaAgitMonte, memes
-    // exceptions que Spell::CheckCast et CoaRefuseMonte : Divine Charge d'un Monk, Mechsuit du Tinker, Starcaller sous
-    // 704772). Sinon -- Xorothian Warsteed 804703, Battlestrider 807383, Moonchaser Kodo 707752... -- la descente
+    // Seconde revue (MAJEUR) : en combat, on ne la garde QUE si CoaAgitMonte (exceptions du coeur, Spell::CheckCast et
+    // CoaRefuseMonte : Mechsuit du Tinker, Starcaller sous 704772 ; Divine Charge EXCLUE par la quatrieme revue : sans
+    // melee montee, le Templar descend au contact). Sinon -- Divine Charge 527272, Xorothian Warsteed 804703,
+    // Battlestrider 807383, Moonchaser Kodo 707752... -- la descente
     // d'origine (noeud « mounted » a 54) revient : monte, le bot n'aurait que Trample et Stomp (Unit::Attack refuse la
     // melee a un joueur monte), indefiniment pour une forme a duree infinie.
     if (coa && CoaMonteEnFormeDeClasse(bot))
@@ -340,7 +341,8 @@ bool CheckMountStateAction::isUseful()
         uint32 const repit = botAI->HasGameClientMaster() ? COA_MONTURE_REPIT_COMPAGNON_MS : COA_MONTURE_REPIT_MS;
         if (coaEchecMonture && getMSTimeDiff(coaEchecMontureMs, maintenant) < repit)
             return false;
-        // Troisieme revue (MAJEUR) : Tinker en Mechsuit (801384, 7 jours) -- la monture retirerait 801384 et l'ejecterait
+        // Troisieme revue (MAJEUR) : Tinker en Mechsuit (801384, jusqu'a ce que le Scrap s'epuise :
+        // AscensionTinker.cpp, Refresh -> ExitMechsuit) -- la monture retirerait 801384 et l'ejecterait
         // (T-27) a chaque fin de combat. Et une forme scriptee encore active sans monture : rien par-dessus.
         if (bot->HasAura(801384) || CoaFormeScripteeActive(bot))
             return false;
