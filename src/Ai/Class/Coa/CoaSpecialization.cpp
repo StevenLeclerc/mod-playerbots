@@ -88,10 +88,11 @@ char const* RoleName(CoaRole role)
 }
 
 // Specializations bots never play. Venomancer Vizier (101) heals from a scarab form that blocks its
-// heals: in dungeons such a healer did nothing at all.
+// heals: in dungeons such a healer did nothing at all. Tinker Apex (102) is a melee specialization in
+// progress (docs/CONCEPTION-tinker-4e-spe.md): no strategy, stat weights nor talent picks yet.
 bool IsExcludedSpecialization(uint32 specializationId)
 {
-    return specializationId == 101;
+    return specializationId == 101 || specializationId == 102;
 }
 
 // Specializations of a class grouped by role, without those bots never play.
