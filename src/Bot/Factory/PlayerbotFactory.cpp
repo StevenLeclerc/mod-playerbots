@@ -4993,17 +4993,31 @@ std::vector<uint32> PlayerbotFactory::PassifsSansAura(Player* bot)
         // Ni un passif qui vise le familier (TARGET_UNIT_PET), ni une aura de zone sur les seuls ennemis
         // (APPLY_AREA_AURA_ENEMY : le coeur ne la pose pas sur son proprietaire) -- relances a chaque remise a neuf,
         // « connus_sans_aura » ne descendrait jamais a 0.
+        // SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS (190) : le bot POSSEDE l'aura, mais elle n'est appliquee qu'a ses
+        // invocations (UnitAura::FillTargetMap ne prend que m_Controlled) ; HasAura est donc toujours faux. Un passif dont
+        // aucun effet ne pose d'aura sur le bot lui-meme se juge par l'aura possedee (releve du 26/10 : 7 faux « sans
+        // aura » sur 8, docs/DIAG-passifs-sans-aura-20261026.md).
         bool aura = false;
+        bool surLeBot = false;
         bool apprend = false;
         for (SpellEffectInfo const& effet : info->Effects)
         {
             uint32 const cible = effet.TargetA.GetTarget();
-            aura = aura || (effet.IsAreaAuraEffect() && effet.Effect != SPELL_EFFECT_APPLY_AREA_AURA_ENEMY) ||
-                   (effet.IsAura() && !effet.IsAreaAuraEffect() && (cible == TARGET_UNIT_CASTER || cible == 0));
+            bool const zone = effet.IsAreaAuraEffect() && effet.Effect != SPELL_EFFECT_APPLY_AREA_AURA_ENEMY;
+            bool const lanceur = effet.IsAura() && !effet.IsAreaAuraEffect() && (cible == TARGET_UNIT_CASTER || cible == 0);
+            aura = aura || zone || lanceur;
+            surLeBot = surLeBot || lanceur || (zone && effet.Effect != SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS);
             apprend = apprend || effet.Effect == SPELL_EFFECT_LEARN_SPELL;
         }
+        auto const posee = [bot, id, surLeBot]()
+        {
+            if (bot->HasAura(id))
+                return true;
+            Aura const* possedee = surLeBot ? nullptr : bot->GetOwnedAura(id);
+            return possedee && !possedee->IsRemoved();
+        };
         if (!aura || apprend || !bot->IsNeedCastPassiveSpellAtLearn(info) || !bot->HasItemFitToSpellRequirements(info) ||
-            bot->HasAura(id))
+            posee())
             return;
         manquants.push_back(id);
     };
