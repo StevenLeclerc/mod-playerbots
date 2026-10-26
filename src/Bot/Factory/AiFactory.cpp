@@ -658,6 +658,11 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
             {
                 nonCombatEngine->addStrategiesNoInit(GetCoaRole(player) == CoaRole::Tank ? "tank assist" : "dps assist",
                                                      "coa buff", nullptr);
+                // CoA -- montures (26/10) : « nc », posee plus bas par son nom, n'a aucun createur dans
+                // CoaAiObjectContext ; son declencheur de monture (« timer » -> « check mount state ») vit donc dans
+                // « coa monture », fabrique sans freres (P-130). La garde « mount », posee plus bas, reste requise par
+                // CheckMountStateAction::isUseful, et l'arene la retire toujours (plus bas).
+                nonCombatEngine->addStrategy("coa monture", false);
                 // CoA -- CoaArene IA (10/10/2026) : le moteur non-combat aussi, pour L0 (repas, boisson, monture
                 // pendant l'engagement : c'est ici que « food » x23 a ete mesure le 02/10, apres un « drop target »),
                 // la furtivite de preparation et l'ouverture. Meme garde que dans le moteur de combat.
