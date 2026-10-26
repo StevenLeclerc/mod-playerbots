@@ -1701,7 +1701,9 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
         return;
     // CoA (26/10/2026, revue du lot 1 des compagnons, m2) : jamais un compagnon, quel que soit le chemin (Revive ->
     // RandomTeleportGrindForLevel, AutoTeleportForLevel a la montee de niveau, refonte...) : il suit son humain.
-    if (CoaCompagnons::EstCompagnon(bot->GetGUID().GetCounter()))
+    // Revision du 26/10 : un bot de reserve aussi, sauf quand CoaCompagnons.cpp le place lui-meme (PlacementAutorise).
+    if (CoaCompagnons::EstCompagnon(bot->GetGUID().GetCounter()) &&
+        !CoaCompagnons::PlacementAutorise(bot->GetGUID().GetCounter()))
         return;
 
     // ignore when alrdy teleported or not in the world yet.

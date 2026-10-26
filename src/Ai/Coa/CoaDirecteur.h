@@ -472,6 +472,12 @@ bool MortEnTrajet(uint32 guidLow);
 //    fil monde, cartes a l'arret (ExecuterAffectation, P-137).
 bool Sauter(Player* bot, WorldLocation const& dest);
 
+// CoA (26/10/2026, reserves par tranche, CoaCompagnons.cpp) : la recherche de point de la preparation
+// (ChercherPointCarte : 600-1 200 yd de `joueur`, sol sec, ciel ouvert, hors lieu sans PvP et Wintergrasp, aucun
+// humain a SAUT_HUMAIN_YD, loin des creatures hostiles fortes pour `niveau`), sur la carte de `joueur`. Ne teleporte
+// rien. FIL MONDE, cartes a l'arret (P-137). Vrai si un point est trouve (x, y, z remplis).
+bool PointHorsDeVue(Player* joueur, Player* bot, uint32 niveau, float& x, float& y, float& z, uint32& essais);
+
 // Compteurs du bilan `coa directeur bus:`. Atomiques relaxes : incrementes
 // depuis les fils de carte. L'ordre ne compte pas ; le bilan les nomme.
 enum CoaDirCompteur : uint8

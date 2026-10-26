@@ -5,6 +5,7 @@
  */
 
 #include "PlayerbotMgr.h"
+#include "CoaCompagnons.h"
 #include "BroadcastHelper.h"
 #include "ChannelMgr.h"
 #include "CharacterCache.h"
@@ -589,6 +590,10 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
     {
         bot->RemovePlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);
     }
+    // CoA (26/10/2026, reserves par tranche, CoaCompagnons.cpp) : un bot de reserve a le niveau FIGE ; la ligne
+    // ci-dessus vient de retirer le drapeau, on le repose a chaque connexion (avant la sauvegarde qui suit).
+    if (isRandomAccount && CoaCompagnons::EstReserve(bot->GetGUID().GetCounter()))
+        bot->SetPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);
 
     bot->SaveToDB(false, false);
     bool addClassBot = sRandomPlayerbotMgr.IsAccountType(accountId, 2);

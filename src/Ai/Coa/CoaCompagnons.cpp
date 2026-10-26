@@ -32,21 +32,27 @@
 #include "CoaBancSoin.h"
 #include "CoaDirecteur.h"
 #include "CoaGelBanc.h"
+#include "CoaSpecialization.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Group.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
+#include "Map.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotFactory.h"
 #include "Random.h"
 #include "RandomPlayerbotMgr.h"
+#include "World.h"
 #include "WorldSession.h"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
@@ -119,6 +125,10 @@ time_t gDernierAvisPlafond = 0;
 std::atomic<bool> gEnableFige{false};
 std::shared_mutex gVerrou;
 std::unordered_set<uint32> gEnsemble;   // bots au registre, NON retires
+// Revision du 26/10 (reserves par tranche, plus bas) : meme regle, meme verrou.
+std::atomic<bool> gReserveFige{false};
+std::unordered_set<uint32> gEnsembleR;  // bots de reserve, NON retires
+thread_local uint32 tPlacement = 0;     // bot que ce fil place lui-meme (PlacementAutorise)
 
 time_t Maintenant() { return GameTime::GetGameTime().count(); }
 
@@ -359,6 +369,7 @@ std::vector<uint32> Constituer(uint32 humain, uint8 niveau, TeamId camp, Seance&
         {
             std::shared_lock<std::shared_mutex> verrou(gVerrou);
             registre = gEnsemble;
+            registre.insert(gEnsembleR.begin(), gEnsembleR.end());   // jamais un bot de reserve (revision du 26/10)
         }
         do
         {
@@ -464,6 +475,9 @@ void Programmer(uint32 humain, time_t maintenant)
     for (Membre const& m : it->second)
     {
         if (m.etat == Etat::Retire || gEveilles.count(m.bot) || gEnFile.count(m.bot))
+            continue;
+        // Revision du 26/10 (Allies = 1, VisAVis = 0) : un registre plus grand garde ses membres en trop endormis.
+        if (m.rang > (m.camp == Camp::Allie ? sPlayerbotAIConfig.coaCompagnonsAllies : sPlayerbotAIConfig.coaCompagnonsVisAVis))
             continue;
         if (gEveilles.size() + gEnFile.size() >= sPlayerbotAIConfig.coaCompagnonsMaxEveilles)
         {
@@ -681,20 +695,955 @@ CharacterCacheEntry const* HumainParNom(ChatHandler* handler, std::string const&
     }
     return e;
 }
+
+// =====================================================================================================================
+// RESERVES PAR TRANCHE DE NIVEAU (revision du 26/10/2026, conception en tete et § 15 bis)
+//
+// Six tranches (1-10 ... 51-60, tranche = (niveau - 1) / 10), une reserve par tranche ET par faction, toujours les memes
+// bots (table `coa_reserve`, ecrite ici seulement). Un humain de la tranche, quel que soit son camp, reveille les DEUX
+// reserves de sa tranche ; elles s'endorment Grace secondes apres le depart du dernier humain de la tranche (releve des
+// humains toutes les SCAN_S : un humain qui change de tranche en seance quitte l'ancienne et entre dans la nouvelle).
+// Niveau FIGE : NO_XP_GAIN repose a chaque connexion (PlayerbotHolder::OnBotLogin, et ici au placement), exemptions
+// du lot 1 par EstCompagnon. Constitution : niveaux etales dans la tranche, classes variees ; tranche trop maigre
+// completee par des bots plus bas (montee au premier reveil, GiveLevel + recette de `.coa niveau`, jamais de baisse ni
+// de changement de spe). Placement au reveil : pres d'un humain de la tranche de SA faction (600-1 200 yd, hors de vue,
+// recherche de la preparation du Directeur), sinon dans une zone de son niveau (RandomTeleportGrindForLevel).
+// Tout au FIL MONDE (crochets, OnUpdate, commandes, Init) ; EstReserve/EstCompagnon lus de tout fil sous gVerrou.
+// =====================================================================================================================
+constexpr uint8 NB_TRANCHES = 6;
+constexpr time_t SCAN_S = 5;                    // releve des humains par tranche
+constexpr time_t PLACEMENT_LIMITE_S = 120;      // un bot reveille qui n'est pas en jeu apres ce delai n'est pas place
+constexpr uint32 PLACEMENTS_PAR_SECONDE = 2;    // ChercherPointCarte : jusqu'a 36 sondes de terrain par recherche
+constexpr uint32 MONTEES_PAR_SECONDE = 1;       // la fabrique refait l'equipement : couteux
+constexpr time_t REESSAI_BOT_S = 300;           // un bot sorti seul (connexion ratee, presence expiree) : pas avant
+
+enum : uint8
+{
+    F_ALLIANCE = 0,
+    F_HORDE = 1,
+};
+
+struct MembreR
+{
+    uint32 bot = 0;
+    uint8 tranche = 0;
+    uint8 faction = F_ALLIANCE;
+    uint8 rang = 0;
+    uint8 niveauCible = 0;
+    Etat etat = Etat::Dort;
+    bool montee = false;
+};
+
+struct Tranche
+{
+    bool eveillee = false;
+    bool commande = false;       // eveillee par `.coa reserve eveiller` sans humain
+    bool suspendue = false;      // endormie par commande alors qu'un humain y est : pas de reveil avant son depart
+    time_t derniereVue = 0;      // dernier releve ou la tranche comptait un humain (ou la commande d'eveil)
+    uint32 humains = 0;
+    uint32 humainsF[2] = {0, 0};
+    time_t prochaineConstitution[2] = {0, 0};
+};
+
+std::unordered_map<uint32, MembreR> gReserve;     // bot -> membre (retires compris)
+Tranche gTranches[NB_TRANCHES];
+std::unordered_set<uint32> gHumainsR;              // humains connectes connus (crochets), relus a chaque releve
+std::unordered_set<uint32> gEveillesR;
+std::deque<uint32> gFileR;
+std::unordered_set<uint32> gEnFileR;
+std::unordered_map<uint32, time_t> gAPlacer;       // bot reveille -> limite de placement
+std::unordered_map<uint32, time_t> gReessaiR;      // bot -> pas de reveil avant
+std::unordered_set<uint32> gRetenusR;              // endormis retenus en jeu par un groupe avec un humain
+bool gReserveCharge = false;
+bool gReserveInit = false;
+bool gTableCompagnonPresente = false;
+time_t gProchainScan = 0;
+time_t gDernierAvisPlafondR = 0;
+
+bool ReserveActive() { return gReserveFige.load(std::memory_order_relaxed) && gReserveCharge; }
+
+// >= NB_TRANCHES : hors reserve (niveau 61 et plus).
+uint8 TrancheDe(uint32 niveau) { return niveau ? uint8(std::min<uint32>((niveau - 1) / 10, 255)) : 0; }
+uint32 BasDe(uint8 t) { return uint32(t) * 10 + 1; }
+uint32 HautDe(uint8 t) { return uint32(t) * 10 + 10; }
+char const* NomFaction(uint8 f) { return f == F_ALLIANCE ? "alliance" : "horde"; }
+int FactionDe(TeamId t) { return t == TEAM_ALLIANCE ? F_ALLIANCE : (t == TEAM_HORDE ? F_HORDE : -1); }
+
+void EnsembleRAjouter(uint32 bot)
+{
+    std::unique_lock<std::shared_mutex> verrou(gVerrou);
+    gEnsembleR.insert(bot);
+}
+
+void EnsembleRRetirer(uint32 bot)
+{
+    std::unique_lock<std::shared_mutex> verrou(gVerrou);
+    gEnsembleR.erase(bot);
+}
+
+bool EstReserveInterne(uint32 bot)
+{
+    std::shared_lock<std::shared_mutex> verrou(gVerrou);
+    return gEnsembleR.count(bot) != 0;
+}
+
+// Endort un bot de reserve (« logout » long). Reste en jeu si un humain en ligne de son groupe le retient : suivi dans
+// gRetenusR et redemande a chaque renouvellement. Rend vrai s'il est sorti (ou n'etait pas en jeu).
+bool CoucherR(uint32 bot)
+{
+    if (sRandomPlayerbotMgr.CoaEndormir(Guid(bot)))
+    {
+        gRetenusR.erase(bot);
+        return true;
+    }
+    if (gRetenusR.insert(bot).second)
+        LOG_INFO("playerbots", "coa reserve: retenu bot={} raison=groupe_humain", NomDe(bot));
+    return false;
+}
+
+void RetirerR(MembreR& m, char const* motif)
+{
+    if (m.etat == Etat::Retire)
+        return;
+    uint8 const avant = m.tranche;
+    m.etat = Etat::Retire;
+    gEveillesR.erase(m.bot);
+    gEnFileR.erase(m.bot);   // l'entree de gFileR est sautee au depilement (membre retire)
+    gAPlacer.erase(m.bot);
+    gRetenusR.erase(m.bot);
+    EnsembleRRetirer(m.bot);
+    // Rendu a la vie ordinaire : deconnecte s'il le peut (« logout » long), puis « logout » leve, sans le connecter.
+    // Retenu par un groupe : il reste en jeu comme un bot ordinaire, ProcessBot le deconnectera a l'echeance de « add ».
+    sRandomPlayerbotMgr.CoaEndormir(Guid(m.bot));
+    sRandomPlayerbotMgr.CoaLiberer(Guid(m.bot));
+    CharacterDatabase.Execute("UPDATE coa_reserve SET etat = 'retire', motif_retrait = '{}' WHERE bot_guid = {}", motif,
+                              m.bot);
+    LOG_INFO("playerbots", "coa reserve: retrait tranche={} faction={} bot={} motif={}", uint32(avant),
+             NomFaction(m.faction), NomDe(m.bot), motif);
+}
+
+void EndormirR(uint32 bot, char const* motif, time_t apres)
+{
+    CoucherR(bot);
+    gEveillesR.erase(bot);
+    gAPlacer.erase(bot);
+    auto it = gReserve.find(bot);
+    if (it != gReserve.end() && it->second.etat == Etat::Eveille)
+        it->second.etat = Etat::Dort;
+    CharacterDatabase.Execute("UPDATE coa_reserve SET etat = 'dort' WHERE bot_guid = {} AND etat = 'eveille'", bot);
+    LOG_INFO("playerbots", "coa reserve: sommeil tranche={} faction={} bot={} apres={} motif={}",
+             it != gReserve.end() ? uint32(it->second.tranche) : 0u,
+             it != gReserve.end() ? NomFaction(it->second.faction) : "?", NomDe(bot), uint64(apres), motif);
+}
+
+// Endort les deux reserves de la tranche et oublie leurs reveils en attente. Rend le nombre de bots endormis.
+uint32 EndormirTranche(uint8 t, char const* motif, time_t maintenant)
+{
+    Tranche& tr = gTranches[t];
+    for (auto it = gFileR.begin(); it != gFileR.end();)
+    {
+        auto m = gReserve.find(*it);
+        if (m == gReserve.end() || m->second.tranche == t)
+        {
+            gEnFileR.erase(*it);
+            it = gFileR.erase(it);
+        }
+        else
+            ++it;
+    }
+    time_t const apres = tr.derniereVue && maintenant > tr.derniereVue ? maintenant - tr.derniereVue : 0;
+    std::vector<uint32> aEndormir;
+    for (uint32 bot : gEveillesR)
+    {
+        auto m = gReserve.find(bot);
+        if (m != gReserve.end() && m->second.tranche == t)
+            aEndormir.push_back(bot);
+    }
+    for (uint32 bot : aEndormir)
+        EndormirR(bot, motif, apres);
+    bool const etaitEveillee = tr.eveillee;
+    tr.eveillee = false;
+    tr.commande = false;
+    if (etaitEveillee || !aEndormir.empty())
+        LOG_INFO("playerbots", "coa reserve: sommeil_tranche tranche={} niveaux={}-{} bots={} apres={} motif={}",
+                 uint32(t), BasDe(t), HautDe(t), uint32(aEndormir.size()), uint64(apres), motif);
+    return aEndormir.size();
+}
+
+uint32 ActifsDe(uint8 t, uint8 f)
+{
+    uint32 n = 0;
+    for (auto const& [bot, m] : gReserve)
+        if (m.tranche == t && m.faction == f && m.etat != Etat::Retire)
+            ++n;
+    return n;
+}
+
+// Niveaux voulus pour `n` places dans la tranche, etales (n = 8 sur 1-10 : 1 2 4 5 6 7 9 10).
+std::vector<uint8> CiblesEtalees(uint8 t, uint32 n)
+{
+    std::vector<uint8> out;
+    for (uint32 k = 0; k < n; ++k)
+        out.push_back(uint8(BasDe(t) + ((2 * k + 1) * 10) / (2 * n)));
+    return out;
+}
+
+struct ResultatR
+{
+    uint8 tranche = 0;
+    uint8 faction = 0;
+    uint32 voulus = 0;
+    uint32 pris = 0;
+    uint32 montes = 0;
+    uint32 manque = 0;
+    char const* refus = nullptr;
+};
+
+struct CandidatR
+{
+    uint32 guid;
+    uint8 classe;
+    uint8 niveau;
+    uint8 faction;
+    uint32 alea;
+    bool pris;
+};
+
+// Complete les reserves demandees (tranche, faction). `force` (commande `constituer`) : jusqu'a ParTranche, delai de
+// nouvel essai ignore ; sinon seulement une reserve sous SeuilConstitution, et pas avant prochaineConstitution.
+// UNE requete synchrone (fil monde, comme la constitution du lot 1), seulement si une reserve a besoin de bots.
+std::vector<ResultatR> ConstituerR(std::vector<std::pair<uint8, uint8>> const& voulues, time_t maintenant, bool force)
+{
+    struct Besoin
+    {
+        uint8 t, f;
+        std::vector<uint8> cibles;
+        std::unordered_set<uint8> classes;
+        uint8 rang;
+        ResultatR r;
+    };
+    std::vector<Besoin> besoins;
+    std::vector<ResultatR> resultats;
+    uint32 const parTranche = sPlayerbotAIConfig.coaReserveParTranche;
+    uint32 const niveauMax = std::min<uint32>(NB_TRANCHES * 10, sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL));
+
+    for (auto const& [t, f] : voulues)
+    {
+        if (t >= NB_TRANCHES || f > F_HORDE)
+            continue;
+        Besoin b{t, f, {}, {}, 0, {}};
+        b.r.tranche = t;
+        b.r.faction = f;
+        std::vector<uint8> existants;
+        for (auto const& [bot, m] : gReserve)
+        {
+            if (m.tranche != t || m.faction != f)
+                continue;
+            b.rang = std::max(b.rang, m.rang);
+            if (m.etat == Etat::Retire)
+                continue;
+            existants.push_back(m.niveauCible);
+            if (CharacterCacheEntry const* e = sCharacterCache->GetCharacterCacheByGuid(Guid(bot)))
+                b.classes.insert(e->Class);
+        }
+        uint32 const actifs = existants.size();
+        if (actifs >= parTranche || (!force && actifs >= sPlayerbotAIConfig.coaReserveSeuilConstitution))
+            continue;
+        if (!force && maintenant < gTranches[t].prochaineConstitution[f])
+            continue;
+        if (BasDe(t) > niveauMax)
+        {
+            b.r.refus = "tranche_au_dela_du_plafond";
+            resultats.push_back(b.r);
+            continue;
+        }
+        // Les places : ParTranche niveaux etales, moins celles que les membres en place occupent deja (au plus proche).
+        b.cibles = CiblesEtalees(t, parTranche);
+        for (uint8 niv : existants)
+        {
+            if (b.cibles.empty())
+                break;
+            auto plusProche = std::min_element(b.cibles.begin(), b.cibles.end(),
+                                               [niv](uint8 a, uint8 c)
+                                               { return std::abs(int(a) - int(niv)) < std::abs(int(c) - int(niv)); });
+            b.cibles.erase(plusProche);
+        }
+        for (uint8& c : b.cibles)
+            c = uint8(std::min<uint32>(c, niveauMax));
+        b.r.voulus = b.cibles.size();
+        besoins.push_back(std::move(b));
+    }
+    if (besoins.empty())
+        return resultats;
+
+    auto finir = [&](char const* refus)
+    {
+        for (Besoin& b : besoins)
+        {
+            b.r.manque = b.cibles.size();
+            if (refus)
+                b.r.refus = refus;
+            if (b.r.manque)
+                gTranches[b.t].prochaineConstitution[b.f] = maintenant + CONSTITUTION_REESSAI_S;
+            LOG_INFO("playerbots", "coa reserve: constitution tranche={} faction={} voulus={} pris={} montes={} manque={}{}{}",
+                     uint32(b.t), NomFaction(b.f), b.r.voulus, b.r.pris, b.r.montes, b.r.manque,
+                     refus ? " refus=" : "", refus ? refus : "");
+            resultats.push_back(b.r);
+        }
+        return resultats;
+    };
+
+    std::vector<uint32> const& comptes = sRandomPlayerbotMgr.CoaComptesAleatoires();
+    if (comptes.empty())
+        return finir("aucun_compte_de_bots");
+    std::string listeComptes;
+    for (uint32 c : comptes)
+        listeComptes += (listeComptes.empty() ? "" : ",") + std::to_string(c);
+
+    std::string clauseGuildes;
+    std::vector<uint32> const guildes = sPlayerbotAIConfig.GuildesDeReserve();
+    if (!guildes.empty())
+    {
+        std::string ids;
+        for (uint32 id : guildes)
+            ids += (ids.empty() ? "" : ",") + std::to_string(id);
+        clauseGuildes = " AND NOT EXISTS (SELECT 1 FROM guild_member g WHERE g.guid = c.guid AND g.guildid IN (" + ids + "))";
+    }
+    // Un bot n'est jamais a la fois compagnon et reserve : toute ligne de coa_compagnon l'ecarte (retires compris).
+    std::string const clauseCompagnon =
+        gTableCompagnonPresente ? " AND NOT EXISTS (SELECT 1 FROM coa_compagnon cc WHERE cc.bot_guid = c.guid)" : "";
+
+    // Hors ligne seulement (c.online = 0, puis FindConnectedPlayer) : un bot que le joueur voit ne disparait pas.
+    QueryResult res = CharacterDatabase.Query(
+        "SELECT c.guid, c.race, c.class, c.level, c.name FROM characters c"
+        " WHERE c.account IN ({}) AND c.level BETWEEN 1 AND {} AND c.online = 0 AND c.deleteInfos_Account IS NULL"
+        " AND NOT EXISTS (SELECT 1 FROM coa_reserve r WHERE r.bot_guid = c.guid){}"
+        " AND NOT EXISTS (SELECT 1 FROM arena_team_member a WHERE a.guid = c.guid){}",
+        listeComptes, niveauMax, clauseCompagnon, clauseGuildes);
+
+    std::vector<CandidatR> pool;
+    if (res)
+    {
+        std::unordered_set<uint32> pris;
+        {
+            std::shared_lock<std::shared_mutex> verrou(gVerrou);
+            pris = gEnsemble;
+            pris.insert(gEnsembleR.begin(), gEnsembleR.end());
+        }
+        std::vector<uint32> const gladiateurs = GladiateursDeLaConf();
+        do
+        {
+            Field* f = res->Fetch();
+            uint32 const guid = f[0].Get<uint32>();
+            uint8 const race = f[1].Get<uint8>();
+            uint8 const classe = f[2].Get<uint8>();
+            uint8 const niv = f[3].Get<uint8>();
+            std::string const nom = f[4].Get<std::string>();
+            if (pris.count(guid) || gReserve.count(guid) || NomExclu(nom) ||
+                std::find(gladiateurs.begin(), gladiateurs.end(), guid) != gladiateurs.end())
+                continue;
+            if (sPlayerbotAIConfig.disableDeathKnightLogin && classe == CLASS_DEATH_KNIGHT)
+                continue;
+            if (CoaDirecteur::CibleDeBanc(guid) || CoaBancSoin::MembreEngage(guid))
+                continue;
+            // Mercenaire : il gagne des niveaux en tuant (MercenaryRewards), contre le niveau fige ; et il attaque son camp.
+            if (sPlayerbotAIConfig.IsMercenary(Guid(guid).GetRawValue()))
+                continue;
+            if (ObjectAccessor::FindConnectedPlayer(Guid(guid)))
+                continue;
+            int const faction = FactionDe(Player::TeamIdForRace(race));
+            if (faction < 0)
+                continue;
+            pool.push_back(CandidatR{guid, classe, niv, uint8(faction), urand(0, 1000000), false});
+        } while (res->NextRow());
+    }
+
+    auto prendre = [&](Besoin& b, CandidatR& c, uint8 cible, bool montee)
+    {
+        c.pris = true;
+        ++b.rang;
+        // Synchrone : la ligne doit exister avant le premier UPDATE de reveil (file asynchrone a plusieurs fils).
+        CharacterDatabase.DirectExecute(
+            "INSERT IGNORE INTO coa_reserve (bot_guid, tranche, faction, rang, etat, origine, niveau_cible, cree)"
+            " VALUES ({}, {}, '{}', {}, 'dort', '{}', {}, UTC_TIMESTAMP())",
+            c.guid, uint32(b.t), NomFaction(b.f), uint32(b.rang), montee ? "montee" : "naturel", uint32(cible));
+        MembreR m;
+        m.bot = c.guid;
+        m.tranche = b.t;
+        m.faction = b.f;
+        m.rang = b.rang;
+        m.niveauCible = cible;
+        m.etat = Etat::Dort;
+        m.montee = montee;
+        gReserve[c.guid] = m;
+        EnsembleRAjouter(c.guid);
+        CoucherR(c.guid);   // hors ligne : « logout » long, hors du tirage des maintenant
+        b.classes.insert(c.classe);
+        ++b.r.pris;
+        if (montee)
+            ++b.r.montes;
+    };
+
+    // 1. Les bots deja dans la tranche : pour chaque niveau voulu, le plus proche, une classe pas encore prise d'abord.
+    for (Besoin& b : besoins)
+    {
+        std::vector<uint8> restantes;
+        for (uint8 cible : b.cibles)
+        {
+            CandidatR* meilleur = nullptr;
+            // Un niveau d'ecart tolere pour varier les classes (les roles suivent la classe et la spe).
+            auto cle = [&](CandidatR const& c)
+            {
+                int const ecart = std::abs(int(c.niveau) - int(cible));
+                return std::make_tuple(std::max(0, ecart - 1), b.classes.count(c.classe) ? 1 : 0, ecart, c.alea);
+            };
+            for (CandidatR& c : pool)
+                if (!c.pris && c.faction == b.f && TrancheDe(c.niveau) == b.t && (!meilleur || cle(c) < cle(*meilleur)))
+                    meilleur = &c;
+            if (meilleur)
+                prendre(b, *meilleur, meilleur->niveau, false);
+            else
+                restantes.push_back(cible);
+        }
+        b.cibles = restantes;
+    }
+    // 2. Tranche trop maigre : MONTEE d'un bot plus bas (le plus haut d'abord, classe variee), au premier reveil.
+    std::vector<Besoin*> ordre;
+    for (Besoin& b : besoins)
+        ordre.push_back(&b);
+    std::sort(ordre.begin(), ordre.end(), [](Besoin const* a, Besoin const* c) { return a->t > c->t; });
+    for (Besoin* b : ordre)
+    {
+        std::vector<uint8> restantes;
+        for (uint8 cible : b->cibles)
+        {
+            CandidatR* meilleur = nullptr;
+            auto cle = [&](CandidatR const& c)
+            { return std::make_tuple(-int(c.niveau), b->classes.count(c.classe) ? 1 : 0, c.alea); };
+            for (CandidatR& c : pool)
+            {
+                if (c.pris || c.faction != b->f || c.niveau >= BasDe(b->t))
+                    continue;
+                // Un chevalier de la mort ne monte que vers un niveau qu'il peut porter (55 et plus).
+                if (c.classe == CLASS_DEATH_KNIGHT && cible < sWorld->getIntConfig(CONFIG_START_HEROIC_PLAYER_LEVEL))
+                    continue;
+                if (!meilleur || cle(c) < cle(*meilleur))
+                    meilleur = &c;
+            }
+            if (meilleur)
+                prendre(*b, *meilleur, cible, true);
+            else
+                restantes.push_back(cible);
+        }
+        b->cibles = restantes;
+    }
+    return finir(nullptr);
+}
+
+// Met en file les reveils des membres endormis de (t, f), dans la limite de Reserve.MaxEveilles.
+void ProgrammerR(uint8 t, uint8 f, time_t maintenant)
+{
+    if (!gTranches[t].eveillee)
+        return;
+    std::vector<std::pair<uint8, uint32>> aReveiller;   // (rang, bot) : dans l'ordre des rangs
+    for (auto const& [bot, m] : gReserve)
+    {
+        if (m.tranche != t || m.faction != f || m.etat == Etat::Retire || gEveillesR.count(bot) || gEnFileR.count(bot))
+            continue;
+        auto r = gReessaiR.find(bot);
+        if (r != gReessaiR.end())
+        {
+            if (maintenant < r->second)
+                continue;
+            gReessaiR.erase(r);
+        }
+        aReveiller.emplace_back(m.rang, bot);
+    }
+    std::sort(aReveiller.begin(), aReveiller.end());
+    for (auto const& [rang, bot] : aReveiller)
+    {
+        if (gEveillesR.size() + gEnFileR.size() >= sPlayerbotAIConfig.coaReserveMaxEveilles)
+        {
+            if (maintenant >= gDernierAvisPlafondR + RELEVE_S)
+            {
+                gDernierAvisPlafondR = maintenant;
+                LOG_INFO("playerbots", "coa reserve: plafond tranche={} faction={} eveilles={} en_file={} max={}",
+                         uint32(t), NomFaction(f), uint32(gEveillesR.size()), uint32(gEnFileR.size()),
+                         sPlayerbotAIConfig.coaReserveMaxEveilles);
+            }
+            return;
+        }
+        gFileR.push_back(bot);
+        gEnFileR.insert(bot);
+    }
+}
+
+void EveillerTranche(uint8 t, char const* motif, time_t maintenant)
+{
+    Tranche& tr = gTranches[t];
+    if (!tr.eveillee)
+        LOG_INFO("playerbots", "coa reserve: reveil_tranche tranche={} niveaux={}-{} motif={} humains={} alliance={} horde={}",
+                 uint32(t), BasDe(t), HautDe(t), motif, tr.humains, tr.humainsF[F_ALLIANCE], tr.humainsF[F_HORDE]);
+    tr.eveillee = true;
+    ConstituerR({{t, F_ALLIANCE}, {t, F_HORDE}}, maintenant, false);
+    ProgrammerR(t, F_ALLIANCE, maintenant);
+    ProgrammerR(t, F_HORDE, maintenant);
+}
+
+// Releve des humains en jeu par tranche, puis reveil, sommeil apres Grace, complement et reveils manquants.
+void ScanTranches(time_t maintenant)
+{
+    uint32 avant[NB_TRANCHES];
+    for (uint8 t = 0; t < NB_TRANCHES; ++t)
+    {
+        avant[t] = gTranches[t].humains;
+        gTranches[t].humains = 0;
+        gTranches[t].humainsF[0] = gTranches[t].humainsF[1] = 0;
+    }
+    for (auto it = gHumainsR.begin(); it != gHumainsR.end();)
+    {
+        Player* p = ObjectAccessor::FindConnectedPlayer(Guid(*it));
+        if (!p || !p->GetSession() || p->GetSession()->IsBot())
+        {
+            it = gHumainsR.erase(it);   // depart manque par le crochet : il ne compte plus
+            continue;
+        }
+        uint8 const t = TrancheDe(p->GetLevel());
+        if (t < NB_TRANCHES)
+        {
+            ++gTranches[t].humains;
+            int const f = FactionDe(p->GetTeamId());
+            if (f >= 0)
+                ++gTranches[t].humainsF[f];
+        }
+        ++it;
+    }
+    for (uint8 t = 0; t < NB_TRANCHES; ++t)
+    {
+        Tranche& tr = gTranches[t];
+        if (tr.humains)
+        {
+            tr.derniereVue = maintenant;
+            tr.commande = false;   // un humain la tient : la regle ordinaire reprend
+            if (!tr.eveillee && !tr.suspendue)
+                EveillerTranche(t, "humain", maintenant);
+        }
+        else
+        {
+            tr.suspendue = false;
+            if (avant[t] && tr.eveillee)
+                LOG_INFO("playerbots", "coa reserve: depart_tranche tranche={} grace={}", uint32(t),
+                         sPlayerbotAIConfig.coaCompagnonsGrace);
+        }
+        if (!tr.eveillee)
+            continue;
+        if (!tr.humains && maintenant >= tr.derniereVue + time_t(sPlayerbotAIConfig.coaCompagnonsGrace))
+        {
+            EndormirTranche(t, tr.commande ? "commande_echue" : "grace", maintenant);
+            continue;
+        }
+        // Eveillee : complement (membre retire, bot supprime) et reveils manquants (plafond libere, bot sorti).
+        ConstituerR({{t, F_ALLIANCE}, {t, F_HORDE}}, maintenant, false);
+        ProgrammerR(t, F_ALLIANCE, maintenant);
+        ProgrammerR(t, F_HORDE, maintenant);
+    }
+}
+
+void ReveillerR(time_t maintenant)
+{
+    uint32 const parTour = sPlayerbotAIConfig.coaCompagnonsEchelonnement ? 1 : REVEILS_PAR_SECONDE_MAX;
+    for (uint32 n = 0; n < parTour && !gFileR.empty() && maintenant >= gProchainReveil;)
+    {
+        uint32 const bot = gFileR.front();
+        gFileR.pop_front();
+        gEnFileR.erase(bot);
+        auto it = gReserve.find(bot);
+        if (it == gReserve.end() || it->second.etat == Etat::Retire || gEveillesR.count(bot))
+            continue;
+        MembreR& m = it->second;
+        if (!gTranches[m.tranche].eveillee)
+            continue;
+        CharacterCacheEntry const* e = sCharacterCache->GetCharacterCacheByGuid(Guid(bot));
+        if (!e)
+        {
+            RetirerR(m, "absent");
+            continue;
+        }
+        // Jamais de baisse : un bot sorti de sa tranche par le haut (ce qui ne devrait pas arriver) la quitte.
+        if (e->Level > HautDe(m.tranche))
+        {
+            RetirerR(m, "hors_tranche");
+            continue;
+        }
+        sRandomPlayerbotMgr.CoaEnroler(Guid(bot), DureePresence());
+        gEveillesR.insert(bot);
+        gRetenusR.erase(bot);
+        gAPlacer[bot] = maintenant + PLACEMENT_LIMITE_S;
+        m.etat = Etat::Eveille;
+        CharacterDatabase.Execute(
+            "UPDATE coa_reserve SET etat = 'eveille', dernier_eveil = UTC_TIMESTAMP(), niveau_reveil = {} WHERE bot_guid = {}",
+            uint32(e->Level), bot);
+        LOG_INFO("playerbots", "coa reserve: eveil tranche={} faction={} bot={} niv={} cible={}", uint32(m.tranche),
+                 NomFaction(m.faction), e->Name, uint32(e->Level), uint32(m.niveauCible));
+        gProchainReveil = maintenant + sPlayerbotAIConfig.coaCompagnonsEchelonnement;
+        ++n;
+    }
+}
+
+// La recette de `.coa niveau` (CoaDuelCommandScript.cpp) : GiveLevel, puis competences, sorts de classe, sorts
+// disponibles, equipement, munitions, familier. Ni InitTalentsTree ni Randomize : la spe ne change pas. Les points de
+// talent du nouveau niveau sont places par l'IA du bot (paquet de montee -> AutoMaintenanceOnLevelupAction ->
+// ApplyCoaTalents / AutoPickTalents, comme a toute montee) ; sa teleportation de niveau est refusee (EstCompagnon).
+void Monter(Player* p, MembreR& m)
+{
+    uint32 const avant = p->GetLevel();
+    uint32 const cible = m.niveauCible;
+    if (p->IsMounted())
+        p->Dismount();
+    p->GiveLevel(uint8(cible));
+    PlayerbotFactory fabrique(p, cible, 0);
+    fabrique.InitSkills();
+    fabrique.InitClassSpells();
+    fabrique.InitAvailableSpells();
+    fabrique.InitEquipment(false);
+    fabrique.InitAmmo();
+    fabrique.InitPet();
+    // Ce que AiFactory fait a chaque connexion (la sienne a eu lieu a l'ancien niveau) : specialisation tiree par le
+    // hachage du guid (deja posee : inchangee ; posee seulement si le bot passe 10), puis les points du nouveau niveau.
+    EnsureCoaSpecialization(p);
+    ApplyCoaTalents(p);
+    p->SaveToDB(false, false);
+    CharacterDatabase.Execute("UPDATE coa_reserve SET monte_le = UTC_TIMESTAMP() WHERE bot_guid = {}", m.bot);
+    LOG_INFO("playerbots", "coa reserve: montee tranche={} faction={} bot={} niv={}->{} sorts={}", uint32(m.tranche),
+             NomFaction(m.faction), p->GetName(), avant, uint32(p->GetLevel()), uint32(p->GetSpellMap().size()));
+}
+
+void PlacerBot(Player* p, MembreR const& m)
+{
+    // Pres d'un humain de la tranche de SA faction, en monde ouvert.
+    std::vector<Player*> humains;
+    for (uint32 h : gHumainsR)
+    {
+        Player* hp = ObjectAccessor::FindConnectedPlayer(Guid(h));
+        if (!hp || !hp->IsInWorld() || hp->IsBeingTeleported() || TrancheDe(hp->GetLevel()) != m.tranche ||
+            FactionDe(hp->GetTeamId()) != int(m.faction))
+            continue;
+        Map* carte = hp->GetMap();
+        if (!carte || carte->Instanceable())
+            continue;
+        humains.push_back(hp);
+    }
+    if (!humains.empty())
+    {
+        Player* hp = humains[urand(0, uint32(humains.size() - 1))];
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        uint32 essais = 0;
+        if (CoaDirecteur::PointHorsDeVue(hp, p, p->GetLevel(), x, y, z, essais))
+        {
+            if (CoaDirecteur::Sauter(p, WorldLocation(hp->GetMapId(), x, y, z + 0.5f, p->GetOrientation())))
+            {
+                float const dx = x - hp->GetPositionX(), dy = y - hp->GetPositionY();
+                LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=pres humain={} carte={}"
+                         " distance={:.0f} essais={}", uint32(m.tranche), NomFaction(m.faction), p->GetName(),
+                         hp->GetName(), hp->GetMapId(), std::sqrt(dx * dx + dy * dy), essais);
+                return;
+            }
+        }
+        LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=pres_echoue humain={} essais={}",
+                 uint32(m.tranche), NomFaction(m.faction), p->GetName(), hp->GetName(), essais);
+    }
+    // L'autre faction (ou aucun point sur) : une zone de son niveau. RandomTeleport refuse un bot de reserve, sauf
+    // celui que ce fil place ici (PlacementAutorise).
+    uint32 const carteAvant = p->GetMapId();
+    tPlacement = m.bot;
+    sRandomPlayerbotMgr.RandomTeleportGrindForLevel(p);
+    tPlacement = 0;
+    LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=niveau carte_avant={} teleporte={}",
+             uint32(m.tranche), NomFaction(m.faction), p->GetName(), carteAvant, p->IsBeingTeleported() ? 1 : 0);
+}
+
+// Les bots reveilles, une fois en jeu : niveau fige, controle de faction (GetTeamId), montee, placement.
+void Placer(time_t maintenant)
+{
+    if (gAPlacer.empty())
+        return;
+    std::vector<std::pair<uint32, time_t>> aPlacer(gAPlacer.begin(), gAPlacer.end());
+    uint32 places = 0, montees = 0;
+    for (auto const& [bot, limite] : aPlacer)
+    {
+        if (places >= PLACEMENTS_PAR_SECONDE)
+            break;
+        auto it = gReserve.find(bot);
+        if (it == gReserve.end() || it->second.etat != Etat::Eveille || !gEveillesR.count(bot))
+        {
+            gAPlacer.erase(bot);
+            continue;
+        }
+        MembreR& m = it->second;
+        Player* p = ObjectAccessor::FindConnectedPlayer(Guid(bot));
+        if (!p || !p->IsInWorld() || p->IsBeingTeleported() || p->IsDuringRemoveFromWorld())
+        {
+            if (maintenant >= limite)
+            {
+                gAPlacer.erase(bot);
+                LOG_INFO("playerbots", "coa reserve: placement tranche={} faction={} bot={} mode=abandon raison=hors_monde",
+                         uint32(m.tranche), NomFaction(m.faction), NomDe(bot));
+            }
+            continue;
+        }
+        // Faction du JEU (races 21 et 22 du PTR) : la constitution l'a lue dans ChrRaces.dbc.
+        if (FactionDe(p->GetTeamId()) != int(m.faction))
+        {
+            LOG_INFO("playerbots", "coa reserve: faction_ecart bot={} constitution={} jeu={}", p->GetName(),
+                     NomFaction(m.faction), uint32(p->GetTeamId()));
+            RetirerR(m, "faction");
+            continue;
+        }
+        if (p->GetLevel() > HautDe(m.tranche))
+        {
+            RetirerR(m, "hors_tranche");
+            continue;
+        }
+        bool const aMonter = p->GetLevel() < m.niveauCible;
+        if (aMonter && montees >= MONTEES_PAR_SECONDE)
+            continue;
+        // Mort a sa connexion (il s'etait endormi fantome) : releve sur place, personne ne le voit, avant de le
+        // deplacer -- sinon son cadavre resterait a l'autre bout du monde.
+        if (!p->IsAlive())
+        {
+            p->ResurrectPlayer(1.0f);
+            p->SpawnCorpseBones();
+        }
+        if (aMonter)
+        {
+            ++montees;
+            Monter(p, m);
+        }
+        p->SetPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);   // ceinture : PlayerbotHolder::OnBotLogin le repose deja
+        ++places;
+        gAPlacer.erase(bot);
+        PlacerBot(p, m);
+    }
+}
+
+void RenouvelerR(time_t maintenant)
+{
+    std::vector<uint32> eveilles(gEveillesR.begin(), gEveillesR.end());
+    for (uint32 bot : eveilles)
+        sRandomPlayerbotMgr.CoaEnroler(Guid(bot), DureePresence());   // reconnecte aussi un bot tombe
+    std::vector<uint32> retenus(gRetenusR.begin(), gRetenusR.end());
+    for (uint32 bot : retenus)
+    {
+        if (gEveillesR.count(bot) || gEnFileR.count(bot) || !ObjectAccessor::FindConnectedPlayer(Guid(bot)))
+        {
+            gRetenusR.erase(bot);
+            continue;
+        }
+        if (CoucherR(bot))
+            LOG_INFO("playerbots", "coa reserve: sommeil bot={} apres=0 motif=groupe_libere", NomDe(bot));
+    }
+    (void)maintenant;
+}
+
+void ReleverR()
+{
+    uint32 tranches = 0, humains = 0;
+    for (Tranche const& tr : gTranches)
+    {
+        tranches += tr.eveillee ? 1 : 0;
+        humains += tr.humains;
+    }
+    if (!tranches && gEveillesR.empty() && gRetenusR.empty())
+        return;
+    std::string detail;
+    for (uint8 t = 0; t < NB_TRANCHES; ++t)
+        if (gTranches[t].eveillee)
+            detail += (detail.empty() ? "" : ",") + std::to_string(t);
+    LOG_INFO("playerbots",
+             "coa reserve releve: tranches_eveillees={} ({}) humains={} eveilles={} en_file={} a_placer={} retenus={}",
+             tranches, detail.empty() ? "-" : detail, humains, uint32(gEveillesR.size()), uint32(gEnFileR.size()),
+             uint32(gAPlacer.size()), uint32(gRetenusR.size()));
+}
+
+void ChargerReserve()
+{
+    bool const confEnable = sPlayerbotAIConfig.coaReserveEnable;
+    if (!gReserveInit)
+    {
+        gReserveInit = true;
+        gReserveFige.store(confEnable, std::memory_order_relaxed);
+    }
+    else
+    {
+        bool const fige = gReserveFige.load(std::memory_order_relaxed);
+        if (gReserveCharge || !fige)
+        {
+            if (gReserveCharge || confEnable)
+                LOG_INFO("playerbots", "coa reserve: rechargement ignore enable_fige={} enable_conf={} reserve_gardee={}",
+                         fige ? 1 : 0, confEnable ? 1 : 0, gReserveCharge ? 1 : 0);
+            return;
+        }
+    }
+    if (!gReserveFige.load(std::memory_order_relaxed))
+        return;   // inerte : pas une requete
+
+    gReserve.clear();
+    gHumainsR.clear();
+    gEveillesR.clear();
+    gFileR.clear();
+    gEnFileR.clear();
+    gAPlacer.clear();
+    gReessaiR.clear();
+    gRetenusR.clear();
+    for (Tranche& tr : gTranches)
+        tr = Tranche();
+    {
+        std::unique_lock<std::shared_mutex> verrou(gVerrou);
+        gEnsembleR.clear();
+    }
+
+    if (!CharacterDatabase.Query(
+            "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coa_reserve'"))
+    {
+        LOG_ERROR("playerbots", "coa reserve: inerte raison=table_absente -- table coa_reserve absente de la base "
+                                "personnages (appliquer data/sql/characters/updates/2026_10_26_00_coa_reserve.sql, puis "
+                                "recharger la conf ou redemarrer)");
+        return;
+    }
+    gTableCompagnonPresente = CharacterDatabase.Query(
+        "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coa_compagnon'") != nullptr;
+
+    uint32 membres = 0, retires = 0, eveillesAvant = 0, montees = 0;
+    if (QueryResult res = CharacterDatabase.Query(
+            "SELECT r.bot_guid, r.tranche, r.faction, r.rang, r.etat, r.niveau_cible, r.origine, b.guid, b.level"
+            " FROM coa_reserve r LEFT JOIN characters b ON b.guid = r.bot_guid AND b.deleteInfos_Account IS NULL"))
+    {
+        do
+        {
+            Field* f = res->Fetch();
+            MembreR m;
+            m.bot = f[0].Get<uint32>();
+            m.tranche = f[1].Get<uint8>();
+            m.faction = f[2].Get<std::string>() == "horde" ? F_HORDE : F_ALLIANCE;
+            m.rang = f[3].Get<uint8>();
+            std::string const etat = f[4].Get<std::string>();
+            m.niveauCible = f[5].Get<uint8>();
+            m.montee = f[6].Get<std::string>() == "montee";
+            bool const botPresent = !f[7].IsNull();
+            uint32 const niveau = botPresent ? f[8].Get<uint32>() : 0;
+
+            char const* motif = nullptr;
+            if (etat == "retire")
+                m.etat = Etat::Retire;
+            else if (!botPresent)
+                motif = "absent";
+            else if (m.tranche >= NB_TRANCHES)
+                motif = "tranche_invalide";
+            else if (niveau > HautDe(m.tranche))
+                motif = "hors_tranche";
+            if (motif)
+            {
+                m.etat = Etat::Retire;
+                if (botPresent)
+                    sRandomPlayerbotMgr.CoaLiberer(Guid(m.bot));
+                CharacterDatabase.DirectExecute(
+                    "UPDATE coa_reserve SET etat = 'retire', motif_retrait = '{}' WHERE bot_guid = {}", motif, m.bot);
+            }
+            else if (m.etat != Etat::Retire)
+            {
+                if (etat == "eveille")
+                    ++eveillesAvant;
+                if (niveau < m.niveauCible)
+                    ++montees;
+                m.etat = Etat::Dort;
+                EnsembleRAjouter(m.bot);
+                CoucherR(m.bot);   // « logout » long sur toute la reserve, avant le premier tirage
+                ++membres;
+            }
+            if (m.etat == Etat::Retire)
+                ++retires;
+            gReserve[m.bot] = m;
+        } while (res->NextRow());
+    }
+    CharacterDatabase.DirectExecute("UPDATE coa_reserve SET etat = 'dort' WHERE etat = 'eveille'");
+
+    gReserveCharge = true;
+    gProchainScan = 0;
+    // Nouvel essai apres une table absente (recharge de conf) : des humains sont peut-etre deja en jeu.
+    for (Player* p : sRandomPlayerbotMgr.GetPlayers())
+        if (p && p->GetSession() && !p->GetSession()->IsBot() && CompteHumain(p->GetSession()->GetAccountId()))
+            gHumainsR.insert(p->GetGUID().GetCounter());
+    LOG_INFO("playerbots",
+             "coa reserve: charge membres={} retires={} montees_en_attente={} eveilles_a_l_arret={} par_tranche={} "
+             "max_eveilles={} (tous endormis)",
+             membres, retires, montees, eveillesAvant, sPlayerbotAIConfig.coaReserveParTranche,
+             sPlayerbotAIConfig.coaReserveMaxEveilles);
+}
+
+// « 3 » ou « 31-40 » -> tranche 3. Faux si illisible.
+bool LireTranche(std::string const& arg, uint8& t)
+{
+    if (arg.empty())
+        return false;
+    size_t const tiret = arg.find('-');
+    std::string const premier = arg.substr(0, tiret);
+    if (premier.empty() || premier.size() > 3 || premier.find_first_not_of("0123456789") != std::string::npos)
+        return false;
+    uint32 const a = std::stoul(premier);
+    if (tiret == std::string::npos)
+    {
+        if (a >= NB_TRANCHES)
+            return false;
+        t = uint8(a);
+        return true;
+    }
+    std::string const second = arg.substr(tiret + 1);
+    if (second.empty() || second.size() > 3 || second.find_first_not_of("0123456789") != std::string::npos)
+        return false;
+    uint32 const b = std::stoul(second);
+    if (!a || (a - 1) % 10 || b != a + 9 || (a - 1) / 10 >= NB_TRANCHES)
+        return false;
+    t = uint8((a - 1) / 10);
+    return true;
+}
+
+bool ReserveCommandePossible(ChatHandler* handler, char const* commande)
+{
+    if (ReserveActive())
+        return true;
+    handler->PSendSysMessage("coa reserve {}: inerte (AiPlayerbot.CoaCompagnons.Reserve.Enable = 0 au demarrage, ou "
+                             "table coa_reserve absente).", commande);
+    return false;
+}
 }  // namespace
 
 namespace CoaCompagnons
 {
 bool EstCompagnon(uint32 botGuid)
 {
-    if (!gEnableFige.load(std::memory_order_relaxed))
+    bool const compagnons = gEnableFige.load(std::memory_order_relaxed);
+    bool const reserve = gReserveFige.load(std::memory_order_relaxed);
+    if (!compagnons && !reserve)
         return false;
     std::shared_lock<std::shared_mutex> verrou(gVerrou);
-    return gEnsemble.count(botGuid) != 0;
+    return (compagnons && gEnsemble.count(botGuid)) || (reserve && gEnsembleR.count(botGuid));
 }
+
+bool EstReserve(uint32 botGuid)
+{
+    if (!gReserveFige.load(std::memory_order_relaxed))
+        return false;
+    std::shared_lock<std::shared_mutex> verrou(gVerrou);
+    return gEnsembleR.count(botGuid) != 0;
+}
+
+bool PlacementAutorise(uint32 botGuid) { return botGuid && tPlacement == botGuid; }
 
 void ChargerEtEndormir()
 {
+    // Revision du 26/10 : la reserve d'abord, pour que le chargement des compagnons ecarte un bot deja en reserve.
+    ChargerReserve();
+
     // Revue du 26/10 (M1) : RandomPlayerbotMgr::Init repasse ici a CHAQUE recharge de la conf (`.reload config` puis
     // `playerbots rndbot reload`, `.playerbots bot reload` -> PlayerbotAIConfig::Initialize). Tout vider alors
     // endormait et deconnectait les compagnons des humains en jeu, sans rien pour les reveiller. Donc :
@@ -791,6 +1740,14 @@ void ChargerEtEndormir()
                     "UPDATE coa_compagnon SET etat = 'retire', motif_retrait = 'absent' WHERE humain_guid = {} AND bot_guid = {}",
                     humain, m.bot);
             }
+            else if (EstReserveInterne(m.bot))
+            {
+                // Revision du 26/10 : un bot n'est jamais a la fois compagnon et reserve ; la reserve le garde.
+                m.etat = Etat::Retire;
+                CharacterDatabase.DirectExecute(
+                    "UPDATE coa_compagnon SET etat = 'retire', motif_retrait = 'reserve' WHERE humain_guid = {} AND bot_guid = {}",
+                    humain, m.bot);
+            }
             else
             {
                 if (etat == "eveille")
@@ -816,7 +1773,15 @@ void ChargerEtEndormir()
 
 void HumainConnecte(Player* humain)
 {
-    if (!Actif() || !humain || !humain->GetSession())
+    if (!humain || !humain->GetSession())
+        return;
+    // Revision du 26/10 : la reserve de sa tranche (releve des la seconde suivante).
+    if (ReserveActive() && !humain->GetSession()->IsBot() && CompteHumain(humain->GetSession()->GetAccountId()))
+    {
+        gHumainsR.insert(humain->GetGUID().GetCounter());
+        gProchainScan = 0;
+    }
+    if (!Actif())
         return;
     time_t const maintenant = Maintenant();
     uint32 const h = humain->GetGUID().GetCounter();
@@ -854,7 +1819,12 @@ void HumainConnecte(Player* humain)
 
 void HumainDeconnecte(Player* humain)
 {
-    if (!Actif() || !humain)
+    if (!humain)
+        return;
+    // Revision du 26/10 : il ne compte plus dans sa tranche (encore « connecte » pendant ce crochet : retire a la main).
+    if (ReserveActive() && gHumainsR.erase(humain->GetGUID().GetCounter()))
+        gProchainScan = 0;
+    if (!Actif())
         return;
     auto it = gSeances.find(humain->GetGUID().GetCounter());
     if (it == gSeances.end() || !it->second.present)
@@ -868,6 +1838,22 @@ void HumainDeconnecte(Player* humain)
 
 void BotSorti(uint32 botGuid)
 {
+    // Revision du 26/10 : un bot de reserve sorti sans nous (presence expiree, connexion ratee) redevient « dort » ; sa
+    // tranche, si elle est eveillee, le reprogramme apres REESSAI_BOT_S (pas de boucle de connexions ratees).
+    if (ReserveActive() && gEveillesR.erase(botGuid))
+    {
+        gAPlacer.erase(botGuid);
+        gReessaiR[botGuid] = Maintenant() + REESSAI_BOT_S;
+        auto r = gReserve.find(botGuid);
+        if (r != gReserve.end() && r->second.etat == Etat::Eveille)
+            r->second.etat = Etat::Dort;
+        CharacterDatabase.Execute("UPDATE coa_reserve SET etat = 'dort' WHERE bot_guid = {} AND etat = 'eveille'",
+                                  botGuid);
+        LOG_INFO("playerbots", "coa reserve: sommeil tranche={} faction={} bot={} apres=0 motif=sortie",
+                 r != gReserve.end() ? uint32(r->second.tranche) : 0u,
+                 r != gReserve.end() ? NomFaction(r->second.faction) : "?", NomDe(botGuid));
+        return;
+    }
     if (!Actif())
         return;
     auto it = gEveilles.find(botGuid);
@@ -886,7 +1872,9 @@ void BotSorti(uint32 botGuid)
 
 void MettreAJour(uint32 diff)
 {
-    if (!Actif())
+    bool const compagnons = Actif();
+    bool const reserve = ReserveActive();
+    if (!compagnons && !reserve)
         return;
     gCumulMs += diff;
     if (gCumulMs < 1000)
@@ -900,17 +1888,34 @@ void MettreAJour(uint32 diff)
         gProchainReleve = maintenant + RELEVE_S;
     }
 
-    Reveiller(maintenant);
+    if (compagnons)
+        Reveiller(maintenant);
+    if (reserve)
+    {
+        if (maintenant >= gProchainScan)
+        {
+            gProchainScan = maintenant + SCAN_S;
+            ScanTranches(maintenant);
+        }
+        ReveillerR(maintenant);   // meme echelonnement que les compagnons (gProchainReveil partage)
+        Placer(maintenant);
+    }
 
     if (maintenant >= gProchainRenouvellement)
     {
         gProchainRenouvellement = maintenant + sPlayerbotAIConfig.coaCompagnonsRenouvellement;
-        Renouveler(maintenant);
+        if (compagnons)
+            Renouveler(maintenant);
+        if (reserve)
+            RenouvelerR(maintenant);
     }
     if (maintenant >= gProchainReleve)
     {
         gProchainReleve = maintenant + RELEVE_S;
-        Relever(maintenant);
+        if (compagnons)
+            Relever(maintenant);
+        if (reserve)
+            ReleverR();
     }
 }
 
@@ -1019,6 +2024,182 @@ bool CommandeEndormir(ChatHandler* handler, std::string const& nom)
                              "groupe (deconnectes des qu'aucun humain du groupe n'est en ligne). Ils se reveilleront a "
                              "sa prochaine connexion.",
                              e->Name, n, retenus);
+    return true;
+}
+// ------------------------------------------------------------------ commandes de la reserve (revision du 26/10)
+
+bool CommandeReserveListe(ChatHandler* handler, std::string const& arg)
+{
+    if (!ReserveCommandePossible(handler, "liste"))
+        return false;
+    time_t const maintenant = Maintenant();
+    auto etatTranche = [&](uint8 t)
+    {
+        Tranche const& tr = gTranches[t];
+        if (!tr.eveillee)
+            return std::string(tr.suspendue ? "endormie (suspendue par commande)" : "endormie");
+        if (tr.humains)
+            return std::string("eveillee");
+        time_t const fin = tr.derniereVue + time_t(sPlayerbotAIConfig.coaCompagnonsGrace);
+        return std::string(tr.commande ? "eveillee par commande" : "eveillee, en grace") + ", sommeil dans " +
+               std::to_string(fin > maintenant ? uint64(fin - maintenant) : 0) + " s";
+    };
+
+    if (arg.empty())
+    {
+        handler->PSendSysMessage("coa reserve liste: {} par tranche et par faction, {} eveille(s) / max {}, {} en file, "
+                                 "{} a placer, {} retenu(s).", sPlayerbotAIConfig.coaReserveParTranche,
+                                 uint32(gEveillesR.size()), sPlayerbotAIConfig.coaReserveMaxEveilles,
+                                 uint32(gEnFileR.size()), uint32(gAPlacer.size()), uint32(gRetenusR.size()));
+        for (uint8 t = 0; t < NB_TRANCHES; ++t)
+        {
+            uint32 total[2] = {0, 0}, eveilles[2] = {0, 0}, montees[2] = {0, 0}, retires = 0;
+            for (auto const& [bot, m] : gReserve)
+            {
+                if (m.tranche != t)
+                    continue;
+                if (m.etat == Etat::Retire)
+                {
+                    ++retires;
+                    continue;
+                }
+                ++total[m.faction];
+                if (gEveillesR.count(bot))
+                    ++eveilles[m.faction];
+                CharacterCacheEntry const* e = sCharacterCache->GetCharacterCacheByGuid(Guid(bot));
+                if (e && e->Level < m.niveauCible)
+                    ++montees[m.faction];
+            }
+            Tranche const& tr = gTranches[t];
+            handler->PSendSysMessage("  tranche {} ({}-{}) : {} ; humains {} (A {} / H {}) ; alliance {}/{} eveilles, "
+                                     "horde {}/{} eveilles ; montees en attente {} ; retires {}",
+                                     uint32(t), BasDe(t), HautDe(t), etatTranche(t), tr.humains,
+                                     tr.humainsF[F_ALLIANCE], tr.humainsF[F_HORDE], eveilles[F_ALLIANCE],
+                                     total[F_ALLIANCE], eveilles[F_HORDE], total[F_HORDE],
+                                     montees[F_ALLIANCE] + montees[F_HORDE], retires);
+        }
+        return true;
+    }
+
+    uint8 t = 0;
+    if (!LireTranche(arg, t))
+    {
+        handler->PSendSysMessage("coa reserve liste: tranche illisible « {} » (0 a 5, ou 1-10 ... 51-60).", arg);
+        return false;
+    }
+    handler->PSendSysMessage("coa reserve liste: tranche {} ({}-{}) : {} ; humains {}.", uint32(t), BasDe(t), HautDe(t),
+                             etatTranche(t), gTranches[t].humains);
+    std::vector<MembreR const*> membres;
+    for (auto const& [bot, m] : gReserve)
+        if (m.tranche == t)
+            membres.push_back(&m);
+    std::sort(membres.begin(), membres.end(), [](MembreR const* a, MembreR const* b)
+              { return std::make_pair(a->faction, a->rang) < std::make_pair(b->faction, b->rang); });
+    if (membres.empty())
+        handler->PSendSysMessage("  reserve vide (constituee au premier reveil, ou par .coa reserve constituer).");
+    for (MembreR const* m : membres)
+    {
+        CharacterCacheEntry const* e = sCharacterCache->GetCharacterCacheByGuid(Guid(m->bot));
+        Player* enJeu = ObjectAccessor::FindConnectedPlayer(Guid(m->bot));
+        uint32 const niveau = enJeu ? enJeu->GetLevel() : (e ? uint32(e->Level) : 0);
+        int const factionJeu = enJeu ? FactionDe(enJeu->GetTeamId()) : -1;
+        handler->PSendSysMessage("  {} (guid {}) {} {} : {}, niv {} (cible {}{}), {}{}{}{}", e ? e->Name : "?", m->bot,
+                                 NomFaction(m->faction), uint32(m->rang), NomEtat(m->etat), niveau,
+                                 uint32(m->niveauCible), m->montee ? ", montee" : "",
+                                 enJeu ? "en jeu" : "hors jeu",
+                                 enJeu ? (factionJeu == int(m->faction) ? " (GetTeamId conforme)" : " (GetTeamId DIFFERENT)") : "",
+                                 gEnFileR.count(m->bot) ? ", reveil en file" : "",
+                                 gAPlacer.count(m->bot) ? ", placement en attente" : "");
+    }
+    return true;
+}
+
+bool CommandeReserveEveiller(ChatHandler* handler, std::string const& arg)
+{
+    if (!ReserveCommandePossible(handler, "eveiller"))
+        return false;
+    uint8 t = 0;
+    if (!LireTranche(arg, t))
+    {
+        handler->PSendSysMessage("Usage: .coa reserve eveiller <tranche 0-5 ou 1-10 ... 51-60>");
+        return false;
+    }
+    time_t const maintenant = Maintenant();
+    Tranche& tr = gTranches[t];
+    tr.suspendue = false;
+    tr.derniereVue = maintenant;   // sans humain, la tranche s'endort Grace secondes apres cette commande
+    bool const deja = tr.eveillee;
+    if (!tr.humains)
+        tr.commande = true;
+    EveillerTranche(t, "commande", maintenant);
+    uint32 enFile = 0;
+    for (uint32 bot : gFileR)
+    {
+        auto m = gReserve.find(bot);
+        if (m != gReserve.end() && m->second.tranche == t)
+            ++enFile;
+    }
+    handler->PSendSysMessage("coa reserve eveiller: tranche {} ({}-{}) {} ; alliance {} membre(s), horde {} ; {} reveil(s) "
+                             "en file ; {}.", uint32(t), BasDe(t), HautDe(t), deja ? "deja eveillee" : "eveillee",
+                             ActifsDe(t, F_ALLIANCE), ActifsDe(t, F_HORDE), enFile,
+                             tr.humains ? std::string("un humain la tient") :
+                                          "sommeil dans " + std::to_string(sPlayerbotAIConfig.coaCompagnonsGrace) + " s");
+    return true;
+}
+
+bool CommandeReserveEndormir(ChatHandler* handler, std::string const& arg)
+{
+    if (!ReserveCommandePossible(handler, "endormir"))
+        return false;
+    uint8 t = 0;
+    if (!LireTranche(arg, t))
+    {
+        handler->PSendSysMessage("Usage: .coa reserve endormir <tranche 0-5 ou 1-10 ... 51-60>");
+        return false;
+    }
+    Tranche& tr = gTranches[t];
+    uint32 const n = EndormirTranche(t, "commande", Maintenant());
+    if (tr.humains)
+        tr.suspendue = true;
+    uint32 retenus = 0;
+    for (uint32 bot : gRetenusR)
+    {
+        auto m = gReserve.find(bot);
+        if (m != gReserve.end() && m->second.tranche == t)
+            ++retenus;
+    }
+    handler->PSendSysMessage("coa reserve endormir: tranche {} ({}-{}) ; {} bot(s) endormi(s), dont {} retenu(s) en jeu par "
+                             "un groupe ; {}.", uint32(t), BasDe(t), HautDe(t), n, retenus,
+                             tr.humains ? "suspendue tant qu'un humain y reste (.coa reserve eveiller pour reprendre)"
+                                        : "elle se reveillera au prochain humain de la tranche");
+    return true;
+}
+
+bool CommandeReserveConstituer(ChatHandler* handler)
+{
+    if (!ReserveCommandePossible(handler, "constituer"))
+        return false;
+    time_t const maintenant = Maintenant();
+    std::vector<std::pair<uint8, uint8>> toutes;
+    for (uint8 t = 0; t < NB_TRANCHES; ++t)
+        for (uint8 f : {uint8(F_ALLIANCE), uint8(F_HORDE)})
+            toutes.emplace_back(t, f);
+    std::vector<ResultatR> const res = ConstituerR(toutes, maintenant, true);
+    if (res.empty())
+        handler->PSendSysMessage("coa reserve constituer: toutes les reserves sont completes ({} par tranche et par faction).",
+                                 sPlayerbotAIConfig.coaReserveParTranche);
+    for (ResultatR const& r : res)
+        handler->PSendSysMessage("coa reserve constituer: tranche {} ({}-{}) {} : voulus {}, pris {} (dont {} a monter), "
+                                 "manque {}{}{}", uint32(r.tranche), BasDe(r.tranche), HautDe(r.tranche),
+                                 NomFaction(r.faction), r.voulus, r.pris, r.montes, r.manque, r.refus ? ", refus " : "",
+                                 r.refus ? r.refus : "");
+    // Une tranche eveillee reveille ses nouveaux membres tout de suite.
+    for (uint8 t = 0; t < NB_TRANCHES; ++t)
+        if (gTranches[t].eveillee)
+        {
+            ProgrammerR(t, F_ALLIANCE, maintenant);
+            ProgrammerR(t, F_HORDE, maintenant);
+        }
     return true;
 }
 }  // namespace CoaCompagnons

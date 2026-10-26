@@ -17,6 +17,13 @@
  * RandomBotUpdateAction) : il lit un ensemble sous verrou partage, que seul le fil monde modifie.
  *
  * OPTION ETEINTE (defaut) : ChargerEtEndormir ne lit rien, EstCompagnon rend faux, tous les crochets sortent d'entree.
+ *
+ * REVISION DU 26/10/2026 : RESERVES PAR TRANCHE. Une reserve de bots par tranche de niveau (1-10 ... 51-60, tranche =
+ * (niveau - 1) / 10) ET par faction, toujours les memes (table `coa_reserve`, meme fichier, meme auteur). Un humain de
+ * la tranche, quel que soit son camp, reveille les deux reserves de sa tranche ; elles s'endorment Grace secondes apres
+ * le depart du dernier humain de la tranche. Niveau fige (PLAYER_FLAGS_NO_XP_GAIN) ; tranche trop maigre completee par
+ * montee en niveau au premier reveil. Option AiPlayerbot.CoaCompagnons.Reserve.Enable (0 par defaut, figee au
+ * demarrage). Les exemptions du lot 1 valent pour eux : EstCompagnon rend vrai pour un bot de reserve.
  */
 
 #ifndef _PLAYERBOT_COACOMPAGNONS_H
@@ -31,9 +38,14 @@ class Player;
 
 namespace CoaCompagnons
 {
-// N'importe quel fil. Vrai si ce bot (guid bas) est au registre d'un humain (eveille ou endormi, pas « retire »).
-// Suit la valeur d'Enable FIGEE au demarrage, pas celle d'une recharge.
+// N'importe quel fil. Vrai si ce bot (guid bas) est au registre d'un humain OU dans une reserve de tranche (eveille ou
+// endormi, pas « retire ») : c'est la question de toutes les exemptions. Suit les Enable FIGES au demarrage.
 bool EstCompagnon(uint32 botGuid);
+// N'importe quel fil. Vrai si ce bot est dans une reserve de tranche (pas « retire ») : niveau fige (NO_XP_GAIN).
+bool EstReserve(uint32 botGuid);
+// FIL DE L'APPELANT. Vrai pendant que CoaCompagnons.cpp place lui-meme ce bot (RandomTeleportGrindForLevel d'un bot de
+// reserve de l'autre faction) : RandomTeleport laisse alors passer ce bot malgre EstCompagnon.
+bool PlacementAutorise(uint32 botGuid);
 
 // FIL MONDE, au demarrage (RandomPlayerbotMgr::Init, avant le premier tirage) : lit le registre, retire les bots
 // supprimes, purge les lignes d'un humain supprime, et remet TOUT le registre en sommeil. Init repasse ici a chaque
@@ -57,6 +69,13 @@ void MettreAJour(uint32 diff);
 bool CommandeListe(ChatHandler* handler, std::string const& nom);
 bool CommandeEveiller(ChatHandler* handler, std::string const& nom);
 bool CommandeEndormir(ChatHandler* handler, std::string const& nom);
+
+// FIL MONDE. Commandes `.coa reserve liste [tranche] | eveiller <tranche> | endormir <tranche> | constituer`.
+// `arg` : tranche 0 a 5, ou « 1-10 » ... « 51-60 » ; vide pour liste et constituer.
+bool CommandeReserveListe(ChatHandler* handler, std::string const& arg);
+bool CommandeReserveEveiller(ChatHandler* handler, std::string const& arg);
+bool CommandeReserveEndormir(ChatHandler* handler, std::string const& arg);
+bool CommandeReserveConstituer(ChatHandler* handler);
 }  // namespace CoaCompagnons
 
 #endif
