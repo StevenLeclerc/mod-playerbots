@@ -8,6 +8,7 @@
 #include "DungeonStrategyContext.h"
 #include "RaidStrategyContext.h"
 #include "CoaGenericContext.h"
+#include "CoaRelever.h"
 #include "StrategyContext.h"
 
 void AiObjectContext::BuildSharedStrategyContexts(SharedNamedObjectContextList<Strategy>& strategyContexts)
@@ -19,4 +20,6 @@ void AiObjectContext::BuildSharedStrategyContexts(SharedNamedObjectContextList<S
     strategyContexts.Add(new DungeonStrategyContext());
     strategyContexts.Add(new RaidStrategyContext());
     strategyContexts.Add(new CoaGenericStrategyContext());
+    // CoA (27/10/2026) : relever les humains morts, pour toutes les classes (Ai/Coa/CoaRelever.h).
+    strategyContexts.Add(new CoaReleverStrategyContext());
 }

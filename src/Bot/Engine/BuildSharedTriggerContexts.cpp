@@ -30,6 +30,7 @@
 #include "WotlkDungeonTriggerContext.h"
 #include "ZATriggerContext.h"
 #include "CoaGenericContext.h"
+#include "CoaRelever.h"
 
 void AiObjectContext::BuildSharedTriggerContexts(SharedNamedObjectContextList<Trigger>& triggerContexts)
 {
@@ -79,4 +80,6 @@ void AiObjectContext::BuildSharedTriggerContexts(SharedNamedObjectContextList<Tr
     // CoA: generische, parametrisierbare Bausteine (GenericTrigger)
     // machen Kampfverhalten zu Daten - siehe Ai/Coa/CoaGenericContext.h
     triggerContexts.Add(new CoaGenericTriggerContext());
+    // CoA (27/10/2026) : relever les humains morts, pour toutes les classes (Ai/Coa/CoaRelever.h).
+    triggerContexts.Add(new CoaReleverTriggerContext());
 }

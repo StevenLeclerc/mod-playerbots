@@ -2318,6 +2318,30 @@ AiPlayerbot.CoaCompagnons.Souvenirs.PremiereParole = 300
 AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMin = 1200
 AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMax = 2400
 
+# ---- Relever les humains morts (27/10/2026, src/Ai/Coa/CoaRelever.cpp)
+# Un bot hors combat releve un joueur HUMAIN mort de sa faction avec un sort de resurrection
+# de son livre (lu par ses effets : 18 et 113 ; auto-resurrection 94 ecartee), toutes classes,
+# vanille comprises. Le compagnon eveille de l'humain passe en premier (les autres attendent
+# 15 s) ; un seul bot a la fois par corps. Un humain libere (fantome) est vise par son cadavre :
+# seuls les sorts a effet 113 a cible explicite y servent, et la distance compte au cadavre.
+# Jamais en champ de bataille, arene, duel, combat, vol ou taxi, ni pour un bot de banc, un
+# mercenaire ou un bot drapeau FFA ; un bot mene par un joueur ne releve que son maitre.
+# L'humain doit accepter la fenetre ; refusee, un autre essai vient Delai secondes plus tard.
+# Journal : « coa relever: bot= humain= sort= distance= resultat= » (approche, lance, echec,
+# approche abandonnee, releve).
+# Enable : 0 (defaut) = inerte. La strategie « coa relever » n'est posee qu'a la composition du
+# bot (connexion, ResetStrategies) : allumer par rechargement n'agit que sur les bots composes
+# ensuite ; eteindre agit tout de suite.
+AiPlayerbot.Coa.Relever.Enable = 0
+# 1 : tout bot de la faction proche releve aussi (sinon le seul compagnon eveille). Defaut : 0
+AiPlayerbot.Coa.Relever.Etrangers = 0
+# Yards du bot au corps (ou au cadavre), bot quelconque. Defaut : 35 (borne 5 a 40)
+AiPlayerbot.Coa.Relever.Portee = 35
+# Yards du compagnon eveille au corps de son humain. Defaut : 60 (borne 5 a 100)
+AiPlayerbot.Coa.Relever.PorteeCompagnon = 60
+# Secondes entre deux lancers sur le meme corps (refus, sort coupe). Defaut : 30 (5 a 600)
+AiPlayerbot.Coa.Relever.Delai = 30
+
 # ---------------------------------------------------------------------------- Arene1v1 (CoA)
 # Escarmouche 1 contre 1 NON classee : un joueur humain contre un bot d'une classe CoA,
 # le « gladiateur », mis a son niveau (niveau, sorts, talents, equipement) a l'inscription.

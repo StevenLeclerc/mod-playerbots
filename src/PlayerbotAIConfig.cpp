@@ -1188,6 +1188,13 @@ bool PlayerbotAIConfig::Initialize()
         sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMax", 2400), 60, 86400);
     if (coaSouvenirsIntervalleMax < coaSouvenirsIntervalleMin)
         coaSouvenirsIntervalleMax = coaSouvenirsIntervalleMin;
+    // Relever les humains morts (27/10/2026) : inerte par defaut.
+    coaReleverEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.Relever.Enable", false);
+    coaReleverEtrangers = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.Relever.Etrangers", false);
+    coaReleverPortee = std::clamp<float>(sConfigMgr->GetOption<float>("AiPlayerbot.Coa.Relever.Portee", 35.0f), 5.0f, 40.0f);
+    coaReleverPorteeCompagnon =
+        std::clamp<float>(sConfigMgr->GetOption<float>("AiPlayerbot.Coa.Relever.PorteeCompagnon", 60.0f), 5.0f, 100.0f);
+    coaReleverDelai = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.Relever.Delai", 30), 5, 600);
 
     selfBotLevel =sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
     botTextLocale = sConfigMgr->GetOption<int32>("AiPlayerbot.BotTextLocale", -1);

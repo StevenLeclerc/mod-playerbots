@@ -680,6 +680,12 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
                                             "gather", "duel", "pvp", "buff", "mount", "emote", nullptr);
     }
 
+    // CoA -- relever les humains morts (27/10/2026, Ai/Coa/CoaRelever.h) : TOUTES les classes, vanille comprises, hors
+    // champ de bataille et arene. Fabrique sans freres (P-130) : sa pose ne retire rien. Le declencheur relit l'option a
+    // chaque passage : l'eteindre agit tout de suite, l'allumer seulement quand la composition est refaite.
+    if (sPlayerbotAIConfig.coaReleverEnable && !player->InBattleground())
+        nonCombatEngine->addStrategy("coa relever", false);
+
     if (sPlayerbotAIConfig.autoSaveMana && PlayerbotAI::IsHeal(player, true))
         nonCombatEngine->addStrategy("save mana", false);
 

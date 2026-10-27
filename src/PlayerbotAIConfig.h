@@ -1001,6 +1001,12 @@ public:
     uint32 coaSouvenirsPremiereParole;     // secondes entre le reveil du compagnon et sa premiere parole (defaut 300)
     uint32 coaSouvenirsIntervalleMin;      // secondes entre deux paroles, au moins (defaut 1200)
     uint32 coaSouvenirsIntervalleMax;      // et au plus (defaut 2400)
+    // Relever les humains morts (27/10/2026, Ai/Coa/CoaRelever.cpp) : strategie hors combat « coa relever ».
+    bool coaReleverEnable;                 // defaut faux : rien n'est inscrit, la strategie n'est pas posee
+    bool coaReleverEtrangers;              // defaut faux : seul le compagnon eveille releve son humain
+    float coaReleverPortee;                // yards bot -> corps pour un bot quelconque (defaut 35, 5..40)
+    float coaReleverPorteeCompagnon;       // yards bot -> corps pour le compagnon (defaut 60, 5..100)
+    uint32 coaReleverDelai;                // secondes entre deux lancers sur le meme corps (defaut 30, 5..600)
 
 private:
     PlayerbotAIConfig() = default;

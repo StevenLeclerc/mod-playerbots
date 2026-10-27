@@ -13,6 +13,7 @@
 #include "CoaCompagnons.h"
 #include "CoaDirecteur.h"
 #include "CoaPostes.h"
+#include "CoaRelever.h"
 #include "CoaSouvenirs.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
@@ -93,7 +94,9 @@ public:
         PLAYERHOOK_ON_CREATURE_KILL,
         PLAYERHOOK_ON_CREATURE_KILLED_BY_PET,
         PLAYERHOOK_ON_LEVEL_CHANGED,
-        PLAYERHOOK_ON_UPDATE_GATHERING_SKILL
+        PLAYERHOOK_ON_UPDATE_GATHERING_SKILL,
+        // CoA (27/10/2026) : registre des humains morts a relever (Ai/Coa/CoaRelever.cpp).
+        PLAYERHOOK_ON_PLAYER_RESURRECT
     }) {}
 
     // CoA (27/10/2026) : ce que vit un humain, pour les souvenirs de son compagnon. Mis en file seulement (ces
@@ -104,6 +107,14 @@ public:
     {
         if (Souvenirs(player))
             CoaSouvenirs::Mort(player);
+        // CoA (27/10/2026) : inscrit l'humain mort pour les bots qui relevent (option eteinte : rien).
+        CoaRelever::Mort(player);
+    }
+
+    // CoA (27/10/2026) : l'humain releve (sort, gardien des ames, retour au corps) sort du registre.
+    void OnPlayerResurrect(Player* player, float /*restore_percent*/, bool& /*applySickness*/) override
+    {
+        CoaRelever::Releve(player);
     }
 
     void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
@@ -184,6 +195,8 @@ public:
         {
             PlayerbotsMgr::instance().AddPlayerbotData(player, false);
             sRandomPlayerbotMgr.OnPlayerLogin(player);
+            // CoA (27/10/2026) : un humain qui se connecte mort (fantome) est inscrit pour les bots qui relevent.
+            CoaRelever::HumainConnecte(player);
 
             // Before modifying the following messages, please make sure it does not violate the GNU GPLv2
             // license especially if you are distributing a repack or hosting a public server
@@ -499,6 +512,8 @@ public:
         sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
         // CoA (25/10/2026) : bots compagnons -- reveils, renouvellement, grace (inerte si l'option est eteinte).
         CoaCompagnons::MettreAJour(diff);
+        // CoA (27/10/2026) : registre des humains morts -- compagnon eveille, purge (inerte si personne n'y est).
+        CoaRelever::MettreAJour(diff);
     }
 };
 
