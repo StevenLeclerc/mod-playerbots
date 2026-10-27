@@ -10,10 +10,13 @@
  *   quete     le titre de la quete finie
  *   danger    l'adversaire : vie sous DANGER_PCT en combat, puis sorti du combat VIVANT (au plus un par 10 min)
  *   recolte   minage / herboristerie / depecage : RECOLTE_N recoltes en RECOLTE_FENETRE_S (au plus une par 30 min)
- *   exploit   une creature elite, rare ou boss, pas grise pour lui
- *   niveau    le niveau pris
+ *   exploit   dehors : un rare, un boss du monde, ou un elite de son niveau ou plus ; en instance : un boss seulement.
+ *             Abattu par lui, son familier ou son compagnon eveille (le coup fatal decide)
+ *   niveau    le niveau pris (une montee seulement) ; un niveau note rend muets les niveaux d'avant
  * « ensemble » : son compagnon eveille etait en jeu, sur la meme carte, a moins de ENSEMBLE_YD. Lu au fil monde, au
  * plus une seconde apres l'evenement (les crochets tournent dans les fils de carte : ils ne font que mettre en file).
+ * Le souvenir garde CE compagnon : un autre compagnon le racontera comme un souvenir vu de loin.
+ * Exige AiPlayerbot.CoaCompagnons.Enable = 1 : c'est CoaCompagnons qui appelle Arrivee, Depart et MettreAJour.
  *
  * CE QUI EST DIT : un chuchotement du compagnon eveille, PremiereParole secondes apres son reveil, puis toutes les
  * IntervalleMin a IntervalleMax secondes ; jamais si l'un des deux est en combat ou mort (nouvel essai 30 s plus tard).
@@ -35,6 +38,7 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Log.h"
+#include "Map.h"
 #include "ObjectAccessor.h"
 #include "ObjectGuid.h"
 #include "Player.h"
@@ -96,7 +100,10 @@ constexpr time_t RECOLTE_ESPACEMENT_S = 1800;
 constexpr float ENSEMBLE_YD = 80.0f;
 constexpr time_t DOUBLON_S = 600;            // meme genre et meme objet a moins de 10 min : un seul souvenir
 constexpr time_t ANCIEN_S = 12 * 3600;
-constexpr time_t MORT_DELAI_S = 1;           // le nom du tueur arrive par un second crochet, dans un ordre non garanti
+// Le tueur arrive par OnPlayerKilledByCreature (Unit::Kill), la mort par OnPlayerJustDied au Player::Update suivant :
+// une seconde de marge suffit (revue du 27/10, m1).
+constexpr time_t MORT_DELAI_S = 1;
+constexpr size_t OBJET_MAX = 128;            // VARCHAR(128) de la table
 constexpr time_t REESSAI_COMBAT_S = 30;
 constexpr time_t REESSAI_VIDE_S = 600;
 constexpr size_t MEMOIRE_MAX = 40;
@@ -106,7 +113,8 @@ constexpr size_t FILE_MAX = 2000;
 
 struct Evenement
 {
-    uint32 humain = 0;
+    uint32 humain = 0;      // 0 : a resoudre par `bot` au fil monde (coup fatal du compagnon)
+    uint32 bot = 0;
     Genre genre = Genre::Quete;
     std::string objet;
     uint32 zone = 0;
@@ -140,6 +148,7 @@ struct Souvenir
     std::string objet;
     uint32 zone = 0;
     bool ensemble = false;
+    uint32 bot = 0;           // le compagnon qui l'a vecu (ensemble), 0 sinon
     time_t quand = 0;
     bool dit = false;
 };
@@ -177,12 +186,24 @@ bool TableOk()
     return gTable == 1;
 }
 
+// Au plus OBJET_MAX octets, sans couper un caractere UTF-8 (revue du 27/10, m13).
+std::string Tronquer(std::string s)
+{
+    if (s.size() <= OBJET_MAX)
+        return s;
+    size_t n = OBJET_MAX;
+    while (n > 0 && (uint8(s[n]) & 0xC0) == 0x80)
+        --n;
+    s.resize(n);
+    return s;
+}
+
 void Pousser(Player* humain, Genre genre, std::string objet)
 {
     Evenement e;
     e.humain = humain->GetGUID().GetCounter();
     e.genre = genre;
-    e.objet = std::move(objet);
+    e.objet = Tronquer(std::move(objet));
     e.zone = humain->GetZoneId();
     std::lock_guard<std::mutex> garde(gVerrou);
     if (gFile.size() < FILE_MAX)
@@ -200,7 +221,7 @@ std::string Echapper(std::string s)
 void Charger(uint32 humain, Memoire& m, time_t maintenant)
 {
     QueryResult r = CharacterDatabase.Query(
-        "SELECT genre, objet, zone, ensemble, TIMESTAMPDIFF(SECOND, quand, UTC_TIMESTAMP()) FROM coa_compagnon_souvenir"
+        "SELECT genre, objet, zone, ensemble, TIMESTAMPDIFF(SECOND, quand, UTC_TIMESTAMP()), bot_guid FROM coa_compagnon_souvenir"
         " WHERE humain_guid = {} AND dit_le IS NULL AND quand > UTC_TIMESTAMP() - INTERVAL 14 DAY"
         " ORDER BY id DESC LIMIT {}",
         humain, uint32(MEMOIRE_MAX));
@@ -217,6 +238,7 @@ void Charger(uint32 humain, Memoire& m, time_t maintenant)
         s.zone = f[2].Get<uint32>();
         s.ensemble = f[3].Get<uint8>() != 0;
         s.quand = maintenant - std::max<int64>(0, f[4].Get<int64>());
+        s.bot = f[5].Get<uint32>();
         m.souvenirs.push_back(std::move(s));   // ORDER BY id DESC : le plus recent d'abord
     } while (r->NextRow());
 }
@@ -233,8 +255,29 @@ bool Ensemble(uint32 humain)
            b->GetInstanceId() == p->GetInstanceId() && b->GetDistance(p) <= ENSEMBLE_YD;
 }
 
-void Noter(Evenement const& e, time_t maintenant)
+// Le meme souvenir : meme genre, meme objet ; une mort sans tueur se distingue par sa zone (revue du 27/10, m10).
+bool Meme(Souvenir const& s, Genre g, std::string const& objet, uint32 zone)
 {
+    return s.genre == g && s.objet == objet && (!objet.empty() || s.zone == zone);
+}
+
+void MarquerDit(uint32 humain, Memoire& m, Genre g, std::string const& objet, uint32 zone)
+{
+    for (Souvenir& autre : m.souvenirs)
+        if (Meme(autre, g, objet, zone))
+            autre.dit = true;
+    CharacterDatabase.Execute(
+        "UPDATE coa_compagnon_souvenir SET dit_le = UTC_TIMESTAMP() WHERE humain_guid = {} AND genre = '{}'"
+        " AND objet = '{}'{} AND dit_le IS NULL",
+        humain, NomGenre(g), Echapper(objet), objet.empty() ? Acore::StringFormat(" AND zone = {}", zone) : "");
+}
+
+void Noter(Evenement e, time_t maintenant)
+{
+    if (!e.humain)
+        e.humain = CoaCompagnons::HumainDuCompagnon(e.bot);   // coup fatal du compagnon : l'exploit est a son humain
+    if (!e.humain)
+        return;
     auto it = gMemoires.find(e.humain);
     if (it == gMemoires.end())
     {
@@ -243,14 +286,26 @@ void Noter(Evenement const& e, time_t maintenant)
     }
     Memoire& m = it->second;
     for (Souvenir const& s : m.souvenirs)
-        if (s.genre == e.genre && s.objet == e.objet && maintenant - s.quand < DOUBLON_S)
+        if (Meme(s, e.genre, e.objet, e.zone) && maintenant - s.quand < DOUBLON_S)
             return;
+    // Revue du 27/10 (M4) : un niveau neuf rend muets les niveaux d'avant (jamais « Niveau 8 ! » quand il est 11).
+    if (e.genre == Genre::Niveau)
+        for (Souvenir& autre : m.souvenirs)
+            if (autre.genre == Genre::Niveau && !autre.dit)
+            {
+                autre.dit = true;
+                CharacterDatabase.Execute(
+                    "UPDATE coa_compagnon_souvenir SET dit_le = UTC_TIMESTAMP() WHERE humain_guid = {} AND genre = 'niveau'"
+                    " AND dit_le IS NULL",
+                    e.humain);
+            }
 
     Souvenir s;
     s.genre = e.genre;
     s.objet = e.objet;
     s.zone = e.zone;
     s.ensemble = Ensemble(e.humain);
+    s.bot = s.ensemble ? CoaCompagnons::CompagnonEveille(e.humain) : 0;
     s.quand = maintenant;
     m.souvenirs.push_front(s);
     while (m.souvenirs.size() > MEMOIRE_MAX)
@@ -259,7 +314,7 @@ void Noter(Evenement const& e, time_t maintenant)
     CharacterDatabase.Execute(
         "INSERT INTO coa_compagnon_souvenir (humain_guid, bot_guid, genre, objet, zone, ensemble, quand)"
         " VALUES ({}, {}, '{}', '{}', {}, {}, UTC_TIMESTAMP())",
-        e.humain, s.ensemble ? CoaCompagnons::CompagnonEveille(e.humain) : 0u, NomGenre(e.genre), Echapper(e.objet),
+        e.humain, s.bot, NomGenre(e.genre), Echapper(e.objet),
         e.zone, s.ensemble ? 1 : 0);
     LOG_INFO("playerbots", "coa compagnon: souvenir humain={} genre={} objet={} zone={} ensemble={}", e.humain,
              NomGenre(e.genre), e.objet, e.zone, s.ensemble ? 1 : 0);
@@ -271,12 +326,12 @@ void Noter(Evenement const& e, time_t maintenant)
 using Phrases = std::vector<char const*>;
 
 Phrases const MORT_ENSEMBLE = {
-    "Je t'ai vu tomber face à {o}. J'ai bien cru te perdre, {j}.",
-    "{o} t'a mis{e} à terre sous mes yeux... La prochaine fois, je frappe le premier.",
-    "Pardon pour tout à l'heure, contre {o}. J'aurais dû être plus rapide.",
+    "Je t'ai vu{e} tomber face à {o}. J'ai bien cru te perdre, {j}.",
+    "{o} t'a mis{e} à terre sous mes yeux... La prochaine fois, je frappe d'abord.",
+    "Pardon, contre {o}... J'aurais dû être plus rapide.",
 };
 Phrases const MORT_ENSEMBLE_SANS = {
-    "Je t'ai vu tomber tout à l'heure. Ça m'a glacé le sang, {j}.",
+    "Je t'ai vu{e} tomber. Ça m'a glacé le sang, {j}.",
     "Tu es tombé{e} sous mes yeux... Ne me refais pas ça, d'accord ?",
 };
 Phrases const MORT_SEUL = {
@@ -308,12 +363,12 @@ Phrases const QUETE_ANCIEN = {
     "Je repensais à « {o} », l'autre jour. Le bon temps.",
 };
 Phrases const DANGER_ENSEMBLE = {
-    "Contre {o}, tout à l'heure... j'ai bien cru qu'on y restait.",
+    "Contre {o}... j'ai bien cru qu'on y restait.",
     "Tu as vu comme {o} nous a malmenés ? On s'en est sortis de justesse.",
-    "Ouf, {o}... Encore un peu et c'était fini. Reprends ton souffle, {j}.",
+    "Ouf, {o}... Encore un peu et c'était fini, {j}.",
 };
 Phrases const DANGER_ENSEMBLE_SANS = {
-    "Tout à l'heure, on a eu chaud. Reprends ton souffle, {j}.",
+    "On a eu chaud, toi et moi. J'y repense encore, {j}.",
 };
 Phrases const DANGER_SEUL = {
     "Il paraît que {o} t'a donné du fil à retordre. Tu t'en es sorti{e}, c'est l'essentiel.",
@@ -330,7 +385,7 @@ Phrases const DANGER_ANCIEN_SANS = {
 };
 Phrases const RECOLTE_ENSEMBLE = {
     "On en a passé, du temps à {v} du côté de {z}. J'en ai encore mal au dos !",
-    "Tout ce temps à {v} à {z}... Tu comptes ouvrir boutique, {j} ?",
+    "Tout ce temps à {v} du côté de {z}... Tu comptes ouvrir boutique, {j} ?",
 };
 Phrases const RECOLTE_SEUL = {
     "On m'a dit que tu passais des heures à {v} du côté de {z}. Ça rapporte ?",
@@ -348,7 +403,7 @@ Phrases const EXPLOIT_ENSEMBLE = {
 };
 Phrases const EXPLOIT_SEUL = {
     "Tu as abattu {o} ? Il faudra que tu me racontes ça !",
-    "La nouvelle court déjà : {o} est tombé, et c'est toi. Bravo, {j}.",
+    "Tu es venu{e} à bout de {o}, à ce qu'on raconte. Bravo, {j}.",
 };
 Phrases const EXPLOIT_ANCIEN = {
     "On parle encore de {o}, tu sais.",
@@ -409,7 +464,7 @@ std::string NomZone(uint32 zone)
 {
     AreaTableEntry const* a = zone ? sAreaTableStore.LookupEntry(zone) : nullptr;
     std::string const nom = a ? PlayerbotAI::GetLocalizedAreaName(a) : "";
-    return nom.empty() ? "là-bas" : nom;
+    return nom.empty() ? "ces contrées" : nom;
 }
 
 std::string Composer(char const* modele, Souvenir const& s, Player* humain)
@@ -438,7 +493,10 @@ std::string Composer(char const* modele, Souvenir const& s, Player* humain)
 
 // Le souvenir a dire, ou nullptr. Recents ensemble, puis recents vus de loin, puis anciens ; le plus recent d'abord ;
 // pas le meme genre que la derniere parole quand un autre se presente dans la meme classe.
-Souvenir* Choisir(Memoire& m, time_t maintenant, bool& ancien)
+// Revue du 27/10 (M5) : « ensemble » ne vaut que pour le compagnon qui l'a vecu.
+bool VecuPar(Souvenir const& s, uint32 bot) { return s.ensemble && s.bot == bot; }
+
+Souvenir* Choisir(Memoire& m, uint32 bot, time_t maintenant, bool& ancien)
 {
     Souvenir* meilleur = nullptr;
     int meilleurScore = 0;
@@ -448,9 +506,11 @@ Souvenir* Choisir(Memoire& m, time_t maintenant, bool& ancien)
         if (s.dit)
             continue;
         bool const vieux = maintenant - s.quand >= ANCIEN_S;
-        if (PhrasesDe(s, vieux).empty())
+        Souvenir vu = s;
+        vu.ensemble = VecuPar(s, bot);
+        if (PhrasesDe(vu, vieux).empty())
             continue;
-        int score = vieux ? 100 : (s.ensemble ? 300 : 200);
+        int score = vieux ? 100 : (vu.ensemble ? 300 : 200);
         if (m.aParle && s.genre == m.dernierGenre)
             score -= 50;
         // le plus recent l'emporte a score egal : seul un score strictement meilleur remplace
@@ -490,32 +550,29 @@ void Parler(uint32 humain, Memoire& m, time_t maintenant)
         return;
     }
     bool ancien = false;
-    Souvenir* s = Choisir(m, maintenant, ancien);
+    Souvenir* s = Choisir(m, bot, maintenant, ancien);
     if (!s)
     {
         m.prochaineParole = maintenant + REESSAI_VIDE_S;
         return;
     }
-    Phrases const& phrases = PhrasesDe(*s, ancien);
-    std::string const texte = Composer(phrases[urand(0, uint32(phrases.size() - 1))], *s, p);
+    Souvenir vu = *s;
+    vu.ensemble = VecuPar(*s, bot);
+    Phrases const& phrases = PhrasesDe(vu, ancien);
+    std::string const texte = Composer(phrases[urand(0, uint32(phrases.size() - 1))], vu, p);
     if (!ia->Whisper(texte, p->GetName()))
     {
         m.prochaineParole = maintenant + REESSAI_COMBAT_S;
         return;
     }
-    // Dit : celui-ci et ses doublons (meme genre, meme objet) ne reviendront pas.
-    for (Souvenir& autre : m.souvenirs)
-        if (autre.genre == s->genre && autre.objet == s->objet)
-            autre.dit = true;
-    CharacterDatabase.Execute(
-        "UPDATE coa_compagnon_souvenir SET dit_le = UTC_TIMESTAMP() WHERE humain_guid = {} AND genre = '{}'"
-        " AND objet = '{}' AND dit_le IS NULL",
-        humain, NomGenre(s->genre), Echapper(s->objet));
+    // Dit : celui-ci et ses doublons ne reviendront pas. (Whisper rend vrai des que le destinataire est trouve ; un
+    // filtre de chuchotements du joueur peut encore le taire : le souvenir est perdu, c'est accepte.)
+    MarquerDit(humain, m, vu.genre, vu.objet, vu.zone);
     LOG_INFO("playerbots", "coa compagnon: parole humain={} bot={} genre={} objet={} ensemble={} ancien={} age_s={} texte={}",
-             p->GetName(), b->GetName(), NomGenre(s->genre), s->objet, s->ensemble ? 1 : 0, ancien ? 1 : 0,
-             uint64(maintenant - s->quand), texte);
+             p->GetName(), b->GetName(), NomGenre(vu.genre), vu.objet, vu.ensemble ? 1 : 0, ancien ? 1 : 0,
+             uint64(maintenant - vu.quand), texte);
     m.aParle = true;
-    m.dernierGenre = s->genre;
+    m.dernierGenre = vu.genre;
     m.prochaineParole = maintenant + urand(sPlayerbotAIConfig.coaSouvenirsIntervalleMin,
                                            sPlayerbotAIConfig.coaSouvenirsIntervalleMax);
 }
@@ -543,9 +600,8 @@ void Surveiller(uint32 humain, Memoire& m, time_t maintenant, std::vector<Evenem
             m.enDanger = true;
             if (m.adversaire.empty())
             {
-                Unit* v = p->GetVictim();
-                if (!v && !p->getAttackers().empty())
-                    v = *p->getAttackers().begin();
+                // Celui qui le frappe d'abord, sa propre cible a defaut (revue du 27/10, m12).
+                Unit* v = p->getAttackers().empty() ? p->GetVictim() : *p->getAttackers().begin();
                 if (v)
                     m.adversaire = v->GetName();
             }
@@ -589,6 +645,8 @@ void TueParCreature(Creature* tueur, Player* humain)
 {
     if (!tueur || HorsMondeOuvert(humain))
         return;
+    // Le familier ou le totem d'un joueur : une mort JcJ, sans nom de creature (revue du 27/10, m3).
+    std::string nom = tueur->GetCharmerOrOwnerGUID().IsPlayer() ? "" : Tronquer(tueur->GetName());
     std::lock_guard<std::mutex> garde(gVerrou);
     if (gMorts.size() >= FILE_MAX)
         return;
@@ -596,7 +654,7 @@ void TueParCreature(Creature* tueur, Player* humain)
     if (!m.quand)
         m.quand = Maintenant();
     m.zone = humain->GetZoneId();
-    m.tueur = tueur->GetName();
+    m.tueur = std::move(nom);
 }
 
 void QueteFinie(Player* humain, Quest const* quete)
@@ -633,16 +691,48 @@ void Recolte(Player* humain, uint32 competence)
     Pousser(humain, Genre::Recolte, objet);
 }
 
+// Revue du 27/10 (M3) : en instance tout est elite ; seul un boss y est un exploit. Dehors : rare, boss du monde, ou
+// elite de son niveau ou plus.
+bool EstExploit(Player* tueur, Creature* victime)
+{
+    CreatureTemplate const* t = victime->GetCreatureTemplate();
+    if (!t)
+        return false;
+    Map* carte = victime->GetMap();
+    if (carte && carte->Instanceable())
+        return victime->IsDungeonBoss() || t->rank == CREATURE_ELITE_WORLDBOSS;
+    switch (t->rank)
+    {
+        case CREATURE_ELITE_RARE:
+        case CREATURE_ELITE_RAREELITE:
+        case CREATURE_ELITE_WORLDBOSS:
+            return victime->GetLevel() + 5 >= tueur->GetLevel();
+        case CREATURE_ELITE_ELITE:
+            return victime->GetLevel() >= tueur->GetLevel();
+        default:
+            return false;
+    }
+}
+
 void CreatureTuee(Player* humain, Creature* victime)
 {
-    if (!victime || HorsMondeOuvert(humain))
-        return;
-    CreatureTemplate const* t = victime->GetCreatureTemplate();
-    if (!t || t->rank == CREATURE_ELITE_NORMAL)
-        return;
-    if (victime->GetLevel() + 5 < humain->GetLevel())   // grise pour lui : pas un exploit
+    if (!victime || HorsMondeOuvert(humain) || !EstExploit(humain, victime))
         return;
     Pousser(humain, Genre::Exploit, victime->GetName());
+}
+
+void CreatureTueeParCompagnon(Player* compagnon, Creature* victime)
+{
+    if (!victime || HorsMondeOuvert(compagnon) || !EstExploit(compagnon, victime))
+        return;
+    Evenement e;
+    e.bot = compagnon->GetGUID().GetCounter();
+    e.genre = Genre::Exploit;
+    e.objet = Tronquer(victime->GetName());
+    e.zone = compagnon->GetZoneId();
+    std::lock_guard<std::mutex> garde(gVerrou);
+    if (gFile.size() < FILE_MAX)
+        gFile.push_back(std::move(e));
 }
 
 void NiveauPris(Player* humain) { Pousser(humain, Genre::Niveau, std::to_string(humain->GetLevel())); }
@@ -709,8 +799,8 @@ void MettreAJour(time_t maintenant)
     for (auto& [h, m] : gMemoires)
         if (m.present)
             Surveiller(h, m, maintenant, arrivees);
-    for (Evenement const& e : arrivees)
-        Noter(e, maintenant);
+    for (Evenement& e : arrivees)
+        Noter(std::move(e), maintenant);
     for (auto& [h, m] : gMemoires)
         if (m.present)
             Parler(h, m, maintenant);

@@ -16,7 +16,8 @@
  *     perdu (CoaEnroler le leve). ProcessBot et OnPlayerLoginError le reposent quand un compagnon sort sans nous.
  *  2. Un compagnon eveille ne reste pas en jeu sans son humain. Sa presence (« add ») est posee pour
  *     2 x Renouvellement et renouvelee par MettreAJour : si le renouvellement cesse, ProcessBot le deconnecte seul.
- *  3. Un compagnon ne change pas de niveau hors de l'XP : EstCompagnon est teste par la refonte periodique et la
+ *  3. Un compagnon ne change pas de niveau hors de l'XP et du rattrapage (lot 3, Rattraper, option Rattrapage : il
+ *     monte au niveau de son humain, jamais au-dessus, jamais de baisse) : EstCompagnon est teste par la refonte periodique et la
  *     teleportation (ProcessBot(Player*)), par les paliers (boucle, GetOrFlagPlayerBracket, AdjustBotToRange) et par
  *     la remise a zero (ResetBot, SkipBotLevel).
  *
@@ -201,6 +202,14 @@ bool Coucher(uint32 humain, uint32 bot)
     return false;
 }
 
+// Lot 3 (revue du 27/10, m4) : un bot qui sort de gEveilles mais reste en jeu (retenu par un groupe, retire) perd le
+// PLAYER_FLAGS_NO_XP_GAIN que Rattraper lui avait pose ; sinon il le garderait jusqu'a sa prochaine connexion.
+void LibererXp(uint32 bot)
+{
+    if (Player* b = ObjectAccessor::FindConnectedPlayer(Guid(bot)))   // jamais un bot de reserve (constitution)
+        b->RemovePlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);
+}
+
 // Un humain : personnage d'un compte qui n'est pas un compte de bots.
 bool CompteHumain(uint32 compte) { return compte && !sPlayerbotAIConfig.IsInRandomAccountList(compte); }
 
@@ -210,6 +219,7 @@ void Retirer(uint32 humain, Membre& m, char const* motif)
         return;
     m.etat = Etat::Retire;
     gEveilles.erase(m.bot);
+    LibererXp(m.bot);
     EnsembleRetirer(m.bot);
     CharacterDatabase.Execute(
         "UPDATE coa_compagnon SET etat = 'retire', motif_retrait = '{}' WHERE humain_guid = {} AND bot_guid = {}", motif,
@@ -219,7 +229,8 @@ void Retirer(uint32 humain, Membre& m, char const* motif)
 
 void EndormirBot(uint32 humain, uint32 bot, char const* motif, time_t maintenant)
 {
-    Coucher(humain, bot);
+    if (!Coucher(humain, bot))
+        LibererXp(bot);
     gEveilles.erase(bot);
     if (Membre* m = Trouver(humain, bot))
         if (m->etat == Etat::Eveille)
@@ -692,7 +703,11 @@ void MonterCompagnon(Player* b, Player* h)
 {
     uint32 const avant = b->GetLevel();
     uint32 const cible = h->GetLevel();
-    bool const equipement = cible - avant >= sPlayerbotAIConfig.coaCompagnonsRattrapageEquipement;
+    // Revue du 27/10 (M1) : l'ecart se compte depuis le dernier equipement refait, pas depuis le niveau d'avant (en
+    // progression normale, le compagnon monte d'un niveau a la fois et ne serait jamais reequipe).
+    uint32 const dernierEquipement = sRandomPlayerbotMgr.GetValue(b, "coa_equip_niv");
+    uint32 const base = dernierEquipement && dernierEquipement <= avant ? dernierEquipement : avant;
+    bool const equipement = cible - base >= sPlayerbotAIConfig.coaCompagnonsRattrapageEquipement;
     if (equipement && b->IsMounted())
         b->Dismount();
     sRandomPlayerbotMgr.SetValue(b, "randomize", 1);
@@ -703,7 +718,12 @@ void MonterCompagnon(Player* b, Player* h)
     fabrique.InitClassSpells();
     fabrique.InitAvailableSpells();
     if (equipement)
+    {
         fabrique.InitEquipment(true);
+        sRandomPlayerbotMgr.SetValue(b, "coa_equip_niv", cible);
+    }
+    else if (!dernierEquipement)
+        sRandomPlayerbotMgr.SetValue(b, "coa_equip_niv", avant);   // point de depart du compte
     fabrique.InitAmmo();
     fabrique.InitPet();
     EnsureCoaSpecialization(b);
@@ -1828,6 +1848,14 @@ uint32 CompagnonEveille(uint32 humainGuid)
         }
     }
     return meilleur;
+}
+
+uint32 HumainDuCompagnon(uint32 botGuid)
+{
+    if (!Actif())
+        return 0;
+    auto it = gEveilles.find(botGuid);
+    return it == gEveilles.end() ? 0 : it->second;
 }
 
 bool EstHumain(Player* p)

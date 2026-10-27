@@ -2301,13 +2301,16 @@ AiPlayerbot.CoaCompagnons.Rattrapage.Equipement = 3
 # ---- Souvenirs du compagnon (27/10/2026, src/Ai/Coa/CoaSouvenirs.cpp)
 # Le serveur note ce que vit chaque humain : morts (et qui l'a tue), quetes finies, moments
 # durs (vie sous 20 % en combat, puis sorti vivant), longues seances de recolte (minage,
-# herboristerie, depecage), elites et rares abattus, niveaux pris ; chacun « ensemble » si son
+# herboristerie, depecage), exploits (dehors : rare, boss du monde, elite de son niveau ;
+# en instance : boss seulement ; par lui, son familier ou son compagnon), niveaux pris ; chacun « ensemble » si son
 # compagnon eveille etait a moins de 80 m. Le compagnon eveille lui en chuchote un de temps en
 # temps, ensemble d'abord, le plus recent d'abord ; un souvenir de plus de 12 h revient en
 # « tu te souviens ? ». Jamais en combat. Table `coa_compagnon_souvenir` de la base personnages
 # (migration data/sql/characters/updates/2026_10_27_00_coa_compagnon_souvenir.sql, A APPLIQUER
 # AVANT d'allumer). Journal : « coa compagnon: souvenir » et « coa compagnon: parole ».
-# Enable : 0 (defaut) = inerte. Exige CoaCompagnons.Enable = 1 pour parler.
+# Vecu « ensemble » avec un compagnon, raconte par un autre : comme un souvenir vu de loin.
+# Enable : 0 (defaut) = inerte. Exige CoaCompagnons.Enable = 1 (sans lui, rien n'est note ni
+# dit). Allume par rechargement de la conf : seuls les humains connectes ensuite en profitent.
 AiPlayerbot.CoaCompagnons.Souvenirs.Enable = 0
 # Secondes entre le reveil du compagnon et sa premiere parole. Defaut : 300
 AiPlayerbot.CoaCompagnons.Souvenirs.PremiereParole = 300
