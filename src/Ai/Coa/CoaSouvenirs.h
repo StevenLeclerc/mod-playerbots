@@ -26,6 +26,9 @@ void TueParCreature(Creature* tueur, Player* humain);
 void QueteFinie(Player* humain, Quest const* quete);
 void Recolte(Player* humain, uint32 competence);
 void CreatureTuee(Player* humain, Creature* victime);
+// Coup fatal d'un COMPAGNON (l'appelant a verifie CoaCompagnons::EstCompagnon) : l'exploit va a son humain, resolu au
+// fil monde.
+void CreatureTueeParCompagnon(Player* compagnon, Creature* victime);
 void NiveauPris(Player* humain);
 
 // FIL MONDE. Appeles par CoaCompagnons (HumainConnecte / HumainDeconnecte / MettreAJour, une fois par seconde).

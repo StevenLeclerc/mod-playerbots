@@ -50,6 +50,8 @@ bool PlacementAutorise(uint32 botGuid);
 // FIL MONDE. Le compagnon allie EVEILLE de cet humain (guid bas ; le premier rang s'il y en a plusieurs), 0 sinon.
 // Eveille ne veut pas dire en jeu : sa connexion peut etre en cours. Lu par CoaSouvenirs.
 uint32 CompagnonEveille(uint32 humainGuid);
+// FIL MONDE. L'humain de ce compagnon EVEILLE (guid bas), 0 sinon. Lu par CoaSouvenirs (exploit du compagnon).
+uint32 HumainDuCompagnon(uint32 botGuid);
 // N'importe quel fil. Vrai pour un personnage d'un compte humain (ni session de bot, ni compte de bots aleatoires).
 bool EstHumain(Player* p);
 

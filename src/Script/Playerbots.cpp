@@ -91,6 +91,7 @@ public:
         PLAYERHOOK_ON_PLAYER_KILLED_BY_CREATURE,
         PLAYERHOOK_ON_PLAYER_COMPLETE_QUEST,
         PLAYERHOOK_ON_CREATURE_KILL,
+        PLAYERHOOK_ON_CREATURE_KILLED_BY_PET,
         PLAYERHOOK_ON_LEVEL_CHANGED,
         PLAYERHOOK_ON_UPDATE_GATHERING_SKILL
     }) {}
@@ -119,13 +120,23 @@ public:
 
     void OnPlayerCreatureKill(Player* killer, Creature* killed) override
     {
-        if (Souvenirs(killer))
+        if (!sPlayerbotAIConfig.coaSouvenirsEnable || !killer)
+            return;
+        if (CoaCompagnons::EstHumain(killer))
             CoaSouvenirs::CreatureTuee(killer, killed);
+        else if (CoaCompagnons::EstCompagnon(killer->GetGUID().GetCounter()))
+            CoaSouvenirs::CreatureTueeParCompagnon(killer, killed);   // l'humain se resout au fil monde
     }
 
-    void OnPlayerLevelChanged(Player* player, uint8 /*oldlevel*/) override
+    void OnPlayerCreatureKilledByPet(Player* owner, Creature* killed) override
     {
-        if (Souvenirs(player))
+        if (Souvenirs(owner))
+            CoaSouvenirs::CreatureTuee(owner, killed);
+    }
+
+    void OnPlayerLevelChanged(Player* player, uint8 oldlevel) override
+    {
+        if (Souvenirs(player) && player->GetLevel() > oldlevel)   // jamais une baisse (revue du 27/10, M4)
             CoaSouvenirs::NiveauPris(player);
     }
 
