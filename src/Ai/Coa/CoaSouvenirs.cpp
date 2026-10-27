@@ -32,6 +32,7 @@
 
 #include "CoaSouvenirs.h"
 
+#include "CharacterCache.h"
 #include "CoaCompagnons.h"
 #include "Creature.h"
 #include "DBCStores.h"
@@ -171,6 +172,15 @@ int gTable = 0;   // 0 : pas encore lue, 1 : presente, 2 : absente (inerte)
 
 time_t Maintenant() { return GameTime::GetGameTime().count(); }
 ObjectGuid Guid(uint32 bas) { return ObjectGuid::Create<HighGuid::Player>(bas); }
+
+// Nom du personnage pour le journal (cache des personnages, fil monde) ; « #guid » s'il est introuvable.
+std::string NomDe(uint32 bas)
+{
+    std::string nom;
+    if (!sCharacterCache->GetCharacterNameByGuid(Guid(bas), nom) || nom.empty())
+        return "#" + std::to_string(bas);
+    return nom;
+}
 
 bool TableOk()
 {
@@ -316,7 +326,7 @@ void Noter(Evenement e, time_t maintenant)
         " VALUES ({}, {}, '{}', '{}', {}, {}, UTC_TIMESTAMP())",
         e.humain, s.bot, NomGenre(e.genre), Echapper(e.objet),
         e.zone, s.ensemble ? 1 : 0);
-    LOG_INFO("playerbots", "coa compagnon: souvenir humain={} genre={} objet={} zone={} ensemble={}", e.humain,
+    LOG_INFO("playerbots", "coa compagnon: souvenir humain={} genre={} objet={} zone={} ensemble={}", NomDe(e.humain),
              NomGenre(e.genre), e.objet, e.zone, s.ensemble ? 1 : 0);
 }
 
