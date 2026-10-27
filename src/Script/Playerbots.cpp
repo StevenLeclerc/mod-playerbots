@@ -96,7 +96,8 @@ public:
         PLAYERHOOK_ON_LEVEL_CHANGED,
         PLAYERHOOK_ON_UPDATE_GATHERING_SKILL,
         // CoA (27/10/2026) : registre des humains morts a relever (Ai/Coa/CoaRelever.cpp).
-        PLAYERHOOK_ON_PLAYER_RESURRECT
+        PLAYERHOOK_ON_PLAYER_RESURRECT,
+        PLAYERHOOK_ON_PVP_KILL
     }) {}
 
     // CoA (27/10/2026) : ce que vit un humain, pour les souvenirs de son compagnon. Mis en file seulement (ces
@@ -115,6 +116,12 @@ public:
     void OnPlayerResurrect(Player* player, float /*restore_percent*/, bool& /*applySickness*/) override
     {
         CoaRelever::Releve(player);
+    }
+
+    // CoA (27/10/2026) : un humain tue par un joueur n'est pas releve par les bots (Ai/Coa/CoaRelever.cpp).
+    void OnPlayerPVPKill(Player* killer, Player* killed) override
+    {
+        CoaRelever::TueParJoueur(killer, killed);
     }
 
     void OnPlayerKilledByCreature(Creature* killer, Player* killed) override

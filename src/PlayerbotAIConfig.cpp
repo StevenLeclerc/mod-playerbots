@@ -1194,7 +1194,7 @@ bool PlayerbotAIConfig::Initialize()
     coaReleverPortee = std::clamp<float>(sConfigMgr->GetOption<float>("AiPlayerbot.Coa.Relever.Portee", 35.0f), 5.0f, 40.0f);
     coaReleverPorteeCompagnon =
         std::clamp<float>(sConfigMgr->GetOption<float>("AiPlayerbot.Coa.Relever.PorteeCompagnon", 60.0f), 5.0f, 100.0f);
-    coaReleverDelai = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.Relever.Delai", 30), 5, 600);
+    coaReleverDelai = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.Coa.Relever.Delai", 30), 12, 600);
 
     selfBotLevel =sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
     botTextLocale = sConfigMgr->GetOption<int32>("AiPlayerbot.BotTextLocale", -1);

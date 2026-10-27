@@ -2324,11 +2324,16 @@ AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMax = 2400
 # vanille comprises. Le compagnon eveille de l'humain passe en premier (les autres attendent
 # 15 s) ; un seul bot a la fois par corps. Un humain libere (fantome) est vise par son cadavre :
 # seuls les sorts a effet 113 a cible explicite y servent, et la distance compte au cadavre.
-# Jamais en champ de bataille, arene, duel, combat, vol ou taxi, ni pour un bot de banc, un
-# mercenaire ou un bot drapeau FFA ; un bot mene par un joueur ne releve que son maitre.
-# L'humain doit accepter la fenetre ; refusee, un autre essai vient Delai secondes plus tard.
+# Jamais en champ de bataille, arene, duel, combat, vol ou taxi, ni par un bot de banc ou un
+# mercenaire ; un bot mene par un joueur ne releve que son maitre et son groupe ; un bot en
+# mission du Directeur ou cible de banc ne releve que son humain. Jamais pour un humain tue par
+# un joueur, en JcJ libre (FFA) ou dont la resurrection est refusee (defi permadeath).
+# Une resurrection de combat (recharge > 60 s) n'est lancee que par le compagnon.
+# L'humain doit accepter la fenetre ; refusee, un autre essai vient Delai secondes plus tard,
+# au plus 2 fenetres par mort. Un bot renonce a une mort apres 2 approches abandonnees ou
+# lancers rates (4 pour le compagnon).
 # Journal : « coa relever: bot= humain= sort= distance= resultat= » (approche, lance, echec,
-# approche abandonnee, releve).
+# approche abandonnee, refus suppose, releve).
 # Enable : 0 (defaut) = inerte. La strategie « coa relever » n'est posee qu'a la composition du
 # bot (connexion, ResetStrategies) : allumer par rechargement n'agit que sur les bots composes
 # ensuite ; eteindre agit tout de suite.
@@ -2339,7 +2344,8 @@ AiPlayerbot.Coa.Relever.Etrangers = 0
 AiPlayerbot.Coa.Relever.Portee = 35
 # Yards du compagnon eveille au corps de son humain. Defaut : 60 (borne 5 a 100)
 AiPlayerbot.Coa.Relever.PorteeCompagnon = 60
-# Secondes entre deux lancers sur le meme corps (refus, sort coupe). Defaut : 30 (5 a 600)
+# Secondes entre deux lancers sur le meme corps (refus, sort coupe). Defaut : 30 (12 a 600 ; sous 12 s,
+# un second bot lancerait pendant l'incantation du premier, 8 a 10 s)
 AiPlayerbot.Coa.Relever.Delai = 30
 
 # ---------------------------------------------------------------------------- Arene1v1 (CoA)

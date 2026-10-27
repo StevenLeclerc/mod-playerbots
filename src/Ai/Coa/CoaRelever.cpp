@@ -28,6 +28,7 @@
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
+#include "ScriptMgr.h"
 #include "Spell.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
@@ -51,8 +52,24 @@ uint64 MaintenantMs()
                                    .count());
 }
 
-// Un bot garde le corps au plus ce temps (approche + incantation) ; au-dela, il l'abandonne et le Delai court.
+// Un bot garde le corps au plus ce temps (approche + incantation) ; au-dela, il l'abandonne et le Delai court. Le
+// compagnon vient de plus loin (PorteeCompagnon, jusqu'a 100 yards) : il a plus de temps.
 constexpr uint64 RESERVATION_MS = 30000;
+constexpr uint64 RESERVATION_COMPAGNON_MS = 45000;
+// Approches abandonnees ou lancers rates avant qu'un bot renonce a CETTE mort : un etranger vite, le compagnon tard
+// (un combat pendant l'approche fait echoir la reservation sans que le corps soit inaccessible).
+constexpr uint8 RATES_MAX_ETRANGER = 2;
+constexpr uint8 RATES_MAX_COMPAGNON = 4;
+// Lancers partis sur une meme mort : au-dela, l'humain a refuse (ou ne repond pas) ; on cesse de le solliciter.
+constexpr uint8 LANCERS_MAX = 2;
+// Sort a recharge plus longue (resurrection de combat : Rebirth 20484, Call of The Scourge 801792) : reserve au
+// compagnon, un etranger ne le grille pas hors combat.
+constexpr uint32 RECHARGE_LONGUE_MS = 60000;
+// Mort JcJ (OnPlayerPVPKill precede OnPlayerJustDied : Unit::Kill pose JustDied, KillPlayer vient au tick suivant de
+// Player::Update) : la marque est consommee par l'inscription si elle a moins de ce temps.
+constexpr uint64 MARQUE_JCJ_MS = 10000;
+// Liste des sorts de resurrection d'un bot : relue au plus tous les ...
+constexpr uint64 CACHE_SORTS_MS = 60000;
 // Quand l'humain a un compagnon eveille, les autres bots lui laissent ce temps apres la mort.
 constexpr uint64 ATTENTE_COMPAGNON_MS = 15000;
 // Un echec de lancer (bot qui se releve, incantation refusee) : nouvel essai plus tot que le Delai.
@@ -68,6 +85,11 @@ struct Entree
     std::string nom;            // de l'humain, pour le journal (lu a l'inscription, sur son fil)
     uint64 mortMs = 0;
     uint32 compagnon = 0;       // compagnon eveille (guid bas), recopie par le fil monde ; 0 sans compagnon
+    bool compagnonConnu = false;  // le fil monde a renseigne `compagnon` au moins une fois
+    bool jcj = false;           // tue par un joueur (ou un bot) : personne ne le releve devant son tueur
+    bool clos = false;          // LANCERS_MAX atteint sans resultat : plus aucun essai pour cette mort
+    int8 permise = -1;          // OnPlayerCanResurrect, lu une fois par mort (-1 : pas encore lu)
+    uint8 lancers = 0;
     uint32 lanceur = 0;         // bot qui tient la reservation (guid bas), 0 si libre
     std::string lanceurNom;
     uint64 reserveJusqua = 0;
@@ -76,13 +98,24 @@ struct Entree
     std::string dernierLanceurNom;
     uint32 dernierSort = 0;
     uint64 dernierEssaiMs = 0;
-    std::vector<uint32> abandons;  // bots qui ont abandonne l'approche de ce corps : plus jamais pour cette mort
+    std::unordered_map<uint32, uint8> rates;  // par bot : approches abandonnees + lancers rates sur cette mort
+    std::vector<uint32> annonces;              // bots dont l'« approche » est deja au journal pour cette mort
 };
 
 std::mutex gVerrou;
 std::unordered_map<uint32, Entree> gMorts;  // cle : guid bas de l'humain
+std::unordered_map<uint32, uint64> gJcJ;    // humain tue par un joueur -> date, en attente de son inscription
 std::atomic<uint32> gNombre{0};             // gMorts.size(), lu sans verrou par le declencheur
 uint32 gCumulMs = 0;                        // fil monde seul
+
+// Ce bot a-t-il renonce a cette mort ? Sous gVerrou.
+bool Renonce(Entree const& e, uint32 botLow)
+{
+    auto it = e.rates.find(botLow);
+    if (it == e.rates.end())
+        return false;
+    return it->second >= (botLow == e.compagnon ? RATES_MAX_COMPAGNON : RATES_MAX_ETRANGER);
+}
 
 void Inscrire(Player* humain)
 {
@@ -94,6 +127,12 @@ void Inscrire(Player* humain)
     e.guid = humain->GetGUID();
     e.nom = humain->GetName();
     e.mortMs = MaintenantMs();
+    auto jcj = gJcJ.find(humain->GetGUID().GetCounter());
+    if (jcj != gJcJ.end())
+    {
+        e.jcj = e.mortMs - jcj->second < MARQUE_JCJ_MS;
+        gJcJ.erase(jcj);
+    }
     gNombre.store(static_cast<uint32>(gMorts.size()));
 }
 
@@ -112,6 +151,7 @@ struct Candidat
 {
     ObjectGuid guid;
     bool compagnon;
+    int8 permise;
 };
 
 // Les bots qui ne doivent pas lever le petit doigt : combat, champ de bataille, duel, banc, vol, JcJ sauvage.
@@ -127,8 +167,10 @@ bool BotDisponible(PlayerbotAI* botAI, Player* bot)
         return false;
     if (bot->IsNonMeleeSpellCast(false) || bot->HasUnitState(UNIT_STATE_LOST_CONTROL))
         return false;
-    // Mercenaire et drapeau FFA (PlayerbotAI.cpp:425-436) : pas de soutien en JcJ sauvage.
-    if (bot->IsFFAPvP() || sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
+    // Mercenaire : pas de soutien en JcJ sauvage. PAS le drapeau FFA du bot : avec WildPvp.AllBotsAreTargets, il est pose
+    // sur tout bot sans maitre de niveau WildPvp.MinLevel ou plus hors sanctuaire (PlayerbotAI.cpp:425-439), compagnons
+    // compris ; l'ecarter rendait la fonction muette au-dessus du niveau 20. C'est l'humain FFA qui est ecarte (Choisir).
+    if (sPlayerbotAIConfig.IsMercenary(bot->GetGUID().GetRawValue()))
         return false;
     uint32 const botLow = bot->GetGUID().GetCounter();
     if (CoaGelBanc(bot) || CoaBancSoin::MembreEngage(botLow) || CoaArene1v1::GladiateurEngage(botLow))
@@ -173,9 +215,90 @@ SpellCastResult Verifier(Player* bot, SpellInfo const* info, Player* humain, Cor
     return r;
 }
 
+// Ce que les effets d'un sort disent de son usage pour relever un autre joueur.
+struct Analyse
+{
+    bool explicite = false;         // un effet 18/113 a cible explicite (TargetA nul)
+    bool nouveauExplicite = false;  // dont un 113 (seul a passer par le cadavre d'un fantome)
+    bool zone = false;              // resurrection de zone autour du lanceur
+    float rayon = 0.0f;
+};
+
+// Faux si le sort ne releve pas un autre joueur. Ne depend que du DBC (et du rayon modifie par le bot).
+bool Analyser(SpellInfo const* info, Player* bot, Analyse& a)
+{
+    a = Analyse();
+    if (!info || info->IsPassive() || !(info->Targets & TARGET_FLAG_CORPSE_ALLY))
+        return false;
+    bool soi = false;
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+    {
+        SpellEffectInfo const& eff = info->Effects[i];
+        if (eff.Effect == SPELL_EFFECT_SELF_RESURRECT)
+            soi = true;
+        if (eff.Effect != SPELL_EFFECT_RESURRECT && eff.Effect != SPELL_EFFECT_RESURRECT_NEW)
+            continue;
+        // TargetA nul : cible explicite (Resurrection 2006, Revivify 801790...). Defibrillate 802175 : 22/30,
+        // resurrection de zone autour du lanceur. Tout autre ciblage (Resynchronize 804495 : 22/33, groupe) est
+        // ecarte.
+        if (eff.TargetA.GetTarget() == 0)
+        {
+            a.explicite = true;
+            if (eff.Effect == SPELL_EFFECT_RESURRECT_NEW)
+                a.nouveauExplicite = true;
+        }
+        else if (eff.TargetA.GetTarget() == TARGET_SRC_CASTER && eff.TargetB.GetTarget() == TARGET_UNIT_SRC_AREA_ALLY)
+        {
+            a.zone = true;
+            a.rayon = std::max(a.rayon, eff.CalcRadius(bot));
+        }
+    }
+    // SELF_RESURRECT (94) : Reborn from Ash 804231, une auto-resurrection.
+    return !soi && (a.explicite || a.zone);
+}
+
+// Cache par bot de ses sorts de resurrection (ids), relu au plus tous les CACHE_SORTS_MS : sans lui, chaque bot proche
+// d'un mort (guerrier, voleur...) parcourait tout son livre chaque seconde pour ne rien trouver. Un bot qui apprend un
+// sort ou change de specialisation attend au plus CACHE_SORTS_MS. Taille bornee par le nombre de bots.
+struct CacheSorts
+{
+    uint64 jusqua = 0;
+    std::vector<uint32> ids;
+};
+std::mutex gVerrouCache;
+std::unordered_map<uint32, CacheSorts> gCache;
+
+std::vector<uint32> SortsDeRelever(Player* bot)
+{
+    uint32 const botLow = bot->GetGUID().GetCounter();
+    uint64 const maintenant = MaintenantMs();
+    {
+        std::lock_guard<std::mutex> verrou(gVerrouCache);
+        auto it = gCache.find(botLow);
+        if (it != gCache.end() && maintenant < it->second.jusqua)
+            return it->second.ids;
+    }
+    // Hors verrou : le livre du bot ne se lit que sur son fil (celui-ci).
+    std::vector<uint32> ids;
+    Analyse a;
+    for (auto const& [id, ps] : bot->GetSpellMap())
+    {
+        if (!ps || !bot->HasSpell(id))   // HasSpell : ni retire, ni rang inactif, ni autre specialisation
+            continue;
+        if (Analyser(sSpellMgr->GetSpellInfo(id), bot, a))
+            ids.push_back(id);
+    }
+    std::lock_guard<std::mutex> verrou(gVerrouCache);
+    CacheSorts& c = gCache[botLow];
+    c.jusqua = maintenant + CACHE_SORTS_MS;
+    c.ids = ids;
+    return ids;
+}
+
 // Le meilleur sort de resurrection du livre du bot pour ce corps, lu par ses effets ; nullptr s'il n'en a aucun
 // d'utilisable maintenant. `approche` recoit la distance de lancer.
-SpellInfo const* ChoisirSort(Player* bot, Player* humain, Corpse* cadavre, float& approche)
+SpellInfo const* ChoisirSort(Player* bot, Player* humain, Corpse* cadavre, bool compagnon, std::vector<uint32> const& sorts,
+                             float& approche)
 {
     struct Option
     {
@@ -185,43 +308,18 @@ SpellInfo const* ChoisirSort(Player* bot, Player* humain, Corpse* cadavre, float
     };
     std::vector<Option> options;
 
-    for (auto const& [id, ps] : bot->GetSpellMap())
+    for (uint32 id : sorts)
     {
-        if (!ps || !bot->HasSpell(id))   // HasSpell : ni retire, ni rang inactif, ni autre specialisation
+        if (!bot->HasSpell(id))   // desappris depuis la mise en cache
             continue;
         SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
-        if (!info || info->IsPassive() || !(info->Targets & TARGET_FLAG_CORPSE_ALLY))
+        Analyse an;
+        if (!Analyser(info, bot, an))
             continue;
-
-        bool soi = false, explicite = false, zone = false, nouveauExplicite = false;
-        float rayon = 0.0f;
-        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
-        {
-            SpellEffectInfo const& eff = info->Effects[i];
-            if (eff.Effect == SPELL_EFFECT_SELF_RESURRECT)
-                soi = true;
-            if (eff.Effect != SPELL_EFFECT_RESURRECT && eff.Effect != SPELL_EFFECT_RESURRECT_NEW)
-                continue;
-            // TargetA nul : cible explicite (Resurrection 2006, Revivify 801790...). Defibrillate 802175 : 22/30,
-            // resurrection de zone autour du lanceur. Tout autre ciblage (Resynchronize 804495 : 22/33, groupe) est
-            // ecarte.
-            if (eff.TargetA.GetTarget() == 0)
-            {
-                explicite = true;
-                if (eff.Effect == SPELL_EFFECT_RESURRECT_NEW)
-                    nouveauExplicite = true;
-            }
-            else if (eff.TargetA.GetTarget() == TARGET_SRC_CASTER && eff.TargetB.GetTarget() == TARGET_UNIT_SRC_AREA_ALLY)
-            {
-                zone = true;
-                rayon = std::max(rayon, eff.CalcRadius(bot));
-            }
-        }
-        // SELF_RESURRECT (94) : Reborn from Ash 804231, une auto-resurrection.
-        if (soi || (!explicite && !zone))
-            continue;
+        bool const explicite = an.explicite;
+        float const rayon = an.rayon;
         // Fantome : seule la cible cadavre d'un effet 113 explicite passe (Spell::CheckEffectTarget).
-        if (cadavre && !nouveauExplicite)
+        if (cadavre && !an.nouveauExplicite)
             continue;
 
         float a = 0.0f;
@@ -236,11 +334,21 @@ SpellInfo const* ChoisirSort(Player* bot, Player* humain, Corpse* cadavre, float
 
         if (bot->HasSpellCooldown(id))
             continue;
+        uint32 const recharge = std::max<uint32>(info->RecoveryTime, info->CategoryRecoveryTime);
+        if (recharge > RECHARGE_LONGUE_MS && !compagnon)
+            continue;
         // CheckCast est fait plus bas SANS cout (TRIGGERED_IGNORE_POWER_AND_REAGENT_COST) : cout et composants ici.
         if (info->PowerType < MAX_POWERS)
         {
             int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
             if (cout > 0 && static_cast<int32>(bot->GetPower(Powers(info->PowerType))) < cout)
+                continue;
+        }
+        else if (info->PowerType == POWER_HEALTH)
+        {
+            // Cout en vie : le bot ne se tue pas pour relever.
+            int32 const cout = info->CalcPowerCost(bot, info->GetSchoolMask());
+            if (cout > 0 && static_cast<int64>(bot->GetHealth()) <= cout)
                 continue;
         }
         bool composants = true;
@@ -250,7 +358,6 @@ SpellInfo const* ChoisirSort(Player* bot, Player* humain, Corpse* cadavre, float
         if (!composants)
             continue;
 
-        bool const recharge = info->RecoveryTime || info->CategoryRecoveryTime;
         options.push_back({info, a, std::make_tuple(recharge ? 0 : 1, info->SpellLevel, info->Id)});
     }
 
@@ -272,40 +379,61 @@ bool Choisir(PlayerbotAI* botAI, Player* bot, Choix& choix)
     uint32 const botLow = bot->GetGUID().GetCounter();
     uint64 const maintenant = MaintenantMs();
     bool const etrangers = sPlayerbotAIConfig.coaReleverEtrangers;
+    // Sans Etrangers, seul un compagnon (ou bot de reserve) peut agir : les autres sortent sans prendre le verrou.
+    if (!etrangers && !CoaCompagnons::EstCompagnon(botLow))
+        return false;
+    // Sans sort de resurrection (cache), rien a faire : pas de verrou, pas de lecture du livre.
+    std::vector<uint32> const sorts = SortsDeRelever(bot);
+    if (sorts.empty())
+        return false;
+    // Bot en mission du Directeur (convoi, assaut, garde) ou cible de banc : il ne la quitte que pour SON humain
+    // (meme garde que CoaHotelDesVentes.cpp:858).
+    bool const missionne = CoaDirecteur::AffectationDe(botLow, nullptr) || CoaDirecteur::CibleDeBanc(botLow);
 
     std::vector<Candidat> candidats;
     {
         std::lock_guard<std::mutex> verrou(gVerrou);
         for (auto& [low, e] : gMorts)
         {
-            // Reservation echue sans lancer : le bot a abandonne (chemin impossible, combat...). Le Delai court.
+            // Reservation echue sans lancer : le bot a abandonne (chemin impossible, combat...). Il y renonce apres
+            // RATES_MAX_* fois (corps sous l'eau, sur une corniche...) ; le Delai court pour tous.
             if (e.lanceur && e.reserveJusqua <= maintenant)
             {
-                LOG_INFO("playerbots", "coa relever: bot={} humain={} sort=0 distance=0 resultat=approche abandonnee",
-                         e.lanceurNom, e.nom);
-                // Corps inaccessible pour CE bot (sous l'eau, sur une corniche...) : il ne s'y essaie plus, sinon
-                // il recommencerait la meme approche a chaque Delai tant que l'humain reste mort.
-                e.abandons.push_back(e.lanceur);
+                uint32 const abandonneur = e.lanceur;
+                ++e.rates[abandonneur];
+                LOG_INFO("playerbots", "coa relever: bot={} humain={} sort=0 distance=0 resultat=approche abandonnee{}",
+                         e.lanceurNom, e.nom, Renonce(e, abandonneur) ? " (renonce a cette mort)" : "");
                 e.lanceur = 0;
                 e.lanceurNom.clear();
                 e.prochainEssai = maintenant + uint64(sPlayerbotAIConfig.coaReleverDelai) * 1000;
             }
+            if (e.clos || e.jcj || e.permise == 0)
+                continue;
             if (maintenant < e.prochainEssai)
                 continue;
-            if (std::find(e.abandons.begin(), e.abandons.end(), botLow) != e.abandons.end())
+            // LANCERS_MAX fenetres envoyees, Delai ecoule, toujours mort : refus (ou absence). On cesse.
+            if (e.lancers >= LANCERS_MAX)
+            {
+                e.clos = true;
+                LOG_INFO("playerbots", "coa relever: bot={} humain={} sort={} distance=0 resultat=refus suppose ({} lancers)",
+                         e.dernierLanceurNom, e.nom, e.dernierSort, e.lancers);
+                continue;
+            }
+            if (Renonce(e, botLow))
                 continue;
             bool const compagnon = e.compagnon && e.compagnon == botLow;
             if (!compagnon)
             {
-                if (!etrangers)
+                if (!etrangers || missionne)
                     continue;
-                if (e.compagnon && maintenant - e.mortMs < ATTENTE_COMPAGNON_MS)
+                // Tant que le fil monde n'a pas dit s'il y a un compagnon (jusqu'a 1 s apres la mort), on le suppose.
+                if ((!e.compagnonConnu || e.compagnon) && maintenant - e.mortMs < ATTENTE_COMPAGNON_MS)
                     continue;
             }
             // Un autre bot tient le corps ; seul le compagnon le lui reprend.
             if (e.lanceur && e.lanceur != botLow && !(compagnon && e.lanceur != e.compagnon))
                 continue;
-            candidats.push_back({e.guid, compagnon});
+            candidats.push_back({e.guid, compagnon, e.permise});
         }
     }
     if (candidats.empty())
@@ -326,12 +454,35 @@ bool Choisir(PlayerbotAI* botAI, Player* bot, Choix& choix)
         // Demande deja posee (fenetre ouverte chez l'humain, par un bot ou un joueur) ; aura qui interdit.
         if (humain->isResurrectRequested() || humain->HasPreventResurectionAura())
             continue;
+        // Un module refuse sa resurrection (mod-coa-challenges : echec permadeath, CoA.Challenges.Scripts.cpp:942) :
+        // ResurrectPlayer sortirait sans rien faire (Player.cpp:4717), la fenetre reviendrait sans fin. Lu UNE fois par
+        // mort, ici et non a l'inscription : le defi note l'echec dans son propre OnPlayerJustDied (ordre des crochets
+        // inconnu), et sa reponse coute une requete SYNCHRONE en base (CoA.Challenges.Lifecycle.cpp:605-617).
+        if (c.permise < 0)
+        {
+            bool const permise = sScriptMgr->OnPlayerCanResurrect(humain);
+            std::lock_guard<std::mutex> verrou(gVerrou);
+            auto it = gMorts.find(humain->GetGUID().GetCounter());
+            if (it != gMorts.end())
+                it->second.permise = permise ? 1 : 0;
+            if (!permise)
+            {
+                LOG_INFO("playerbots", "coa relever: bot={} humain={} sort=0 distance=0 resultat=resurrection interdite",
+                         bot->GetName(), humain->GetName());
+                continue;
+            }
+        }
+        else if (c.permise == 0)
+            continue;
+        // Humain en JcJ libre (drapeau FFA) : le relever devant ses adversaires n'est pas un service.
+        if (humain->IsFFAPvP())
+            continue;
         if (humain->GetTeamId() != bot->GetTeamId() || bot->IsHostileTo(humain))
             continue;
         if (humain->InBattleground() || humain->InArena())
             continue;
-        // Bot mene par un joueur : il ne releve que son maitre.
-        if (botAI->HasGameClientMaster() && botAI->GetMaster() != humain)
+        // Bot mene par un joueur : il ne releve que son maitre et les humains de son groupe.
+        if (botAI->HasGameClientMaster() && botAI->GetMaster() != humain && !bot->IsInSameGroupWith(humain))
             continue;
         if (chasseur && proie == humain->GetGUID().GetCounter())
             continue;
@@ -352,7 +503,7 @@ bool Choisir(PlayerbotAI* botAI, Player* bot, Choix& choix)
             continue;
 
         float approche = 0.0f;
-        SpellInfo const* sort = ChoisirSort(bot, humain, cadavre, approche);
+        SpellInfo const* sort = ChoisirSort(bot, humain, cadavre, c.compagnon, sorts, approche);
         if (!sort)
             continue;
 
@@ -367,8 +518,8 @@ bool Choisir(PlayerbotAI* botAI, Player* bot, Choix& choix)
     return trouve;
 }
 
-// Pose (ou garde) la reservation de ce corps pour ce bot. Vrai si le bot la tient ; `nouvelle` : il vient de la
-// prendre (journal « approche »).
+// Pose (ou garde) la reservation de ce corps pour ce bot. Vrai si le bot la tient ; `nouvelle` : il la prend pour la
+// premiere fois sur cette mort (journal « approche », une fois par bot et par mort).
 bool Reserver(uint32 humainLow, Player* bot, bool compagnon, bool& nouvelle)
 {
     nouvelle = false;
@@ -379,9 +530,9 @@ bool Reserver(uint32 humainLow, Player* bot, bool compagnon, bool& nouvelle)
     if (it == gMorts.end())
         return false;
     Entree& e = it->second;
-    if (maintenant < e.prochainEssai)
+    if (e.clos || e.jcj || maintenant < e.prochainEssai || e.lancers >= LANCERS_MAX)
         return false;
-    if (std::find(e.abandons.begin(), e.abandons.end(), botLow) != e.abandons.end())
+    if (Renonce(e, botLow))
         return false;
     if (e.lanceur == botLow && e.reserveJusqua > maintenant)
         return true;   // garde l'echeance d'origine : une approche ne se prolonge pas
@@ -398,8 +549,12 @@ bool Reserver(uint32 humainLow, Player* bot, bool compagnon, bool& nouvelle)
         }
     e.lanceur = botLow;
     e.lanceurNom = bot->GetName();
-    e.reserveJusqua = maintenant + RESERVATION_MS;
-    nouvelle = true;
+    e.reserveJusqua = maintenant + (compagnon ? RESERVATION_COMPAGNON_MS : RESERVATION_MS);
+    if (std::find(e.annonces.begin(), e.annonces.end(), botLow) == e.annonces.end())
+    {
+        e.annonces.push_back(botLow);
+        nouvelle = true;
+    }
     return true;
 }
 
@@ -416,6 +571,7 @@ void ApresEssai(uint32 humainLow, Player* bot, uint32 sortId, bool lance)
     e.reserveJusqua = 0;
     if (lance)
     {
+        ++e.lancers;
         e.prochainEssai = maintenant + uint64(sPlayerbotAIConfig.coaReleverDelai) * 1000;
         e.dernierLanceur = bot->GetGUID().GetCounter();
         e.dernierLanceurNom = bot->GetName();
@@ -423,7 +579,12 @@ void ApresEssai(uint32 humainLow, Player* bot, uint32 sortId, bool lance)
         e.dernierEssaiMs = maintenant;
     }
     else
+    {
+        // Echec persistant (ligne de vue vue autrement par le coeur, refus au prepare...) : ce bot y renonce apres
+        // RATES_MAX_* echecs, au lieu de boucler toutes les 10 s.
+        ++e.rates[bot->GetGUID().GetCounter()];
         e.prochainEssai = maintenant + std::min<uint64>(REESSAI_ECHEC_MS, uint64(sPlayerbotAIConfig.coaReleverDelai) * 1000);
+    }
 }
 }  // namespace
 
@@ -458,6 +619,22 @@ void Releve(Player* humain)
     gNombre.store(static_cast<uint32>(gMorts.size()));
 }
 
+void TueParJoueur(Player* tueur, Player* tue)
+{
+    if (!sPlayerbotAIConfig.coaReleverEnable || !tueur || !tue || tueur == tue || !CoaCompagnons::EstHumain(tue))
+        return;
+    uint32 const low = tue->GetGUID().GetCounter();
+    uint64 const maintenant = MaintenantMs();
+    std::lock_guard<std::mutex> verrou(gVerrou);
+    auto it = gMorts.find(low);
+    // Ordre normal : ce crochet (Unit::Kill) precede l'inscription (KillPlayer au tick suivant) ; par prudence, une
+    // inscription toute fraiche est marquee directement.
+    if (it != gMorts.end() && maintenant - it->second.mortMs < MARQUE_JCJ_MS)
+        it->second.jcj = true;
+    else
+        gJcJ[low] = maintenant;
+}
+
 void HumainConnecte(Player* humain)
 {
     if (!sPlayerbotAIConfig.coaReleverEnable || !humain || humain->IsAlive() || !CoaCompagnons::EstHumain(humain))
@@ -472,7 +649,17 @@ void MettreAJour(uint32 diff)
         return;
     gCumulMs = 0;
     if (gNombre.load() == 0)
+    {
+        // Purge des marques JcJ meme registre vide (un humain tue en champ de bataille n'est jamais inscrit).
+        std::lock_guard<std::mutex> verrou(gVerrou);
+        if (!gJcJ.empty())
+        {
+            uint64 const maintenant = MaintenantMs();
+            for (auto it = gJcJ.begin(); it != gJcJ.end();)
+                it = maintenant - it->second > MARQUE_JCJ_MS ? gJcJ.erase(it) : std::next(it);
+        }
         return;
+    }
 
     uint64 const maintenant = MaintenantMs();
     std::lock_guard<std::mutex> verrou(gVerrou);
@@ -486,8 +673,12 @@ void MettreAJour(uint32 diff)
             continue;
         }
         e.compagnon = CoaCompagnons::CompagnonEveille(it->first);
+        e.compagnonConnu = true;
         ++it;
     }
+    // Marques JcJ jamais consommees (mort en champ de bataille, option rallumee entre-temps...).
+    for (auto it = gJcJ.begin(); it != gJcJ.end();)
+        it = maintenant - it->second > MARQUE_JCJ_MS ? gJcJ.erase(it) : std::next(it);
     gNombre.store(static_cast<uint32>(gMorts.size()));
 }
 }  // namespace CoaRelever

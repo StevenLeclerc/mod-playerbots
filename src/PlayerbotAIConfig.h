@@ -1006,7 +1006,7 @@ public:
     bool coaReleverEtrangers;              // defaut faux : seul le compagnon eveille releve son humain
     float coaReleverPortee;                // yards bot -> corps pour un bot quelconque (defaut 35, 5..40)
     float coaReleverPorteeCompagnon;       // yards bot -> corps pour le compagnon (defaut 60, 5..100)
-    uint32 coaReleverDelai;                // secondes entre deux lancers sur le meme corps (defaut 30, 5..600)
+    uint32 coaReleverDelai;                // secondes entre deux lancers sur le meme corps (defaut 30, 12..600)
 
 private:
     PlayerbotAIConfig() = default;

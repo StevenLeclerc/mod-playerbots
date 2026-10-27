@@ -16,7 +16,12 @@
  *  - le COMPAGNON eveille de l'humain passe en premier (portee PorteeCompagnon, preemption de la reservation, les
  *    autres bots attendent ATTENTE_COMPAGNON) ; avec Etrangers = 1, tout bot de la meme faction a moins de Portee
  *    yards du corps peut relever aussi ;
- *  - un seul bot a la fois par corps (reservation bornee dans le temps), Delai secondes entre deux essais ;
+ *  - un seul bot a la fois par corps (reservation bornee dans le temps), Delai secondes entre deux essais ; un bot
+ *    renonce a une mort apres 2 approches abandonnees ou lancers rates (4 pour le compagnon) ; au plus 2 fenetres
+ *    par mort (au-dela : refus suppose, on cesse) ;
+ *  - jamais pour un humain tue par un joueur, en JcJ libre (FFA), ou dont la resurrection est refusee par un module
+ *    (OnPlayerCanResurrect) ; un bot en mission du Directeur ou cible de banc ne releve que son humain ; un sort a
+ *    recharge de plus de 60 s (resurrection de combat) est reserve au compagnon ;
  *  - le sort est lu dans le livre du bot par ses EFFETS DBC (SPELL_EFFECT_RESURRECT 18, RESURRECT_NEW 113 ; tout sort
  *    portant SELF_RESURRECT 94 est ecarte), jamais par une liste d'ids ;
  *  - un humain LIBERE (fantome) est vise par son CADAVRE (SpellCastTargets::SetCorpseTarget) : seule voie du coeur qui
@@ -49,6 +54,9 @@ namespace CoaRelever
 void Mort(Player* humain);
 // N'importe quel fil. Crochet OnPlayerResurrect : retire l'humain du registre, journal « releve ».
 void Releve(Player* humain);
+// N'importe quel fil. Crochet OnPlayerPVPKill : un humain tue par un joueur (ou un bot) n'est releve par personne
+// (sinon : releve devant son tueur, retue, et ainsi de suite).
+void TueParJoueur(Player* tueur, Player* tue);
 // N'importe quel fil. Crochet OnPlayerLogin : un humain qui se connecte mort (fantome) est inscrit.
 void HumainConnecte(Player* humain);
 // FIL MONDE (PlayerbotsWorldScript::OnUpdate). Une fois par seconde : compagnon eveille de chaque mort, purge des
