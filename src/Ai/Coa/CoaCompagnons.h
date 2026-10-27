@@ -47,6 +47,12 @@ bool EstReserve(uint32 botGuid);
 // reserve de l'autre faction) : RandomTeleport laisse alors passer ce bot malgre EstCompagnon.
 bool PlacementAutorise(uint32 botGuid);
 
+// FIL MONDE. Le compagnon allie EVEILLE de cet humain (guid bas ; le premier rang s'il y en a plusieurs), 0 sinon.
+// Eveille ne veut pas dire en jeu : sa connexion peut etre en cours. Lu par CoaSouvenirs.
+uint32 CompagnonEveille(uint32 humainGuid);
+// N'importe quel fil. Vrai pour un personnage d'un compte humain (ni session de bot, ni compte de bots aleatoires).
+bool EstHumain(Player* p);
+
 // FIL MONDE, au demarrage (RandomPlayerbotMgr::Init, avant le premier tirage) : lit le registre, retire les bots
 // supprimes, purge les lignes d'un humain supprime, et remet TOUT le registre en sommeil. Init repasse ici a chaque
 // recharge de la conf : AiPlayerbot.CoaCompagnons.Enable est fige au premier appel, et un registre deja charge est

@@ -13,6 +13,7 @@
 #include "CoaCompagnons.h"
 #include "CoaDirecteur.h"
 #include "CoaPostes.h"
+#include "CoaSouvenirs.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "DatabaseLoader.h"
@@ -84,8 +85,56 @@ public:
         PLAYERHOOK_ON_GIVE_EXP,
         PLAYERHOOK_ON_UPDATE_ZONE,
         PLAYERHOOK_ON_LOOT_ITEM,
-        PLAYERHOOK_ON_BEFORE_TELEPORT
+        PLAYERHOOK_ON_BEFORE_TELEPORT,
+        // CoA (27/10/2026) : souvenirs du compagnon (Ai/Coa/CoaSouvenirs.cpp), humains seulement.
+        PLAYERHOOK_ON_PLAYER_JUST_DIED,
+        PLAYERHOOK_ON_PLAYER_KILLED_BY_CREATURE,
+        PLAYERHOOK_ON_PLAYER_COMPLETE_QUEST,
+        PLAYERHOOK_ON_CREATURE_KILL,
+        PLAYERHOOK_ON_LEVEL_CHANGED,
+        PLAYERHOOK_ON_UPDATE_GATHERING_SKILL
     }) {}
+
+    // CoA (27/10/2026) : ce que vit un humain, pour les souvenirs de son compagnon. Mis en file seulement (ces
+    // crochets tournent dans les fils de carte) ; CoaSouvenirs::MettreAJour le traite au fil monde.
+    static bool Souvenirs(Player* p) { return sPlayerbotAIConfig.coaSouvenirsEnable && CoaCompagnons::EstHumain(p); }
+
+    void OnPlayerJustDied(Player* player) override
+    {
+        if (Souvenirs(player))
+            CoaSouvenirs::Mort(player);
+    }
+
+    void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
+    {
+        if (Souvenirs(killed))
+            CoaSouvenirs::TueParCreature(killer, killed);
+    }
+
+    void OnPlayerCompleteQuest(Player* player, Quest const* quest) override
+    {
+        if (Souvenirs(player))
+            CoaSouvenirs::QueteFinie(player, quest);
+    }
+
+    void OnPlayerCreatureKill(Player* killer, Creature* killed) override
+    {
+        if (Souvenirs(killer))
+            CoaSouvenirs::CreatureTuee(killer, killed);
+    }
+
+    void OnPlayerLevelChanged(Player* player, uint8 /*oldlevel*/) override
+    {
+        if (Souvenirs(player))
+            CoaSouvenirs::NiveauPris(player);
+    }
+
+    void OnPlayerUpdateGatheringSkill(Player* player, uint32 skill_id, uint32 /*current*/, uint32 /*gray*/,
+                                      uint32 /*green*/, uint32 /*yellow*/, uint32& /*gain*/) override
+    {
+        if (Souvenirs(player))
+            CoaSouvenirs::Recolte(player, skill_id);
+    }
 
     // What the bots bring back. Only the finds worth a line, and only from bots: a server watching
     // its bots wants to know what dropped, not to read every piece of linen cloth. The bar is

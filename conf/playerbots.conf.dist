@@ -2288,6 +2288,33 @@ AiPlayerbot.CoaCompagnons.Reserve.MaxEveilles = 48
 # de bots n'est pas repris avant 15 min. Defaut : 0
 AiPlayerbot.CoaCompagnons.Reserve.SeuilConstitution = 0
 
+# ---- Rattrapage de niveau du compagnon (lot 3, 27/10/2026)
+# Un compagnon eveille sous le niveau de son humain monte a son niveau des qu'il est en jeu,
+# hors combat et hors vol (GiveLevel + competences + sorts, comme .coa niveau ; ni Randomize
+# ni changement de spe ; ses points de talent sont places comme a toute montee). Au niveau de
+# son humain, il ne gagne plus d'XP (PLAYER_FLAGS_NO_XP_GAIN) : jamais devant lui. Equipement
+# refait seulement si l'ecart atteint Rattrapage.Equipement niveaux. Journal :
+# « coa compagnon: rattrapage ».
+AiPlayerbot.CoaCompagnons.Rattrapage = 0
+AiPlayerbot.CoaCompagnons.Rattrapage.Equipement = 3
+
+# ---- Souvenirs du compagnon (27/10/2026, src/Ai/Coa/CoaSouvenirs.cpp)
+# Le serveur note ce que vit chaque humain : morts (et qui l'a tue), quetes finies, moments
+# durs (vie sous 20 % en combat, puis sorti vivant), longues seances de recolte (minage,
+# herboristerie, depecage), elites et rares abattus, niveaux pris ; chacun « ensemble » si son
+# compagnon eveille etait a moins de 80 m. Le compagnon eveille lui en chuchote un de temps en
+# temps, ensemble d'abord, le plus recent d'abord ; un souvenir de plus de 12 h revient en
+# « tu te souviens ? ». Jamais en combat. Table `coa_compagnon_souvenir` de la base personnages
+# (migration data/sql/characters/updates/2026_10_27_00_coa_compagnon_souvenir.sql, A APPLIQUER
+# AVANT d'allumer). Journal : « coa compagnon: souvenir » et « coa compagnon: parole ».
+# Enable : 0 (defaut) = inerte. Exige CoaCompagnons.Enable = 1 pour parler.
+AiPlayerbot.CoaCompagnons.Souvenirs.Enable = 0
+# Secondes entre le reveil du compagnon et sa premiere parole. Defaut : 300
+AiPlayerbot.CoaCompagnons.Souvenirs.PremiereParole = 300
+# Secondes entre deux paroles, tirees entre Min et Max. Defauts : 1200 et 2400
+AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMin = 1200
+AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMax = 2400
+
 # ---------------------------------------------------------------------------- Arene1v1 (CoA)
 # Escarmouche 1 contre 1 NON classee : un joueur humain contre un bot d'une classe CoA,
 # le « gladiateur », mis a son niveau (niveau, sorts, talents, equipement) a l'inscription.
