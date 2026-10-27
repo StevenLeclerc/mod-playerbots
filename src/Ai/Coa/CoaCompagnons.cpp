@@ -5,7 +5,8 @@
  * `coa_compagnon`), sa constitution automatique, le reveil a la connexion de l'humain, le sommeil apres son depart,
  * les exemptions (tirage, paliers, remise a zero du niveau, refonte, teleportation aleatoire), les commandes
  * `.coa compagnon liste|eveiller|endormir` et le journal « coa compagnon: ». Ce qu'il ne fait PAS : ni XP, ni
- * rattrapage de niveau, ni placement pres du joueur, ni Directeur, ni panneau (lots 2 a 5).
+ * placement pres du joueur, ni Directeur, ni panneau (lots 2 a 5). Le rattrapage de niveau (lot 3) est venu le 27/10 :
+ * Rattraper, plus bas (option Rattrapage) ; les souvenirs aussi, dans CoaSouvenirs.cpp.
  *
  * LES TROIS GARANTIES, ET CE QUI LES TIENT
  *
@@ -33,6 +34,7 @@
 #include "CoaDirecteur.h"
 #include "CoaGelBanc.h"
 #include "CoaSpecialization.h"
+#include "CoaSouvenirs.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Group.h"
@@ -569,7 +571,8 @@ void Reveiller(time_t maintenant)
             "UPDATE coa_compagnon SET etat = 'eveille', dernier_eveil = UTC_TIMESTAMP(), niveau_reveil = {}"
             " WHERE humain_guid = {} AND bot_guid = {}",
             uint32(e->Level), humain, bot);
-        // niv=<a>-><b> : le lot 1 ne rattrape rien, a et b sont egaux ; le lot 3 y ecrira le rattrapage.
+        // niv=<a>-><b> : le niveau a la connexion ; le rattrapage (lot 3) a lieu une fois le bot en jeu (Rattraper) et
+        // ecrit sa propre ligne « coa compagnon: rattrapage ».
         LOG_INFO("playerbots", "coa compagnon: eveil humain={} bot={} camp={} niv={}->{}", NomDe(humain), e->Name,
                  NomCamp(m->camp), uint32(e->Level), uint32(e->Level));
 
@@ -679,6 +682,72 @@ void Relever(time_t maintenant)
              presents, uint32(gSeances.size()), uint32(gEveilles.size()), uint32(gEnFile.size()), enRetard, devant,
              uint32(gRetenus.size()));
     (void)maintenant;
+}
+
+// Lot 3 (27/10/2026) : la recette de Monter (reserve) et de `.coa niveau`, au niveau de l'humain. GiveLevel, puis
+// competences, sorts de classe, sorts disponibles, munitions, familier ; l'equipement seulement si l'ecart atteint
+// Rattrapage.Equipement (InitEquipment incremental : il ne remplace que par mieux). Ni Randomize ni InitTalentsTree :
+// la spe ne change pas, les points du nouveau niveau sont places comme a toute montee.
+void MonterCompagnon(Player* b, Player* h)
+{
+    uint32 const avant = b->GetLevel();
+    uint32 const cible = h->GetLevel();
+    bool const equipement = cible - avant >= sPlayerbotAIConfig.coaCompagnonsRattrapageEquipement;
+    if (equipement && b->IsMounted())
+        b->Dismount();
+    sRandomPlayerbotMgr.SetValue(b, "randomize", 1);
+    sRandomPlayerbotMgr.SetValue(b, "level", cible);
+    b->GiveLevel(uint8(cible));
+    PlayerbotFactory fabrique(b, cible, 0);
+    fabrique.InitSkills();
+    fabrique.InitClassSpells();
+    fabrique.InitAvailableSpells();
+    if (equipement)
+        fabrique.InitEquipment(true);
+    fabrique.InitAmmo();
+    fabrique.InitPet();
+    EnsureCoaSpecialization(b);
+    ApplyCoaTalents(b);
+    b->SetPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);   // au niveau de l'humain : plus d'XP
+    b->SaveToDB(false, false);
+    LOG_INFO("playerbots", "coa compagnon: rattrapage humain={} bot={} niv={}->{} equipement={} sorts={}", h->GetName(),
+             b->GetName(), avant, uint32(b->GetLevel()), equipement ? 1 : 0, uint32(b->GetSpellMap().size()));
+}
+
+// Lot 3 (27/10/2026), chaque seconde : un compagnon eveille EN JEU dont l'humain est en jeu monte a son niveau (au
+// plus RATTRAPAGES_PAR_SECONDE par tour, jamais en combat, en vol, mort ni en teleportation : il attend le tour
+// suivant). Au niveau de son humain ou au-dessus (il a pu gagner de l'XP avant), plus d'XP ; en dessous, l'XP revient.
+// Jamais de baisse. Humain en grace (deconnecte) : rien ne bouge. PlayerbotHolder::OnBotLogin retire le drapeau a
+// chaque connexion d'un bot aleatoire : il est repose ici une seconde plus tard.
+constexpr uint32 RATTRAPAGES_PAR_SECONDE = 2;
+
+void Rattraper()
+{
+    if (!sPlayerbotAIConfig.coaCompagnonsRattrapage || gEveilles.empty())
+        return;
+    std::vector<std::pair<Player*, Player*>> aMonter;
+    for (auto const& [bot, humain] : gEveilles)
+    {
+        Player* b = ObjectAccessor::FindConnectedPlayer(Guid(bot));
+        Player* h = ObjectAccessor::FindConnectedPlayer(Guid(humain));
+        if (!b || !h || !b->IsInWorld() || b->IsBeingTeleported() || b->IsDuringRemoveFromWorld())
+            continue;
+        bool const auNiveau = b->GetLevel() >= h->GetLevel();
+        if (auNiveau != b->HasPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN))
+        {
+            if (auNiveau)
+                b->SetPlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);
+            else
+                b->RemovePlayerFlag(PLAYER_FLAGS_NO_XP_GAIN);
+        }
+        if (auNiveau || aMonter.size() >= RATTRAPAGES_PAR_SECONDE)
+            continue;
+        if (!b->IsAlive() || b->IsInCombat() || b->IsInFlight())
+            continue;
+        aMonter.emplace_back(b, h);
+    }
+    for (auto const& [b, h] : aMonter)   // hors du parcours de gEveilles
+        MonterCompagnon(b, h);
 }
 
 // Resout un nom de personnage HUMAIN pour les commandes. Rend nullptr (et le dit) sinon.
@@ -1741,6 +1810,31 @@ bool EstReserve(uint32 botGuid)
 
 bool PlacementAutorise(uint32 botGuid) { return botGuid && tPlacement == botGuid; }
 
+uint32 CompagnonEveille(uint32 humainGuid)
+{
+    if (!Actif())
+        return 0;
+    uint32 meilleur = 0;
+    uint8 rang = 255;
+    for (auto const& [bot, h] : gEveilles)
+    {
+        if (h != humainGuid)
+            continue;
+        Membre const* m = Trouver(h, bot);
+        if (m && m->camp == Camp::Allie && m->rang < rang)
+        {
+            rang = m->rang;
+            meilleur = bot;
+        }
+    }
+    return meilleur;
+}
+
+bool EstHumain(Player* p)
+{
+    return p && p->GetSession() && !p->GetSession()->IsBot() && CompteHumain(p->GetSession()->GetAccountId());
+}
+
 void ChargerEtEndormir()
 {
     // Revision du 26/10 : la reserve d'abord, pour que le chargement des compagnons ecarte un bot deja en reserve.
@@ -1888,6 +1982,8 @@ void HumainConnecte(Player* humain)
     time_t const maintenant = Maintenant();
     uint32 const h = humain->GetGUID().GetCounter();
     uint32 const compte = humain->GetSession()->GetAccountId();
+    if (!humain->GetSession()->IsBot() && CompteHumain(compte))
+        CoaSouvenirs::Arrivee(humain, maintenant);
 
     // Changement de personnage sur le meme compte : l'ancien registre s'endort tout de suite (pas de grace).
     std::vector<uint32> anciens;
@@ -1928,6 +2024,7 @@ void HumainDeconnecte(Player* humain)
         gProchainScan = 0;
     if (!Actif())
         return;
+    CoaSouvenirs::Depart(humain->GetGUID().GetCounter());
     auto it = gSeances.find(humain->GetGUID().GetCounter());
     if (it == gSeances.end() || !it->second.present)
         return;
@@ -1991,7 +2088,11 @@ void MettreAJour(uint32 diff)
     }
 
     if (compagnons)
+    {
         Reveiller(maintenant);
+        Rattraper();
+        CoaSouvenirs::MettreAJour(maintenant);
+    }
     if (reserve)
     {
         if (maintenant >= gProchainScan)

@@ -1002,6 +1002,16 @@ public:
     uint32 coaReserveParTranche;           // bots par tranche et par faction (defaut 8, borne a 30)
     uint32 coaReserveMaxEveilles;          // plafond global de bots de reserve eveilles (defaut 48 ; 0 = aucun reveil)
     uint32 coaReserveSeuilConstitution;    // reserve completee quand elle compte moins de N membres (defaut = ParTranche)
+    // Lot 3 (27/10/2026) : le compagnon eveille rattrape le niveau de son humain (GiveLevel + sorts, comme `.coa niveau`),
+    // jamais au-dessus (PLAYER_FLAGS_NO_XP_GAIN des qu'il l'a rejoint). Equipement refait si l'ecart atteint N niveaux.
+    bool coaCompagnonsRattrapage;          // defaut faux
+    uint32 coaCompagnonsRattrapageEquipement;  // ecart a partir duquel l'equipement est refait (defaut 3)
+    // Souvenirs (27/10/2026, Ai/Coa/CoaSouvenirs.cpp) : ce que l'humain a vecu (morts, quetes, moments durs, recoltes,
+    // exploits, niveaux), seul ou avec son compagnon ; le compagnon eveille lui en chuchote un de temps en temps.
+    bool coaSouvenirsEnable;               // defaut faux : rien n'est note ni dit, la table n'est pas lue
+    uint32 coaSouvenirsPremiereParole;     // secondes entre le reveil du compagnon et sa premiere parole (defaut 300)
+    uint32 coaSouvenirsIntervalleMin;      // secondes entre deux paroles, au moins (defaut 1200)
+    uint32 coaSouvenirsIntervalleMax;      // et au plus (defaut 2400)
 
 private:
     PlayerbotAIConfig() = default;

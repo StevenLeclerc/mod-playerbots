@@ -1178,6 +1178,19 @@ bool PlayerbotAIConfig::Initialize()
     coaReserveSeuilConstitution = sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Reserve.SeuilConstitution", 0);
     if (!coaReserveSeuilConstitution || coaReserveSeuilConstitution > coaReserveParTranche)
         coaReserveSeuilConstitution = coaReserveParTranche;
+    // Lot 3 et souvenirs (27/10/2026) : inertes par defaut.
+    coaCompagnonsRattrapage = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaCompagnons.Rattrapage", false);
+    coaCompagnonsRattrapageEquipement = std::clamp<uint32>(
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Rattrapage.Equipement", 3), 1, 80);
+    coaSouvenirsEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaCompagnons.Souvenirs.Enable", false);
+    coaSouvenirsPremiereParole = std::clamp<uint32>(
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Souvenirs.PremiereParole", 300), 30, 86400);
+    coaSouvenirsIntervalleMin = std::clamp<uint32>(
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMin", 1200), 60, 86400);
+    coaSouvenirsIntervalleMax = std::clamp<uint32>(
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaCompagnons.Souvenirs.IntervalleMax", 2400), 60, 86400);
+    if (coaSouvenirsIntervalleMax < coaSouvenirsIntervalleMin)
+        coaSouvenirsIntervalleMax = coaSouvenirsIntervalleMin;
 
     selfBotLevel =sConfigMgr->GetOption<int32>("AiPlayerbot.SelfBotLevel", 1);
     botTextLocale = sConfigMgr->GetOption<int32>("AiPlayerbot.BotTextLocale", -1);
