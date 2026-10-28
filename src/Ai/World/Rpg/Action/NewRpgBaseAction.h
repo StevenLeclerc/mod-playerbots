@@ -59,6 +59,10 @@ protected:
     bool GetQuestPOIPosAndObjectiveIdx(uint32 questId, std::vector<POIInfo>& poiInfo, bool toComplete = false);
     static WorldPosition SelectRandomGrindPos(Player* bot);
     static WorldPosition SelectRandomCampPos(Player* bot);
+    // CoA -- P-331 : decale le point tire de rMin a rMax yd, pose sur le sol.
+    static bool DecalerAuSol(Player* bot, WorldPosition& dest, float rMin, float rMax);
+    // CoA -- P-331 : recale le z d'un saut d'enlisement sur le sol.
+    bool PoserSautAuSol(WorldPosition& dest);
     bool SelectRandomFlightTaxiNode(uint32& flightMasterEntry, WorldPosition& flightMasterPos, std::vector<uint32>& path);
     bool RandomChangeStatus(std::vector<NewRpgStatus> candidateStatus);
     bool CheckRpgStatusAvailable(NewRpgStatus status);

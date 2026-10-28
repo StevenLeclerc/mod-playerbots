@@ -24,6 +24,7 @@
 #include "VMapFactory.h"
 #include "VMapMgr2.h"
 #include <iomanip>
+#include <limits>
 #include <numeric>
 
 // Navigation data
@@ -4820,16 +4821,40 @@ void TravelMgr::PrepareDestinationCache()
         {
             CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureDataList[0].id);
             uint32 level = (creatureTemplate->minlevel + creatureTemplate->maxlevel + 1) / 2;
+            // CoA -- P-331 : la case de 50 yd sert a GROUPER les creatures, pas de
+            // destination. Son centre arrondi (z compris) tombait jusqu'a 23 yd
+            // sous le sol ou au-dessus : le bot n'y « arrivait » jamais (10 yd en
+            // 3D) et le saut d'enlisement le posait sous le terrain, tous au meme
+            // point. On retient la position d'une vraie creature de la case, la
+            // plus proche du barycentre (en plan) : z au sol, une entree par case
+            // comme avant (CoaChasse et le Directeur lisent le meme cache).
+            float barX = 0.0f, barY = 0.0f;
+            for (CreatureData const& c : creatureDataList)
+            {
+                barX += c.posX;
+                barY += c.posY;
+            }
+            barX /= creatureDataList.size();
+            barY /= creatureDataList.size();
+            CreatureData const* centrale = &creatureDataList[0];
+            float meilleure = std::numeric_limits<float>::max();
+            for (CreatureData const& c : creatureDataList)
+            {
+                float const d = (c.posX - barX) * (c.posX - barX) + (c.posY - barY) * (c.posY - barY);
+                if (d < meilleure)
+                {
+                    meilleure = d;
+                    centrale = &c;
+                }
+            }
+            WorldLocation const pointDeCase(std::get<0>(gridTuple), centrale->posX, centrale->posY, centrale->posZ);
             for (int32 l = (int32)level - (int32)sPlayerbotAIConfig.randomBotTeleLowerLevel;
                  l <= (int32)level + (int32)sPlayerbotAIConfig.randomBotTeleHigherLevel; l++)
             {
                 if (l < 1 || l > int32(maxLevel))
                     continue;
 
-                locsPerLevelCache[(uint8)l].push_back(WorldLocation(std::get<0>(gridTuple),
-                    static_cast<float>(std::get<1>(gridTuple)) * 50.0f,
-                    static_cast<float>(std::get<2>(gridTuple)) * 50.0f,
-                    static_cast<float>(std::get<3>(gridTuple)) * 50.0f));
+                locsPerLevelCache[(uint8)l].push_back(pointDeCase);
             }
         }
     }

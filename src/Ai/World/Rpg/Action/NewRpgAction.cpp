@@ -570,6 +570,12 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
                 info.ChangeToWanderRandom();
                 return true;
             }
+            // CoA -- P-331 : un GO_GRIND tire au hasard n'a plus de duree infinie.
+            if (data.tire && info.HasStatusPersisted(statusGoGrindDuration))
+            {
+                info.ChangeToIdle();
+                return true;
+            }
             break;
         }
         case RPG_GO_CAMP:
