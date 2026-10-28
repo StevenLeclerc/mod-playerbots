@@ -8768,7 +8768,7 @@ void MettreEnFilePreparation(CoaDirCommande const& c)
 //     faction ; la plupart sont sous un toit (refuses par ToitAuDessus) ;
 //  2. une COURONNE geometrique autour du joueur ;
 //  3. les cellules de creatures de RandomTeleport (GetLocsPerLevelCache,
-//     niveau-3..niveau+3, z arrondi a 50 yd), EN DERNIER : on y atterrit au
+//     niveau-3..niveau+3, z de spawn d'une creature depuis P-331), EN DERNIER : on y atterrit au
 //     milieu de creatures, qui l'engageraient -- et un bot en combat fait
 //     refuser le saut `T-`/`L-` suivant (`combat`).
 // Le point n'est qu'une ETAPE : le saut suivant le teleporte encore. Qu'il soit
