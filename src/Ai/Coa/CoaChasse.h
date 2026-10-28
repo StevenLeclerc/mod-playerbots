@@ -3372,9 +3372,11 @@ private:
     }
 
     /*
-     * PIEGE 20. Les positions de locsPerLevelCache sont arrondies au pas de
-     * 50 yd sur les TROIS axes, Z compris (TravelMgr.cpp:4690-4692, :4824-4827) :
-     * une cellule peut etre a 25 yd sous terre ou en l'air.
+     * PIEGE 20. Les positions de locsPerLevelCache ETAIENT arrondies au pas de
+     * 50 yd sur les TROIS axes, Z compris : une cellule pouvait etre a 25 yd
+     * sous terre ou en l'air. Depuis P-331, le cache porte la position d'une
+     * vraie creature de la case (z de spawn) et le saut d'enlisement se pose
+     * sur le sol ; ce recalage reste une ceinture.
      *
      * POURQUOI CA COMPTE ICI, alors que MoveFarTo sait marcher vers un point
      * approximatif. Parce que son repli anti-enlisement, lui, ne marche pas : au

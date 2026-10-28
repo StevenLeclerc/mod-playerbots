@@ -125,6 +125,14 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
         // retenu, compte a part (`enlisements_presence`).
         // Lot D4c (SPEC-directeur-D4.md § 6.3, point 1) : un CHASSEUR non plus --
         // il vient vers un joueur, qui doit le voir arriver a pied. Meme compteur.
+        // CoA -- P-331 : le saut se pose sur le sol, jamais au z brut du point
+        // (centre de case arrondi, point de quete) : 648 bots poses sous le
+        // terrain d'Armageddon du 20 au 26/10. Sol introuvable : pas de saut,
+        // la marche reprend (compteurs remis a zero ci-dessus). Calcule ici pour
+        // que le Directeur ne compte pas comme dirige un saut refuse.
+        WorldPosition saut = dest;
+        bool const solTrouve = PoserSautAuSol(saut);
+
         CoaDirecteur::Affectation aff;
         if (CoaDirecteur::AffectationDe(bot->GetGUID().GetCounter(), &aff) &&
             (aff.presence || aff.chasseur || aff.phase == CoaDirecteur::CoaDirPhase::Trajet))
@@ -137,6 +145,11 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             }
             if (!CoaDirecteur::DansLeDisque(aff, dest.GetMapId(), dest.GetPositionX(), dest.GetPositionY()) ||
                 dest.GetMapId() != bot->GetMapId() || botAI->HasPlayerNearby(150.0f))
+            {
+                CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_RETENUS);
+                return false;
+            }
+            if (!solTrouve)
             {
                 CoaDirecteur::Compter(CoaDirecteur::COA_DIR_ENLISEMENTS_RETENUS);
                 return false;
@@ -173,12 +186,7 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             bot->GetName(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(),
             dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dest.GetMapId(), bot->GetZoneId(),
             zone_name);
-        // CoA -- P-331 : le saut se pose sur le sol, jamais au z brut du point
-        // (centre de case arrondi, point de quete) : 648 bots poses sous le
-        // terrain d'Armageddon du 20 au 26/10. Sol introuvable : pas de saut,
-        // la marche reprend (compteurs remis a zero ci-dessus).
-        WorldPosition saut = dest;
-        if (!PoserSautAuSol(saut))
+        if (!solTrouve)
             return false;
         // Le saut lui-meme : un seul code avec la teleportation cachee du
         // Directeur (CoaDirecteur::Sauter : auras rompues, puis TeleportTo).
@@ -1129,10 +1137,10 @@ WorldPosition NewRpgBaseAction::SelectRandomCampPos(Player* bot)
 
 // CoA -- P-331. Tous les bots qui tiraient la meme destination (case de grind,
 // aubergiste + 5 yd) recevaient le meme point au centieme pres et s'y
-// empilaient. Decalage polaire de rMin a rMax yd, z recherche depuis 5 yd
+// empilaient. Decalage polaire de rMin a rMax yd, z recherche depuis 2 ou 5 yd
 // au-dessus du point (pas de plafond de grotte attrape plus haut), refuse :
 // sol introuvable, ecart de plus de 6 yd au z du point, eau, mur entre les
-// deux. Trois essais, sinon le point d'origine est garde.
+// deux. Cinq essais, sinon le point d'origine est garde.
 bool NewRpgBaseAction::DecalerAuSol(Player* bot, WorldPosition& dest, float rMin, float rMax)
 {
     Map* carte = bot->GetMap();
@@ -1142,13 +1150,14 @@ bool NewRpgBaseAction::DecalerAuSol(Player* bot, WorldPosition& dest, float rMin
     float const ox = dest.GetPositionX();
     float const oy = dest.GetPositionY();
     float const oz = dest.GetPositionZ();
-    for (uint32 essai = 0; essai < 3; ++essai)
+    for (uint32 essai = 0; essai < 5; ++essai)
     {
         float const angle = rand_norm() * 2.0f * static_cast<float>(M_PI);
         float const rayon = rMin + rand_norm() * (rMax - rMin);
         float const x = ox + std::cos(angle) * rayon;
         float const y = oy + std::sin(angle) * rayon;
-        float const sol = carte->GetHeight(bot->GetPhaseMask(), x, y, oz + 5.0f);
+        // Depart bas d'abord (grotte au plafond bas), puis plus haut (pente).
+        float const sol = carte->GetHeight(bot->GetPhaseMask(), x, y, oz + (essai % 2 ? 5.0f : 2.0f));
         if (sol <= INVALID_HEIGHT || std::fabs(sol - oz) > 6.0f)
             continue;
 
@@ -1183,9 +1192,22 @@ bool NewRpgBaseAction::PoserSautAuSol(WorldPosition& dest)
     float const z = dest.GetPositionZ();
     float sol = carte->GetHeight(bot->GetPhaseMask(), x, y, z + 2.0f);
     if (sol <= INVALID_HEIGHT)
-        sol = carte->GetHeight(bot->GetPhaseMask(), x, y, z + 50.0f, true, 100.0f);
+    {
+        // Sous le terrain : repartir juste au-dessus de la surface du terrain
+        // quand elle est connue (un arbre ou un toit plus haut ne gagne pas).
+        float const terrain = carte->GetGridHeight(x, y);
+        float const depart = terrain > INVALID_HEIGHT && terrain > z ? terrain + 2.0f : z + 50.0f;
+        sol = carte->GetHeight(bot->GetPhaseMask(), x, y, depart, true, 100.0f);
+    }
     if (sol <= INVALID_HEIGHT)
         return false;
+
+    // Un point pris a la surface d'un lac (objectif de quete : max du sol et de
+    // l'eau) reste a la surface, pas au fond. Une grotte sous un lac, elle,
+    // garde son sol : l'eau n'est retenue que si le point etait a sa hauteur.
+    float const eau = carte->GetWaterLevel(x, y);
+    if (eau > INVALID_HEIGHT && eau > sol && eau <= z + 2.0f)
+        sol = eau;
 
     dest = WorldPosition(dest.GetMapId(), x, y, sol + 0.05f, dest.GetOrientation());
     return true;
