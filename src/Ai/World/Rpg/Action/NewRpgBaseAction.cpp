@@ -173,9 +173,16 @@ bool NewRpgBaseAction::MoveFarTo(WorldPosition dest)
             bot->GetName(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetMapId(),
             dest.GetPositionX(), dest.GetPositionY(), dest.GetPositionZ(), dest.GetMapId(), bot->GetZoneId(),
             zone_name);
+        // CoA -- P-331 : le saut se pose sur le sol, jamais au z brut du point
+        // (centre de case arrondi, point de quete) : 648 bots poses sous le
+        // terrain d'Armageddon du 20 au 26/10. Sol introuvable : pas de saut,
+        // la marche reprend (compteurs remis a zero ci-dessus).
+        WorldPosition saut = dest;
+        if (!PoserSautAuSol(saut))
+            return false;
         // Le saut lui-meme : un seul code avec la teleportation cachee du
         // Directeur (CoaDirecteur::Sauter : auras rompues, puis TeleportTo).
-        return CoaDirecteur::Sauter(bot, dest);
+        return CoaDirecteur::Sauter(bot, saut);
     }
 
     float dis = bot->GetExactDist(dest);
@@ -1120,6 +1127,70 @@ WorldPosition NewRpgBaseAction::SelectRandomCampPos(Player* bot)
     return dest;
 }
 
+// CoA -- P-331. Tous les bots qui tiraient la meme destination (case de grind,
+// aubergiste + 5 yd) recevaient le meme point au centieme pres et s'y
+// empilaient. Decalage polaire de rMin a rMax yd, z recherche depuis 5 yd
+// au-dessus du point (pas de plafond de grotte attrape plus haut), refuse :
+// sol introuvable, ecart de plus de 6 yd au z du point, eau, mur entre les
+// deux. Trois essais, sinon le point d'origine est garde.
+bool NewRpgBaseAction::DecalerAuSol(Player* bot, WorldPosition& dest, float rMin, float rMax)
+{
+    Map* carte = bot->GetMap();
+    if (!carte || carte->GetId() != dest.GetMapId())
+        return false;
+
+    float const ox = dest.GetPositionX();
+    float const oy = dest.GetPositionY();
+    float const oz = dest.GetPositionZ();
+    for (uint32 essai = 0; essai < 3; ++essai)
+    {
+        float const angle = rand_norm() * 2.0f * static_cast<float>(M_PI);
+        float const rayon = rMin + rand_norm() * (rMax - rMin);
+        float const x = ox + std::cos(angle) * rayon;
+        float const y = oy + std::sin(angle) * rayon;
+        float const sol = carte->GetHeight(bot->GetPhaseMask(), x, y, oz + 5.0f);
+        if (sol <= INVALID_HEIGHT || std::fabs(sol - oz) > 6.0f)
+            continue;
+
+        float const z = sol + 0.05f;
+        if (carte->IsInWater(bot->GetPhaseMask(), x, y, z, bot->GetCollisionHeight()))
+            continue;
+
+        if (!carte->isInLineOfSight(ox, oy, oz + 1.5f, x, y, z + 1.5f, bot->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS,
+                                    VMAP::ModelIgnoreFlags::Nothing))
+            continue;
+
+        dest = WorldPosition(dest.GetMapId(), x, y, z, dest.GetOrientation());
+        return true;
+    }
+    return false;
+}
+
+// CoA -- P-331. Le z d'un point lointain peut etre faux de plusieurs dizaines de
+// yards (point de quete, ancien centre de case). On cherche d'abord le sol sous
+// le point (cas ordinaire, grotte, pont, point en l'air) ; seulement s'il n'y en
+// a pas (point sous le terrain), depuis 50 yd plus haut -- pas avant, pour ne
+// pas poser le bot sur un toit. Autre carte que celle du bot : point garde tel
+// quel, comme l'amont (la carte d'arrivee n'est pas la notre a lire).
+bool NewRpgBaseAction::PoserSautAuSol(WorldPosition& dest)
+{
+    Map* carte = bot->GetMap();
+    if (!carte || carte->GetId() != dest.GetMapId())
+        return true;
+
+    float const x = dest.GetPositionX();
+    float const y = dest.GetPositionY();
+    float const z = dest.GetPositionZ();
+    float sol = carte->GetHeight(bot->GetPhaseMask(), x, y, z + 2.0f);
+    if (sol <= INVALID_HEIGHT)
+        sol = carte->GetHeight(bot->GetPhaseMask(), x, y, z + 50.0f, true, 100.0f);
+    if (sol <= INVALID_HEIGHT)
+        return false;
+
+    dest = WorldPosition(dest.GetMapId(), x, y, sol + 0.05f, dest.GetOrientation());
+    return true;
+}
+
 bool NewRpgBaseAction::SelectRandomFlightTaxiNode(uint32& flightMasterEntry, WorldPosition& flightMasterPos, std::vector<uint32>& path)
 {
     TravelMgr::FlightMasterInfo const* info = sTravelMgr.GetNearestFlightMasterInfo(bot);
@@ -1190,7 +1261,11 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
             WorldPosition pos = SelectRandomGrindPos(bot);
             if (pos != WorldPosition())
             {
+                // CoA -- P-331 : chaque bot a son point autour de la case, et
+                // ce GO_GRIND tire au hasard porte une echeance (NewRpgAction).
+                DecalerAuSol(bot, pos, 4.0f, 15.0f);
                 botAI->rpgInfo.ChangeToGoGrind(pos);
+                std::get<NewRpgInfo::GoGrind>(botAI->rpgInfo.data).tire = true;
                 return true;
             }
             return false;
@@ -1200,6 +1275,8 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
             WorldPosition pos = SelectRandomCampPos(bot);
             if (pos != WorldPosition())
             {
+                // CoA -- P-331 : pres de l'aubergiste, mais pas tous au meme point.
+                DecalerAuSol(bot, pos, 2.0f, 6.0f);
                 botAI->rpgInfo.ChangeToGoCamp(pos);
                 return true;
             }

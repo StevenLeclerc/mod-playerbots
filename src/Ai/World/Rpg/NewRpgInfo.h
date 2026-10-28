@@ -26,6 +26,10 @@ struct NewRpgInfo
     struct GoGrind
     {
         WorldPosition pos{};
+        // CoA -- P-331 : vrai pour un point tire au hasard (RandomChangeStatus),
+        // seul cas soumis a l'echeance statusGoGrindDuration. Les postes et les
+        // affectations du Directeur gardent l'amont : pas d'echeance.
+        bool tire = false;
     };
     // RPG_GO_CAMP
     struct GoCamp
