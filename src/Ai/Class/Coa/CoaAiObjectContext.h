@@ -297,6 +297,13 @@ public:
     time_t knownKitBuilt = 0;   // 0 while the kit has never been built
     uint32 knownKitSpells = 0;  // size of the spell book when it was built
     uint8 knownKitLevel = 0;
+    // Reserve de Static (30/10, CoaStaticSeuilGros) : seuil du gros sort de Maelstrom/Wind, lu sur le kit ci-dessus et
+    // recalcule quand le kit est reconstruit (memes cles) ou que la specialisation change. -1 : jamais calcule.
+    int32 staticSeuil = -1;
+    uint32 staticSeuilSpe = 0;
+    time_t staticSeuilKit = 0;
+    uint32 staticSeuilSpells = 0;
+    uint8 staticSeuilLevel = 0;
 
     // CoaArene IA : voir CoaAreneEtat plus haut.
     CoaAreneEtat arene;

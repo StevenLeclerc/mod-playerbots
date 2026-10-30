@@ -3288,8 +3288,14 @@ uint32 CoaIaRechargeMs(SpellInfo const* info)
  *   - si la Static restante apres son cout reste au seuil du gros sort (rien n'est retarde) ;
  *   - sous Charged Conduit 803790 (le module ne preleve alors rien : AscensionCompat.cpp, OnSpellCast).
  * Le cout est lu dans les regles du module (ResourceCostRules, classe 16, ressource 803102 ; « All » = tout), sinon
- * dans l'effet 175 du sort (MiscValue negative : « Depletes N Static » des rangs 2+ de Stormflow et Discharge), sinon
- * dans son aura de seuil (CasterAuraSpell) : un sort qui exige de la Static est compte comme la depensant.
+ * dans l'effet 175 du sort (SPELL_EFFECT_ASCENSION_MODIFY_AURA_STACKS : Spell::EffectAscensionModifyAuraStacks retire
+ * MiscValue piles de l'aura TriggerSpell -- ici 803102 ; « Depletes N Static » des rangs 2+ de Stormflow et Discharge),
+ * sinon dans son aura de seuil (CasterAuraSpell). Ce dernier repli est PRUDENT, et laisse tel quel apres relecture (M7) :
+ * un sort qui EXIGE de la Static sans la depenser (Insulate 806242 ? Kiss of the Clouds 355241 ?) est compte comme la
+ * depensant, donc retenu hors survie tant que la Static n'a pas de quoi le payer au-dessus du seuil.
+ * Charged Conduit 803790 n'exempte que les couts des regles Fixed et All (le module saute alors le prelevement,
+ * AscensionCompat.cpp, OnSpellCast) : l'effet 175 du DBC preleve quand meme (M5).
+ * Interrupteur : AiPlayerbot.CoaIa.ReserveStatic (defaut 1 ; a 0, comportement d'avant).
  * Lightning (15) et toute autre classe : rien ne change. Ni sort, ni coefficient, ni ressource de depart touches.
  */
 constexpr uint32 CoaStaticAura = 803102;          // SPELL_STORMBRINGER_STATIC du module (pile = Static)
@@ -3319,15 +3325,24 @@ uint32 CoaStaticSpe(Player* bot)
     return spe == CoaStaticSpeMaelstrom || spe == CoaStaticSpeWind ? spe : 0;
 }
 
-// Cout en Static du sort (sort effectif), CoaStaticTout pour « tout », -1 s'il n'en depense pas.
-int32 CoaStaticCout(SpellInfo const* info)
+// Cout en Static du sort (sort effectif), CoaStaticTout pour « tout », -1 s'il n'en depense pas. `parModule` (facultatif) :
+// vrai si le prelevement est fait par le module (regle Fixed ou All), le seul que Charged Conduit supprime.
+int32 CoaStaticCout(SpellInfo const* info, bool* parModule = nullptr)
 {
+    if (parModule)
+        *parModule = false;
     for (AscensionCompatData::ResourceCostRule const& rule : AscensionCompatData::ResourceCostRules)
         if (rule.ClassId == CLASS_STORMBRINGER && rule.ResourceSpellId == CoaStaticAura &&
             info->Id >= rule.FirstSpellId && info->Id <= rule.LastSpellId)
+        {
+            if (parModule)
+                *parModule = rule.Consumption != AscensionCompatData::ResourceConsumption::None;
             return rule.Consumption == AscensionCompatData::ResourceConsumption::All ? CoaStaticTout : int32(rule.Amount);
+        }
+    // M6 : l'aura modifiee est TriggerSpell (Spell::EffectAscensionModifyAuraStacks, SpellEffects.cpp), le nombre MiscValue.
     for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
-        if (uint32(info->Effects[i].Effect) == 175 && info->Effects[i].MiscValue < 0)
+        if (info->Effects[i].Effect == SPELL_EFFECT_ASCENSION_MODIFY_AURA_STACKS &&
+            info->Effects[i].TriggerSpell == CoaStaticAura && info->Effects[i].MiscValue < 0)
             return -info->Effects[i].MiscValue;
     if (info->CasterAuraSpell == CoaStaticAura)
         return 1;
@@ -3338,19 +3353,33 @@ int32 CoaStaticCout(SpellInfo const* info)
     return -1;
 }
 
-// Seuil du gros sort que le bot connait (sort effectif d'une ligne de son kit), 0 s'il n'en connait aucun.
+// Seuil du gros sort que le bot connait (sort effectif d'une ligne de son kit), 0 s'il n'en connait aucun. En cache par
+// bot (M2), recalcule quand KnownKit reconstruit le kit (memes cles : date, niveau, taille du grimoire -- donc au plus
+// CoaKitLifeSeconds de retard, comme le kit lui-meme) ou que la specialisation change.
 int32 CoaStaticSeuilGros(PlayerbotAI* botAI, Player* bot, uint32 spe)
 {
-    for (CoaKnownAbility const& ability : KnownKit(botAI, bot))
+    std::vector<CoaKnownAbility> const& kit = KnownKit(botAI, bot);
+    auto* const c = static_cast<CoaAiObjectContext*>(botAI->GetAiObjectContext());
+    if (c->staticSeuil >= 0 && c->staticSeuilSpe == spe && c->staticSeuilKit == c->knownKitBuilt &&
+        c->staticSeuilSpells == c->knownKitSpells && c->staticSeuilLevel == c->knownKitLevel)
+        return c->staticSeuil;
+    int32 seuil = 0;
+    for (CoaKnownAbility const& ability : kit)
     {
         SpellInfo const* info = EffectiveSpell(bot, ability.info);
         if (CoaStaticEstGros(spe, info->Id))
         {
-            int32 const seuil = CoaStaticCout(info);
-            return seuil > 0 && seuil < CoaStaticTout ? seuil : 0;
+            int32 const cout = CoaStaticCout(info);
+            seuil = cout > 0 && cout < CoaStaticTout ? cout : 0;
+            break;
         }
     }
-    return 0;
+    c->staticSeuil = seuil;
+    c->staticSeuilSpe = spe;
+    c->staticSeuilKit = c->knownKitBuilt;
+    c->staticSeuilSpells = c->knownKitSpells;
+    c->staticSeuilLevel = c->knownKitLevel;
+    return seuil;
 }
 
 uint32 CoaStaticPile(Player* bot)
@@ -3361,11 +3390,16 @@ uint32 CoaStaticPile(Player* bot)
 
 bool CoaStaticReservee(PlayerbotAI* botAI, Player* bot, SpellInfo const* info)
 {
-    uint32 const spe = info ? CoaStaticSpe(bot) : 0;
-    if (!spe || CoaStaticEstGros(spe, info->Id))
+    // M1 : les tests bon marche d'abord ; la specialisation (GetAscensionActiveSpecialization prend un verrou global) en
+    // dernier, pour les seuls sorts de Stormbringer qui depensent de la Static.
+    if (!sPlayerbotAIConfig.coaIaReserveStatic || !info || bot->getClass() != CLASS_STORMBRINGER)
         return false;
-    int32 const cout = CoaStaticCout(info);
-    if (cout < 0 || bot->HasAura(CoaStaticChargedConduit))
+    bool parModule = false;
+    int32 const cout = CoaStaticCout(info, &parModule);
+    if (cout < 0 || (parModule && bot->HasAura(CoaStaticChargedConduit)))
+        return false;
+    uint32 const spe = CoaStaticSpe(bot);
+    if (!spe || CoaStaticEstGros(spe, info->Id))
         return false;
     int32 const seuil = CoaStaticSeuilGros(botAI, bot, spe);
     if (!seuil)
@@ -3389,6 +3423,8 @@ bool CoaStaticReservee(PlayerbotAI* botAI, Player* bot, SpellInfo const* info)
 // tourniquet, seulement si l'ordre change. Rend vrai si l'ordre a change.
 bool CoaStaticGrosDevant(Player* bot, std::vector<Usable>& usable, std::vector<Usable>* avant)
 {
+    if (!sPlayerbotAIConfig.coaIaReserveStatic || usable.size() < 2 || bot->getClass() != CLASS_STORMBRINGER)
+        return false;
     uint32 const spe = CoaStaticSpe(bot);
     if (!spe || usable.size() < 2)
         return false;
@@ -5596,6 +5632,11 @@ public:
                 // their target themselves and are never benched - so they record their own
                 // failures. Without this, "coa usage" could show a buff that never lands and the
                 // failure log had nothing at all to say about why.
+                // Reserve de Static (30/10, M3) : Aerodynamics 806124 / 806430-806436 (40 Static, aura de groupe) est un
+                // buff ; Maelstrom et Wind ne le paient pas sur la Static du gros sort. Ecarte sans echec consigne.
+                if (CoaStaticReservee(botAI, bot, spell.info))
+                    continue;
+
                 SpellCastResult const check = StrictCheck(bot, spell.info, member);
                 if (check != SPELL_CAST_OK)
                 {

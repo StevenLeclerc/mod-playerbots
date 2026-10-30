@@ -1100,6 +1100,8 @@ bool PlayerbotAIConfig::Initialize()
     coaIaAttaqueQuiSoigneMana =
         std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.CoaIa.AttaqueQuiSoigneMana", 80), 100);
     coaIaReserveSurviePalier = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveSurviePalier", true);
+    // 30/10/2026 (coa-project/docs/DIAG-banc2-stormbringer-cultist-20261030.md § 3) : a 0, comportement d'avant.
+    coaIaReserveStatic = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.ReserveStatic", true);
     coaIaPostureSurvie = sConfigMgr->GetOption<bool>("AiPlayerbot.CoaIa.PostureSurvie", true);
     coaGarderPassifs = sConfigMgr->GetOption<bool>("AiPlayerbot.Coa.GarderPassifs", false);
     // R-20261020-1622 (20/10/2026, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md) : a 0, comportement d'avant.
