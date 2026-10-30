@@ -145,7 +145,9 @@ constexpr SpecializationProfile Profiles[] =
     { 31, 22, CASTER, SPI },      { 32, 22, CASTER, SPI },      { 33, 22, CASTER, SPI },       // Chronomancer
     { 34, 23, CASTER, INT },      { 35, 23, CASTER, INT },      { 36, 23, CASTER, INT },       // Necromancer
     { 37, 24, CASTER, SPI },      { 38, 24, CASTER, INT },      { 39, 24, CASTER, INT },       // Pyromancer
-    { 40, 25, CASTER, INT | STR }, { 41, 25, CASTER, INT },     { 42, 25, MELEE, STR },        // Cultist
+    { 40, 25, CASTER, INT | STR }, { 41, 25, CASTER, INT },     { 42, 25, MELEE, STR | INT },  // Cultist
+    // 42 Godblade: INT added on 30/10/2026, a melee spec that fights with spells and needs mana (see
+    // CoaStats_25_42). The style stays MELEE: it picks the "coa" strategy and the melee collector.
     { 96, 25, MELEE, STR | STA },
     { 43, 26, CASTER, INT },      { 44, 26, CASTER, INT },      { 45, 26, MELEE, INT },        // Starcaller
     { 100, 26, MELEE, INT | STA },
