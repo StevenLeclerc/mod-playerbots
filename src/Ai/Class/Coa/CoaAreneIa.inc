@@ -1348,7 +1348,8 @@ bool CoaAreneSortPret(PlayerbotAI* botAI, Player* bot, Usable const& spell)
         return false;
     // Memes tests que CastFirst (ressource, forme, arme : CoaPeutPayer, CoaRefuseParFormeOuArme) : un sort qu'il
     // ecarte ne compte pas comme pret.
-    return CoaPeutPayer(bot, info) && !CoaRefuseParFormeOuArme(bot, info);
+    // Reserve de Static (30/10, CoaStaticReservee) : ecartee par CastFirst, donc pas prete ici.
+    return CoaPeutPayer(bot, info) && !CoaRefuseParFormeOuArme(bot, info) && !CoaStaticReservee(botAI, bot, info);
 }
 
 CoaAreneBurst CoaAreneOrdonnerBurst(PlayerbotAI* botAI, Player* bot, Unit* cible, std::vector<Usable>& usable)
