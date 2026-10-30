@@ -39,6 +39,7 @@
 #include "mod-ascension-compat/src/AscensionSpecialization.h"
 #include "mod-ascension-compat/src/AscensionGuardianStandardData.h"
 #include "mod-ascension-compat/src/AscensionTinkerData.h"
+#include "mod-ascension-compat/src/AscensionCustomResourceData.h"
 
 #include <algorithm>
 #include <array>
@@ -1210,6 +1211,11 @@ bool CoaRefuseParAuraDuLanceur(Player* bot, SpellInfo const* info)
            bot->HasAura(sSpellMgr->GetSpellIdForDifficulty(info->ExcludeCasterAuraSpell, bot));
 }
 
+// Reserve de Static de Maelstrom et Wind (30/10, coa-project/docs/DIAG-banc2-stormbringer-cultist-20261030.md § 3) :
+// definie plus bas, apres CoaIaPerteRecente et CoaAreneIa.inc. Lue par CastFirst et par les tests « pret » qui le
+// recopient (HasReadyAbility, CoaIaUnPret, CoaIaPretSauf, CoaAreneSortPret).
+bool CoaStaticReservee(PlayerbotAI* botAI, Player* bot, SpellInfo const* info);
+
 /*
  * Familier exige et absent : RECOPIE de Spell::CheckCast (Spell.cpp:6045-6058). Le premier effet visant
  * TARGET_UNIT_PET decide ; sans familier gardien (GetGuardianPet) ni unite possedee (GetCharm), le coeur rend
@@ -1523,6 +1529,9 @@ bool HasReadyAbility(PlayerbotAI* botAI, Player* bot, Filter wanted)
         // Same caster state and aura test as CastFirst (10/10 soir, 11/10) : a spell CastFirst now skips must not count
         // as ready. G-35 et G-12/G-31 (25/10) : monture et etendard deja en place, comme CastFirst.
         if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseMonte(bot, info) || CoaEtendardDejaTenu(bot, info))
+            continue;
+        // Reserve de Static (30/10), comme CastFirst.
+        if (CoaStaticReservee(botAI, bot, info))
             continue;
         // Same form, weapon and resource tests as CastFirst (banc d'arene du 10/10) : skipped there, not ready here.
         if (CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info))
@@ -2195,7 +2204,8 @@ enum CoaEcart : uint16
     ECART_BANC                = 1019,  // sort au banc (echec recent)
     ECART_TACTIQUE            = 1020,  // CoaAreneRefusTactique (arene 1v1, duel)
     ECART_MONTE               = 1021,  // CoaRefuseMonte (G-35, 25/10)
-    ECART_ETENDARD_TENU       = 1022   // CoaEtendardDejaTenu (G-12, G-31, 25/10)
+    ECART_ETENDARD_TENU       = 1022,  // CoaEtendardDejaTenu (G-12, G-31, 25/10)
+    ECART_STATIC_RESERVEE     = 1023   // CoaStaticReservee (Maelstrom, Wind : Static gardee pour le gros sort, 30/10)
 };
 
 struct CoaEcartTrace
@@ -2291,6 +2301,15 @@ SpellInfo const* CastFirst(PlayerbotAI* botAI, Player* bot, std::vector<Usable> 
         if (CoaRefuseParAuraDuLanceur(bot, info))
         {
             CoaNoterEcart(info, ECART_AURA_LANCEUR);
+            continue;
+        }
+
+        // Reserve de Static (30/10, CoaStaticReservee) : Maelstrom et Wind gardent leur Static pour Torrential Wrath et
+        // Aeroblast. Ecarte sans banc ni echec consigne : le sort repart au palier de survie danger ou critique, ou des
+        // que la Static depasse le seuil du gros sort de son cout.
+        if (CoaStaticReservee(botAI, bot, info))
+        {
+            CoaNoterEcart(info, ECART_STATIC_RESERVEE);
             continue;
         }
 
@@ -3091,6 +3110,9 @@ bool OrdonnerParLaya(PlayerbotAI* botAI, Player* bot, Unit* target, std::vector<
 // burst. Inerte sans AiPlayerbot.CoaArene.*. Voir l'en-tete du fichier inclus.
 #include "CoaAreneIa.inc"
 
+// CoaStaticReservee (plus bas) lit le palier de survie d'arene en dur : 2 = danger.
+static_assert(COA_SURVIE_DANGER == 2 && COA_SURVIE_CRITIQUE == 3, "CoaStaticReservee : paliers de survie d'arene");
+
 /*
  * IA SOINS/SURVIE, LOT 3 (16/10/2026, coa-project/docs/DIAG-banc-soins-survie-20261016.md, priorites 2, 5 et 6) : LA
  * SURVIE DE TOUS LES ROLES, sous AiPlayerbot.CoaIa.Survie. Avant : un bot de degats ou un tank n'avait qu'un point
@@ -3242,6 +3264,142 @@ float CoaIaPerteRecente(PlayerbotAI* botAI, Player* bot)
 uint32 CoaIaRechargeMs(SpellInfo const* info)
 {
     return std::max(info->RecoveryTime, info->CategoryRecoveryTime);
+}
+
+/*
+ * RESERVE DE STATIC DE MAELSTROM ET WIND (30/10/2026, coa-project/docs/DIAG-banc2-stormbringer-cultist-20261030.md § 3).
+ *
+ * Mesure au banc 2 d'Armageddon (traces « coa arene trace: », plafonnees : des proportions) : Torrential Wrath 503359
+ * (Maelstrom, 40 Static) lance 9 fois et Aeroblast 501455 (Wind, 50 Static) 42 fois en ~290 matchs chacun, contre 594
+ * Arm of Thorim 567520 pour Lightning (1 Static) ; Invigorating Surge 501475 (25 Static) est le 1er sort de Wind (1 162
+ * lancers) et de Maelstrom (790). La Static est une pile de l'aura 803102 (AscensionCompat.cpp, GetAuraStacks), que
+ * l'IA ne lisait nulle part (CoaGenericContext.cpp) : tout sort qui la depense partait des que son aura de seuil
+ * (ResourceThresholdRules : 706668 a 10, 681016 a 20, 681126 a 25, 573249 a 40, 707050 a 50) etait posee -- Invigorating
+ * Surge des 25, par la survie d'arene (palier pression : soin direct sous 80 %) et par « coa soin soi » / « coa
+ * defensive » hors arene ; Updraft (20) et Calm the Storm (10) par la rotation. Torrential Wrath et Aeroblast, eux,
+ * etaient ecartes SANS trace par CastFirst (CoaRefuseParAuraDuLanceur) tant que leur aura manquait, et n'avaient leur
+ * tour qu'au passage du tourniquet.
+ *
+ * Regle, pour un Stormbringer de specialisation Maelstrom (14) ou Wind (13) qui connait son gros sort (le sort EFFECTIF
+ * d'une ligne de son kit : Call Lightning le devient par remplacement de talent, AscensionTalentReplacementData.h) :
+ * tout AUTRE sort qui depense de la Static n'est pas lance, sauf
+ *   - au palier de survie danger ou critique : en arene 1v1 et en duel celui de la survie d'arene (survieNiveau >= 2) ;
+ *     partout, vie sous lowHealth, ou sous mediumHealth avec une perte rapide (CoaIaPerteRecente) ;
+ *   - si la Static restante apres son cout reste au seuil du gros sort (rien n'est retarde) ;
+ *   - sous Charged Conduit 803790 (le module ne preleve alors rien : AscensionCompat.cpp, OnSpellCast).
+ * Le cout est lu dans les regles du module (ResourceCostRules, classe 16, ressource 803102 ; « All » = tout), sinon
+ * dans l'effet 175 du sort (MiscValue negative : « Depletes N Static » des rangs 2+ de Stormflow et Discharge), sinon
+ * dans son aura de seuil (CasterAuraSpell) : un sort qui exige de la Static est compte comme la depensant.
+ * Lightning (15) et toute autre classe : rien ne change. Ni sort, ni coefficient, ni ressource de depart touches.
+ */
+constexpr uint32 CoaStaticAura = 803102;          // SPELL_STORMBRINGER_STATIC du module (pile = Static)
+constexpr uint32 CoaStaticChargedConduit = 803790; // SPELL_STORMBRINGER_CHARGED_CONDUIT du module
+constexpr uint32 CoaStaticSpeWind = 13;
+constexpr uint32 CoaStaticSpeMaelstrom = 14;
+constexpr int32 CoaStaticTout = 1000;             // cout « All » : plus que toute Static possible (affichage 100)
+
+// Gros sort de la specialisation : Torrential Wrath (804017, 503352-503360) pour Maelstrom, Aeroblast (801839,
+// 501450-501458) pour Wind -- les rangs listes par AscensionTalentReplacementData.h et ResourceCostRules.
+bool CoaStaticEstGros(uint32 spe, uint32 id)
+{
+    if (spe == CoaStaticSpeMaelstrom)
+        return id == 804017 || (id >= 503352 && id <= 503360);
+    if (spe == CoaStaticSpeWind)
+        return id == 801839 || (id >= 501450 && id <= 501458);
+    return false;
+}
+
+// Specialisation soumise a la reserve (Maelstrom, Wind), 0 sinon. Relue a chaque appel : un changement de specialisation
+// vaut tout de suite.
+uint32 CoaStaticSpe(Player* bot)
+{
+    if (bot->getClass() != CLASS_STORMBRINGER)
+        return 0;
+    uint32 const spe = GetAscensionActiveSpecialization(bot);
+    return spe == CoaStaticSpeMaelstrom || spe == CoaStaticSpeWind ? spe : 0;
+}
+
+// Cout en Static du sort (sort effectif), CoaStaticTout pour « tout », -1 s'il n'en depense pas.
+int32 CoaStaticCout(SpellInfo const* info)
+{
+    for (AscensionCompatData::ResourceCostRule const& rule : AscensionCompatData::ResourceCostRules)
+        if (rule.ClassId == CLASS_STORMBRINGER && rule.ResourceSpellId == CoaStaticAura &&
+            info->Id >= rule.FirstSpellId && info->Id <= rule.LastSpellId)
+            return rule.Consumption == AscensionCompatData::ResourceConsumption::All ? CoaStaticTout : int32(rule.Amount);
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        if (uint32(info->Effects[i].Effect) == 175 && info->Effects[i].MiscValue < 0)
+            return -info->Effects[i].MiscValue;
+    if (info->CasterAuraSpell == CoaStaticAura)
+        return 1;
+    for (AscensionCompatData::ResourceThresholdRule const& rule : AscensionCompatData::ResourceThresholdRules)
+        if (rule.ClassId == CLASS_STORMBRINGER && rule.ResourceSpellId == CoaStaticAura &&
+            info->CasterAuraSpell == rule.ThresholdSpellId)
+            return int32(rule.Amount);
+    return -1;
+}
+
+// Seuil du gros sort que le bot connait (sort effectif d'une ligne de son kit), 0 s'il n'en connait aucun.
+int32 CoaStaticSeuilGros(PlayerbotAI* botAI, Player* bot, uint32 spe)
+{
+    for (CoaKnownAbility const& ability : KnownKit(botAI, bot))
+    {
+        SpellInfo const* info = EffectiveSpell(bot, ability.info);
+        if (CoaStaticEstGros(spe, info->Id))
+        {
+            int32 const seuil = CoaStaticCout(info);
+            return seuil > 0 && seuil < CoaStaticTout ? seuil : 0;
+        }
+    }
+    return 0;
+}
+
+uint32 CoaStaticPile(Player* bot)
+{
+    Aura const* aura = bot->GetAura(CoaStaticAura);
+    return aura ? aura->GetStackAmount() : 0;
+}
+
+bool CoaStaticReservee(PlayerbotAI* botAI, Player* bot, SpellInfo const* info)
+{
+    uint32 const spe = info ? CoaStaticSpe(bot) : 0;
+    if (!spe || CoaStaticEstGros(spe, info->Id))
+        return false;
+    int32 const cout = CoaStaticCout(info);
+    if (cout < 0 || bot->HasAura(CoaStaticChargedConduit))
+        return false;
+    int32 const seuil = CoaStaticSeuilGros(botAI, bot, spe);
+    if (!seuil)
+        return false;  // gros sort inconnu (niveau, talent, specialisation qui vient de changer) : rien a garder
+    if (cout < CoaStaticTout && int32(CoaStaticPile(bot)) - cout >= seuil)
+        return false;  // au-dessus du seuil apres paiement : le gros sort n'attend pas
+    // Paliers de survie danger et critique. Vie sous lowHealth, partout (la survie d'arene reste a 0 hors bras tire).
+    float const pv = bot->GetHealthPct();
+    if (pv < float(sPlayerbotAIConfig.lowHealth))
+        return false;
+    // Arene 1v1 et duel : le palier de la survie d'arene (2 = COA_SURVIE_DANGER, voir le static_assert apres
+    // CoaAreneIa.inc), qui compte deja le gros coup recent. Ailleurs : sous mediumHealth avec une perte rapide.
+    if (CoaAreneSurvieArmee() && CoaAreneUnContreUn(bot))
+        return CoaAreneEtatDe(botAI).survieNiveau < 2;
+    return pv >= float(sPlayerbotAIConfig.mediumHealth) || CoaIaPerteRecente(botAI, bot) < CoaIaPerteRapidePv;
+}
+
+// Le gros sort (Torrential Wrath, Aeroblast) passe en tete de `usable` des que son aura de seuil est posee (Maelstrom et
+// Wind seulement). Ordre seulement, rien de retire : hors de portee, en mouvement ou refuse, CastFirst passe aux sorts
+// suivants, et le bot frappe avec ses sorts de remplissage. `avant` (facultatif) recoit l'ordre d'avant, pour l'index du
+// tourniquet, seulement si l'ordre change. Rend vrai si l'ordre a change.
+bool CoaStaticGrosDevant(Player* bot, std::vector<Usable>& usable, std::vector<Usable>* avant)
+{
+    uint32 const spe = CoaStaticSpe(bot);
+    if (!spe || usable.size() < 2)
+        return false;
+    auto const gros = std::find_if(usable.begin(), usable.end(), [bot, spe](Usable const& spell)
+        { return CoaStaticEstGros(spe, EffectiveSpell(bot, spell.info)->Id); });
+    if (gros == usable.begin() || gros == usable.end() || CoaRefuseParAuraDuLanceur(bot, EffectiveSpell(bot, gros->info)))
+        return false;
+    if (avant)
+        *avant = usable;
+    std::rotate(usable.begin(), gros, gros + 1);
+    return true;
 }
 
 // Le palier de vie admet-il ce defensif (sort effectif) ?
@@ -4096,7 +4254,7 @@ bool CoaIaUnPret(PlayerbotAI* botAI, Player* bot, std::vector<Usable> const& spe
     {
         SpellInfo const* const info = EffectiveSpell(bot, spell.info);
         if (CoaRefuseParAuraDuLanceur(bot, info) || CoaRefuseParFormeOuArme(bot, info) || !CoaPeutPayer(bot, info) ||
-            CoaExigeFamilierAbsent(bot, info) || CoaIaEtourdiRefuse(bot, info))
+            CoaExigeFamilierAbsent(bot, info) || CoaIaEtourdiRefuse(bot, info) || CoaStaticReservee(botAI, bot, info))
             continue;
         // G-35 et G-12/G-31 (25/10) : monture et etendard deja en place, comme CastFirst.
         if (CoaRefuseMonte(bot, info) || CoaEtendardDejaTenu(bot, info))
@@ -4244,6 +4402,11 @@ public:
                 [](Usable const& spell) { return (spell.marques & MARQUE_VOL_DE_VIE) != 0; });
         }
 
+        // Reserve de Static (30/10) : Maelstrom et Wind, Torrential Wrath ou Aeroblast en tete des que son aura de seuil
+        // est posee (CoaStaticGrosDevant). L'index du tourniquet se relit sur l'ordre d'avant, comme pour le vol de vie.
+        std::vector<Usable> avantGros;
+        CoaStaticGrosDevant(bot, usable, tourniquet.empty() && avantVol.empty() ? &avantGros : nullptr);
+
         // The cast goes through CastFirst rather than through a second loop of its own. The one
         // written here judged every refusal by PlayerbotAI::CastSpell to be the spell's fault and
         // benched it for a minute after three of them - while CastSpell also refuses for reasons
@@ -4261,7 +4424,8 @@ public:
         SpellInfo const* const cast = CastFirst(botAI, bot, usable, target, USAGE_ATTACK);
         if (cast)
         {
-            std::vector<Usable> const& ordre = !tourniquet.empty() ? tourniquet : !avantVol.empty() ? avantVol : usable;
+            std::vector<Usable> const& ordre = !tourniquet.empty() ? tourniquet : !avantVol.empty() ? avantVol :
+                                               !avantGros.empty() ? avantGros : usable;
             auto const itr = std::find_if(ordre.begin(), ordre.end(),
                 [cast](Usable const& spell) { return spell.info == cast; });
             if (itr != ordre.end())
@@ -4347,6 +4511,8 @@ private:
         // CoaArene, survie (11/10) : comme dans « coa attack », ni etendard ni soutien au sol vise sur l'adversaire.
         CoaAreneRetirerSoutiens(botAI, bot, spells);
         CoaAreneReserveMana(botAI, bot, spells);
+        // Reserve de Static (30/10) : comme dans « coa attack », le gros sort de Maelstrom ou de Wind en tete.
+        CoaStaticGrosDevant(bot, spells, nullptr);
         return spells;
     }
 };
@@ -5747,6 +5913,8 @@ bool CoaIaPretSauf(PlayerbotAI* botAI, Player* bot, Usable const& spell, Unit* c
     time_t const now = time(nullptr);
     SpellInfo const* const info = EffectiveSpell(bot, spell.info);
     if (!sansAura && CoaRefuseParAuraDuLanceur(bot, info))
+        return false;
+    if (CoaStaticReservee(botAI, bot, info))
         return false;
     if (sansForme ? (!info->IsPassive() && !bot->HasItemFitToSpellRequirements(info)) : CoaRefuseParFormeOuArme(bot, info))
         return false;
