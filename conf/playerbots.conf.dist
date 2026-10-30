@@ -1800,6 +1800,15 @@ AiPlayerbot.CoaIa.AttaqueQuiSoigneMana = 80
 # Default: 1
 AiPlayerbot.CoaIa.ReserveSurviePalier = 1
 
+# 30/10/2026 (coa-project/docs/DIAG-banc2-stormbringer-cultist-20261030.md, section 3 ; banc 2 d'Armageddon : Torrential
+# Wrath 9 lancers, Aeroblast 42, contre 594 Arm of Thorim) : un Stormbringer Maelstrom ou Wind garde sa Static pour son
+# gros sort (Torrential Wrath 40, Aeroblast 50). Tout autre sort qui depense de la Static (Invigorating Surge, Updraft...)
+# n'est lance qu'aux paliers de survie danger ou critique, ou si la Static restante reste au seuil du gros sort ; le gros
+# sort passe en tete de la rotation des que son aura de seuil est posee. Lightning et les autres classes : inchanges.
+# A 0 : comportement d'avant.
+# Default: 1
+AiPlayerbot.CoaIa.ReserveStatic = 1
+
 # ia5, 20/10 (Guardian 19 et 20) : un bot ni tank ni soigneur, en combat sous AiPlayerbot.MediumHealth (ou en perte
 # rapide), sans defensif pret dans sa posture, prend la posture qui ouvre ses defensifs et les rend payables
 # (Tower Formation pour Raise Shield, Turn The Blade, Brace). Retour a la posture d'origine en combat au calme

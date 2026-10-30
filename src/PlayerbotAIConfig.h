@@ -807,6 +807,7 @@ public:
     bool coaIaPretCommeCastFirst; // D7 (19/10) : CoaIaUnPret s'arrete a la recharge globale comme CastFirst (tours a vide)
     uint32 coaIaAttaqueQuiSoigneMana; // ia5 (20/10) : I17 ne garde une attaque qui soigne payee en mana qu'au-dessus de ce % de mana ; 0 = toujours
     bool coaIaReserveSurviePalier; // ia5 (20/10) : la survie garde la ressource du defensif d'un palier plus bas (Embrace sous 30 %...)
+    bool coaIaReserveStatic;     // 30/10 : Stormbringer Maelstrom/Wind, Static gardee pour Torrential Wrath / Aeroblast (CoaStaticReservee)
     bool coaGarderPassifs;       // ia5 (20/10) : Randomize (CancelAuras) garde les auras passives du bot (Harvester, talents...)
     uint32 coaFamilierDefensif;  // R-20261020-2207 (20/10) : familier (Pet) passif d'un bot CoA -> defensif ; 0 avant, 1 Chien d'ombre, 2 tous
     bool coaVolZoneVolable;      // R-20261020-1622 (20/10) : monture volante et vol des bots seulement en zone ou le vol est permis
