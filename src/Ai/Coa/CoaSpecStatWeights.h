@@ -139,7 +139,11 @@ static constexpr CoaStatWeight CoaStats_24_37[] = { { STATS_TYPE_SPIRIT, 1.0f },
 // Pyromancer / Incineration (zauber)
 static constexpr CoaStatWeight CoaStats_24_38[] = { { STATS_TYPE_HIT, 1.8f }, { STATS_TYPE_INTELLECT, 1.58f }, { STATS_TYPE_CRIT, 1.36f }, { STATS_TYPE_HASTE, 1.14f }, { STATS_TYPE_SPELL_POWER, 1.0f }, { STATS_TYPE_SPIRIT, 0.7f }, { STATS_TYPE_ATTACK_POWER, -1.0f } };
 // Cultist / Godblade (physisch_nah)
-static constexpr CoaStatWeight CoaStats_25_42[] = { { STATS_TYPE_MELEE_DPS, 7.5f }, { STATS_TYPE_HIT, 2.3f }, { STATS_TYPE_EXPERTISE, 2.04f }, { STATS_TYPE_STRENGTH, 1.78f }, { STATS_TYPE_ARMOR_PENETRATION, 1.52f }, { STATS_TYPE_CRIT, 1.26f }, { STATS_TYPE_HASTE, 1.0f }, { STATS_TYPE_ATTACK_POWER, 1.0f } };
+// EDITED BY HAND (30/10/2026), no generator on disk: Godblade lives on spells (Wrath of the Black
+// Empire, Blade of the Empire, Darkwither) and ran dry of mana in a Strength-only set (Armageddon
+// bench 2: 0 Int, 0 spell power, 21 % of combat under 10 % mana). Hybrid weights: the melee
+// weights are kept as they were, Spell Power 1.4 and Intellect 1.2 are added (count 8 -> 10).
+static constexpr CoaStatWeight CoaStats_25_42[] = { { STATS_TYPE_MELEE_DPS, 7.5f }, { STATS_TYPE_HIT, 2.3f }, { STATS_TYPE_EXPERTISE, 2.04f }, { STATS_TYPE_STRENGTH, 1.78f }, { STATS_TYPE_ARMOR_PENETRATION, 1.52f }, { STATS_TYPE_SPELL_POWER, 1.4f }, { STATS_TYPE_CRIT, 1.26f }, { STATS_TYPE_INTELLECT, 1.2f }, { STATS_TYPE_HASTE, 1.0f }, { STATS_TYPE_ATTACK_POWER, 1.0f } };
 // Cultist / Corruption (zauber)
 static constexpr CoaStatWeight CoaStats_25_41[] = { { STATS_TYPE_HIT, 1.8f }, { STATS_TYPE_SPELL_POWER, 1.58f }, { STATS_TYPE_INTELLECT, 1.36f }, { STATS_TYPE_CRIT, 1.14f }, { STATS_TYPE_HASTE, 0.92f }, { STATS_TYPE_SPIRIT, 0.7f }, { STATS_TYPE_ATTACK_POWER, -1.0f } };
 // Cultist / Dreadnought (tank)
@@ -240,7 +244,7 @@ static constexpr CoaSpecStats CoaSpecStatsTable[] =
     { 24,  39, "Draconic", "zauber", "caster", false, CoaStats_24_39, 7 },
     { 24,  37, "Flameweaving", "heilung", "caster", false, CoaStats_24_37, 8 },
     { 24,  38, "Incineration", "zauber", "caster", false, CoaStats_24_38, 7 },
-    { 25,  42, "Godblade", "physisch_nah", "twoHand", true, CoaStats_25_42, 8 },
+    { 25,  42, "Godblade", "physisch_nah", "twoHand", true, CoaStats_25_42, 10 },
     { 25,  41, "Corruption", "zauber", "caster", true, CoaStats_25_41, 7 },
     { 25,  96, "Dreadnought", "tank", "shield", true, CoaStats_25_96, 8 },
     { 25,  40, "Heretic", "heilung", "twoHand", true, CoaStats_25_40, 8 },
