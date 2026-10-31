@@ -54,6 +54,8 @@ enum class CoaDirVerbe : uint8
     // Lot D5 « l'imprevu » (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md § 3.1-3.2), AVANT Inconnu :
     Attirer,        // 1 a 3 creatures existantes courent vers le joueur `joueur` (cible 0, texte `patrouille`)
     Soigner,        // le bot `cible` soigne le joueur `joueur` (valeur = seuil de PV, duree_s <= 420)
+    // Apex, chasses de palier (31/10/2026, coa-project/docs/CONCEPTION-apex-chasses-paliers.md § 3), AVANT Inconnu :
+    Valider,        // la quete de chasse `valeur` du joueur `cible` (= `joueur`) est remplie (AreaExploredOrEventHappens)
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
 };
 
@@ -155,6 +157,11 @@ public:
     // « contient ») ? Faux : `attirer` et `soigner` sont refuses `colonnes_imprevu`, les autres verbes passent.
     // Vrai implique ColonnesRecompense().
     virtual bool ColonnesImprevu() const { return false; }
+
+    // Apex (31/10/2026). L'ENUM de `verbe` porte-t-il les treize valeurs R3 en tete ET contient-il 'valider' (controle
+    // « contient » : l'ENUM du Live porte 'paix', celui du PTR non) ? Faux : `valider` est refuse `colonnes_valider`.
+    // Vrai implique ColonnesRecompense().
+    virtual bool ColonnesValider() const { return false; }
 };
 
 #endif

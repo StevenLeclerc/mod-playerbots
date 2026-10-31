@@ -712,6 +712,7 @@ char const* NomVerbe(CoaDirVerbe v)
         case CoaDirVerbe::Evenement:           return "evenement";
         case CoaDirVerbe::Attirer:             return "attirer";
         case CoaDirVerbe::Soigner:             return "soigner";
+        case CoaDirVerbe::Valider:             return "valider";
         default:                               return "inconnu";
     }
 }
@@ -734,6 +735,7 @@ CoaDirVerbe VerbeDe(std::string const& nom)
     if (nom == "evenement")            return CoaDirVerbe::Evenement;
     if (nom == "attirer")              return CoaDirVerbe::Attirer;
     if (nom == "soigner")              return CoaDirVerbe::Soigner;
+    if (nom == "valider")              return CoaDirVerbe::Valider;
     return CoaDirVerbe::Inconnu;
 }
 
@@ -774,6 +776,13 @@ bool VerbeImprevu(CoaDirVerbe v)
     return v == CoaDirVerbe::Attirer || v == CoaDirVerbe::Soigner;
 }
 
+// Apex (31/10/2026) : `valider` exige l'ENUM R3 en tete ET la valeur 'valider' (ColonnesValider) ; il lit `valeur`
+// (colonne D3). Il n'est PAS dans Directeur.Verbes : c'est AiPlayerbot.Directeur.Apex qui l'allume (Recevoir).
+bool VerbeApex(CoaDirVerbe v)
+{
+    return v == CoaDirVerbe::Valider;
+}
+
 CoaDirCanal CanalDe(std::string const& nom)
 {
     if (nom.empty())       return CoaDirCanal::Aucun;
@@ -805,7 +814,8 @@ char const* NomCanal(CoaDirCanal c)
 bool VerbeImplemente(CoaDirVerbe v)
 {
     return v == CoaDirVerbe::Treve || v == CoaDirVerbe::SuspendreMercenaire || v == CoaDirVerbe::Reaffecter ||
-           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v) || VerbeImprevu(v);
+           v == CoaDirVerbe::Alleger || VerbeD3(v) || VerbeD4(v) || VerbeR(v) || VerbeEv(v) || VerbeImprevu(v) ||
+           VerbeApex(v);
 }
 
 // `AiPlayerbot.Directeur.Verbes` : liste separee par des virgules (espaces
@@ -888,6 +898,7 @@ public:
         _colonnesR = false;
         _colonnesEv = false;
         _colonnesImprevu = false;
+        _colonnesValider = false;
         QueryResult colonnes = CharacterDatabase.Query(
             "SELECT (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()"
             " AND TABLE_NAME = 'coa_dir_commande' AND COLUMN_NAME IN ('texte','canal','valeur','intensite','delai_s')),"
@@ -925,6 +936,8 @@ public:
         // ...,'recompenser','pister','attirer','soigner','evenement').
         _colonnesImprevu = _colonnesR && typeVerbe.find(",'attirer'") != std::string::npos &&
                            typeVerbe.find(",'soigner'") != std::string::npos;
+        // Apex (31/10/2026) : meme regle « contient » (l'ENUM du Live porte 'paix' avant, celui du PTR non).
+        _colonnesValider = _colonnesR && typeVerbe.find(",'valider'") != std::string::npos;
         if (_colonnesD3)
             LOG_INFO("playerbots", "coa directeur : colonnes D3 presentes, verbes D3 lisibles");
         else
@@ -947,6 +960,10 @@ public:
             LOG_INFO("playerbots", "coa directeur : colonnes imprevu presentes, verbes attirer et soigner lisibles");
         else
             LOG_INFO("playerbots", "coa directeur : colonnes imprevu absentes, verbes attirer et soigner inertes");
+        if (_colonnesValider)
+            LOG_INFO("playerbots", "coa directeur : colonnes valider presentes, verbe valider lisible");
+        else
+            LOG_INFO("playerbots", "coa directeur : colonnes valider absentes, verbe valider inerte");
         CharacterDatabase.Execute(
             "REPLACE INTO coa_dir_instance (id, epoque, demarre_le, bus) VALUES (1, {}, NOW(), {})",
             epoqueMonde, bus ? 1 : 0);
@@ -1068,6 +1085,7 @@ public:
     bool ColonnesRecompense() const override { return _colonnesR; }
     bool ColonnesEvenement() const override { return _colonnesEv; }
     bool ColonnesImprevu() const override { return _colonnesImprevu; }
+    bool ColonnesValider() const override { return _colonnesValider; }
 
 private:
     // Les raisons sont des constantes de ce fichier, jamais une saisie : pas
@@ -1118,6 +1136,7 @@ private:
     bool _colonnesR = false;
     bool _colonnesEv = false;
     bool _colonnesImprevu = false;
+    bool _colonnesValider = false;
 };
 
 // ------------------------------------------------------------------ bus
@@ -7736,6 +7755,9 @@ struct ReactionContrat
     bool defenseLocale = false;      // sans decision du service : elle se defend
     bool defenseFaite = false;
     bool sansMontantDit = false;
+    // Apex (31/10/2026) : params.apex_palier de l'arc (0 : contrat ordinaire). La proie d'une chasse de palier garde
+    // son drapeau JcJ (reaffirme chaque seconde tant que l'arc court).
+    uint32 apexPalier = 0;
 };
 std::unordered_map<uint32, ReactionContrat> reactionsContrat;   // arc -> etat ; fil monde seul
 uint32 reactionsLuesS = 0;
@@ -7964,13 +7986,30 @@ void RepartirApresSoudoiement(ReactionContrat const& e)
     JournaliserReaction(e, "repart", Acore::StringFormat(" pas_yd={:.0f}", pas));
 }
 
+// Apex (relecture du 31/10/2026) : la chasse est finie (ou les reactions oubliees) : le drapeau JcJ de la proie et de
+// ses gardes n'est plus reaffirme ; UpdatePvP(true, false) lance le compte a rebours ordinaire (5 min), sinon il
+// resterait pose (UpdatePvP(true, true) met EndTimer a 0, que UpdatePvPFlag laisse tel quel). Fil monde.
+void RelacherJcjApex(ReactionContrat const& e)
+{
+    if (!e.apexPalier)
+        return;
+    std::vector<uint32> marques = e.gardes;
+    marques.push_back(e.cible);
+    for (uint32 g : marques)
+        if (Player* p = JoueurConnecte(g))
+            if (p->IsInWorld() && p->IsPvP() && sRandomPlayerbotMgr.IsRandomBot(p))
+                p->UpdatePvP(true, false);
+}
+
 void LireReactions()
 {
     QueryResult r = CharacterDatabase.Query(
         "SELECT id, joueur, IFNULL(CAST(JSON_EXTRACT(params, '$.cible') AS CHAR), ''),"
         " IFNULL(JSON_UNQUOTE(JSON_EXTRACT(params, '$.reaction')), ''),"
         " IFNULL(CAST(JSON_EXTRACT(params, '$.gardes') AS CHAR), ''),"
-        " IFNULL(CAST(JSON_EXTRACT(params, '$.pot_de_vin_c') AS CHAR), '')"
+        " IFNULL(CAST(JSON_EXTRACT(params, '$.pot_de_vin_c') AS CHAR), ''),"
+        // Apex (31/10/2026) : le palier d'une chasse (absent : '').
+        " IFNULL(CAST(JSON_EXTRACT(params, '$.apex_palier') AS CHAR), '')"
         " FROM coa_dir_arc WHERE genre = 'contrat' AND statut = 'actif' AND etape = 'piste'"
         // Revue 16/10 : un arc echu que le service n'a pas clos (service arrete) ne fait plus reagir sa cible.
         " AND (fin_prevue IS NULL OR fin_prevue > UTC_TIMESTAMP())"
@@ -8003,6 +8042,8 @@ void LireReactions()
             e.gardes = GuidsTexte(f[4].Get<std::string>(), REACTION_GARDES_MAX);
             std::vector<uint32> const pot = GuidsTexte(f[5].Get<std::string>(), 1);
             e.potDeVinC = pot.empty() ? 0 : pot[0];
+            std::vector<uint32> const palier = GuidsTexte(f[6].Get<std::string>(), 1);
+            e.apexPalier = palier.empty() || palier[0] > 60 ? 0 : palier[0];
         } while (r->NextRow());
     }
     for (auto it = reactionsContrat.begin(); it != reactionsContrat.end();)
@@ -8013,6 +8054,7 @@ void LireReactions()
             continue;
         }
         RepartirApresSoudoiement(it->second);
+        RelacherJcjApex(it->second);
         it = reactionsContrat.erase(it);
     }
     if (offresFaites.size() > 256)
@@ -8372,8 +8414,11 @@ void OublierReactions()
     if (reactionsContrat.empty())
         return;
     for (auto const& [arc, e] : reactionsContrat)
+    {
         if ((e.reaction == "fuite_monture" && e.fuites) || (e.reaction == "soudoiement" && e.offre))
             LeverImmobile(e.cible);
+        RelacherJcjApex(e);
+    }
     reactionsContrat.clear();
     reactionsLuesS = 0;   // relecture immediate au rallumage
 }
@@ -8396,7 +8441,11 @@ void SuivreReactions()
     bool const t6 = sPlayerbotAIConfig.directeurReactionsT6;
     for (auto& [arc, e] : reactionsContrat)
     {
-        bool const defense = e.reaction == "defense";
+        // Apex (31/10/2026) : `defense_gardes` (paliers 50 et 60) = la defense de T4, plus ses gardes (sauts caches pres
+        // d'elle tant que le chasseur est loin, comme fuite_gardes ; ils l'engagent avec elle). Option Apex eteinte :
+        // inconnue (cible passive).
+        bool const defenseGardes = sPlayerbotAIConfig.directeurApex && e.reaction == "defense_gardes";
+        bool const defense = e.reaction == "defense" || defenseGardes;
         bool const fuite = e.reaction == "fuite_gardes";
         bool const monture = t6 && e.reaction == "fuite_monture";
         bool const soudoiement = t6 && e.reaction == "soudoiement";
@@ -8410,7 +8459,8 @@ void SuivreReactions()
             continue;
         }
         // Revue 16/10 : `.directeur stop` du chasseur : sa cible ne reagit plus (le service clot l'arc ensuite).
-        if (CoaDirecteur::EstArrete(e.joueur))
+        // Apex : une chasse de quete n'est pas close par l'arret (le service la garde) : la proie reagit.
+        if (!e.apexPalier && CoaDirecteur::EstArrete(e.joueur))
             continue;
         Player* chasseur = JoueurConnecte(e.joueur);
         Player* cible = JoueurConnecte(e.cible);
@@ -8420,6 +8470,10 @@ void SuivreReactions()
         PlayerbotAI* ia = GET_PLAYERBOT_AI(cible);
         if (!ia || ia->HasGameClientMaster())
             continue;
+        // Apex (31/10/2026) : la proie d'une chasse de palier reste marquee JcJ (la preparation l'a pose ; une zone
+        // amie lance le compte a rebours de 5 min qui l'oterait). Jamais pour un contrat ordinaire.
+        if (e.apexPalier && sPlayerbotAIConfig.directeurApex && !cible->IsPvP())
+            cible->UpdatePvP(true, true);
         if (monture)
         {
             SuivreFuiteMontee(e, cible, chasseur, ia, maintenant);
@@ -8436,7 +8490,12 @@ void SuivreReactions()
             // defense, au repos). La fuyarde GARDE son repos (relecture M2) : elle ne vise aucun joueur, elle riposte.
             LeverImmobile(e.cible);
             if (defense)
+            {
                 LeverRepos(e.cible);
+                // Apex : les gardes arrives apres le declenchement engagent a leur tour (libres seulement).
+                if (defenseGardes)
+                    EngagerGardes(e, cible, chasseur, true);
+            }
             else if (t6)
             {
                 if (e.phase == FUITE_COURT && maintenant < e.finFuiteS)
@@ -8450,7 +8509,7 @@ void SuivreReactions()
         bool const memeCarte = chasseur->GetMapId() == cible->GetMapId() &&
                                chasseur->GetInstanceId() == cible->GetInstanceId();
         float const d = memeCarte ? chasseur->GetExactDist2d(cible) : -1.0f;
-        if (fuite && (!memeCarte || d > REACTION_CHASSEUR_LOIN_YD))
+        if ((fuite || defenseGardes) && (!memeCarte || d > REACTION_CHASSEUR_LOIN_YD))
         {
             for (uint32 g : e.gardes)
             {
@@ -8479,9 +8538,12 @@ void SuivreReactions()
             LeverImmobile(e.cible);
             LeverRepos(e.cible);
             bool const engage = !dejaEnCombat && EngagerChasseur(cible, chasseur);
+            uint32 const gardesEngages = defenseGardes ? EngagerGardes(e, cible, chasseur, false) : 0;
             e.declenchee = true;
-            JournaliserReaction(e, "defense", Acore::StringFormat(" engage={} deja_en_combat={} distance={:.0f}",
-                                                                  engage ? 1 : 0, dejaEnCombat ? 1 : 0, d));
+            JournaliserReaction(e, "defense", Acore::StringFormat(" engage={} deja_en_combat={} distance={:.0f}"
+                                                                  " gardes_engages={}",
+                                                                  engage ? 1 : 0, dejaEnCombat ? 1 : 0, d,
+                                                                  gardesEngages));
         }
         else if (fuite && ((d <= REACTION_FUITE_YD && vu) || auxPrises))
         {
@@ -8725,6 +8787,97 @@ PointCarte ChercherPointCarte(Map* map, Player* joueur, Player* bot, uint32 nive
                 candidats.push_back({loc.GetPositionX(), loc.GetPositionY(), loc.GetPositionZ() + 25.0f});
     }
     essayer(candidats, "cellule");
+    return r;
+}
+
+// ------------------------------------------------------------------ Apex : preparation d'une chasse de palier (31/10/2026)
+//
+// coa-project/docs/CONCEPTION-apex-chasses-paliers.md § 2 (« Les proies »), § 3 etape 4. Le service (contrats.py) envoie
+// `chasser P-0` avec `texte` = « apex:<palier>:<qualite> » (palier 10..60 par 10 ; qualite 2 vert, 3 bleu) et, du palier
+// 20 au 60, le POINT de la zone du palier dans carte/x/y/z/rayon (PROVISOIRE cote service : le centre `game_tele` de la
+// zone, a remplacer par des points releves en jeu). Ce qui change par rapport a la preparation hors prime :
+//  - la regle High Risk du joueur n'est PAS exigee (la chasse est une quete, pas une prime) ;
+//  - la proie est TOUJOURS deplacee : sur un point sur du disque de zone (ChercherPointZone), sinon (aucun point, ou
+//    pas de disque au palier 10) a 600-1 200 yd du joueur (ChercherPointCarte, la recherche d'avant) ;
+//  - equipement : au palier 10, aligne sur le joueur comme avant mais jamais au-dessus du vert ; au-dela, refait
+//    jusqu'a la qualite du palier QUEL QUE SOIT celui du joueur (« vers le haut ») ;
+//  - drapeau JcJ pose sur la proie (UpdatePvP), reaffirme par SuivreReactions tant que son arc court : un chasseur de
+//    la faction adverse non marque peut l'attaquer, et passe JcJ en l'attaquant (regle normale, decision Q3) ;
+//  - le niveau vise (`valeur`) est celui que le service a calcule (joueur + bonus du palier) : applique ICI, par la
+//    preparation, jamais apres (le service clot `perdu_cible` un saut de niveau apres l'activation).
+struct PreparationApex
+{
+    bool actif = false;
+    uint32 palier = 0;
+    uint32 qualite = 0;
+    bool point = false;   // la commande porte un disque de zone (rayon > 0)
+};
+
+// « apex:<palier>:<qualite> » -> vrai si bien forme (palier 10, 20 .. 60 ; qualite 2 ou 3), `a` rempli.
+bool LirePreparationApex(std::string const& texte, PreparationApex& a)
+{
+    // « apex:20:2 » : 9 caracteres, le palier aux indices 5-6, la qualite a l'indice 8.
+    if (texte.size() != 9 || texte.compare(0, 5, "apex:") != 0 || texte[7] != ':')
+        return false;
+    if (texte[5] < '1' || texte[5] > '6' || texte[6] != '0' || (texte[8] != '2' && texte[8] != '3'))
+        return false;
+    a.actif = true;
+    a.palier = static_cast<uint32>(texte[5] - '0') * 10;
+    a.qualite = static_cast<uint32>(texte[8] - '0');
+    return true;
+}
+
+constexpr uint32 APEX_ZONE_ESSAIS = 12;
+constexpr float APEX_ZONE_RAYON_MAX = 300.0f;    // = emetteur.BORNES_RAYON (le service ne depasse pas)
+constexpr float APEX_ZONE_DEPART_Z = 60.0f;      // la sonde part de z + 60 (relief de la zone autour du centre)
+
+// Un point sur dans le disque (cx, cy, rayon) de la carte `map` : memes criteres que PointCarteSur (sol sec, ciel
+// ouvert, hors lieu sans JcJ et Wintergrasp, aucun humain a SAUT_HUMAIN_YD, loin des creatures hostiles fortes si
+// l'embuscade est allumee) et, sur la carte du joueur, a PREP_CARTE_MIN_YD de lui au moins (jamais sous ses yeux).
+// Fil monde, cartes a l'arret (P-137) : comme ChercherPointCarte, les grilles lues sont creees au besoin.
+PointCarte ChercherPointZone(Map* map, Player* joueur, Player* bot, uint32 niveau, float cx, float cy, float cz,
+                             float rayon)
+{
+    PointCarte r;
+    if (!map || !std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(cz) || !(rayon > 0.0f))
+        return r;
+    rayon = std::min(rayon, APEX_ZONE_RAYON_MAX);
+    uint32 const carte = map->GetId();
+    bool const memeCarte = joueur->GetMapId() == carte;
+    for (uint32 k = 0; k < APEX_ZONE_ESSAIS; ++k)
+    {
+        ++r.essais;
+        float const a = frand(0.0f, 2.0f * float(M_PI));
+        float const d = rayon * std::sqrt(frand(0.0f, 1.0f));
+        float const x = cx + d * std::cos(a), y = cy + d * std::sin(a);
+        if (!Acore::IsValidMapCoord(x, y))
+            continue;
+        if (memeCarte)
+        {
+            float const dx = x - joueur->GetPositionX(), dy = y - joueur->GetPositionY();
+            if (dx * dx + dy * dy < PREP_CARTE_MIN_YD * PREP_CARTE_MIN_YD)
+                continue;
+        }
+        if (PresDeWintergrasp(carte, x, y))
+            continue;
+        float sol = 0.0f;
+        if (!SolSec(map, x, y, cz + APEX_ZONE_DEPART_Z, sol) || ToitAuDessus(map, x, y, sol, sol))
+            continue;
+        uint32 zone = 0, aire = 0;
+        map->GetZoneAndAreaId(PHASEMASK_NORMAL, zone, aire, x, y, sol);
+        if (sPlayerbotAIConfig.CoaLieuSansPvp(zone, aire))
+            continue;
+        if (HumainProcheSauf(WorldPosition(carte, x, y, sol), carte, SAUT_HUMAIN_YD, 0))
+            continue;
+        if (sPlayerbotAIConfig.directeurEmbuscade && CreatureForteAutour(carte, x, y, bot, niveau))
+            continue;
+        r.trouve = true;
+        r.x = x;
+        r.y = y;
+        r.z = sol;
+        r.source = "zone";
+        return r;
+    }
     return r;
 }
 
@@ -9064,6 +9217,29 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     // bataille, carte, regle, defi). Le reste est le meme : reserve, repos, occupe,
     // file, un Randomize par tick, deplacement sur, aucune affectation.
     bool const horsPrime = c.action == "P-0";
+    // Apex (31/10/2026) : chasse de palier (texte « apex:<palier>:<qualite> », section « Apex » plus haut). Aucun
+    // autre texte n'est permis sur une preparation (le service n'en envoie pas d'autre).
+    PreparationApex apex;
+    if (!c.texte.empty())
+    {
+        if (!horsPrime || !LirePreparationApex(c.texte, apex))
+        {
+            Refuser(c, "bornes");
+            return false;
+        }
+        if (!sPlayerbotAIConfig.directeurApex)
+        {
+            Refuser(c, "apex_eteint");
+            return false;
+        }
+        apex.point = c.rayon > 0.0f;
+        if (apex.point && (!CarteDeSuspension(c.carte) || c.rayon > APEX_ZONE_RAYON_MAX ||
+                           !Acore::IsValidMapCoord(c.x, c.y) || !std::isfinite(c.z)))
+        {
+            Refuser(c, "bornes");
+            return false;
+        }
+    }
     // Controles de `chasser` qui s'appliquent : prime active...
     if (!horsPrime)
     {
@@ -9155,7 +9331,7 @@ bool ExecuterPreparation(CoaDirCommande const& c)
                             : joueur->IsGameMaster()                          ? "mj"
                             : (joueur->InBattleground() || joueur->InArena()) ? "champ_de_bataille"
                             : !CarteDeSuspension(joueur->GetMapId())          ? "carte"
-                            : !HighRisk(joueur)                               ? "regle"
+                            : (!apex.actif && !HighRisk(joueur))              ? "regle"   // Apex : non exigee
                             : (!defisLus || DefiBloquant(joueur))             ? "defi"
                                                                               : nullptr;
         if (refus)
@@ -9167,18 +9343,23 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     uint32 const avant = bot->GetLevel();
     uint32 const carteAvant = bot->GetMapId();
     uint32 const carteJoueur = joueur->GetMapId();
+    // Apex : la carte visee est celle du point de zone (s'il y en a un), sinon celle du joueur. `carteDest` suit le
+    // point RETENU (repli autour du joueur si le disque de zone n'en donne aucun).
+    uint32 const carteVisee = apex.point ? c.carte : carteJoueur;
+    uint32 carteDest = carteVisee;
     bool const changeNiveau = avant != niveau;
-    bool const changeCarte = carteAvant != carteJoueur;
+    bool const changeCarte = carteAvant != carteVisee;
     // Embuscade (02/10, mesure : Allinan, 53 -> 26 sur place a 14:57:13 Paris, tue
     // avant son saut, `preparation:mort`) : une preparation qui change le NIVEAU
     // deplace aussi le bot, meme deja sur la carte du joueur, sur le meme point sur
     // (ChercherPointCarte : 600-1 200 yd du joueur, hors de vue, loin des creatures
     // hostiles fortes). Memes controles de depart qu'un changement de carte.
-    bool const deplacer = changeCarte || (changeNiveau && sPlayerbotAIConfig.directeurEmbuscade);
+    // Apex : la proie est TOUJOURS deplacee (hors de vue, sur sa zone ou loin du joueur), meme deja au niveau.
+    bool const deplacer = apex.actif || changeCarte || (changeNiveau && sPlayerbotAIConfig.directeurEmbuscade);
     // Monde ouvert seulement (continents, Outreterre, Norfendre) : jamais une
     // instance, un champ de bataille ou une carte de banc.
     // Le bot aussi : on ne le tire pas d'une instance ou d'une carte de banc.
-    if (changeCarte && (!CarteDeSuspension(carteJoueur) || !CarteDeSuspension(carteAvant)))
+    if ((changeCarte || apex.actif) && (!CarteDeSuspension(carteVisee) || !CarteDeSuspension(carteAvant)))
     {
         Refuser(c, "carte");
         return false;
@@ -9196,7 +9377,7 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         if (it != reequipesLe.end() && Maintenant() < it->second + REEQUIPEMENT_REPOS_S)
             ecartEquipement = false;
     }
-    if (!changeNiveau && !changeCarte && !ecartEquipement)
+    if (!changeNiveau && !changeCarte && !ecartEquipement && !apex.actif)
     {
         LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
                  " carte_apres={} duree_ms=0 motif=deja_au_niveau", c.id, c.cible, avant, avant, carteAvant, carteAvant);
@@ -9268,7 +9449,25 @@ bool ExecuterPreparation(CoaDirCommande const& c)
             Refuser(c, "wintergrasp");
             return false;
         }
-        point = ChercherPointCarte(joueur->GetMap(), joueur, bot, niveau);
+        if (apex.point)
+        {
+            // Apex : le disque de la zone du palier ; aucun point sur : repli autour du joueur (la recherche d'avant).
+            Map* mapZone = sMapMgr->FindBaseNonInstanceMap(c.carte);
+            if (!mapZone)
+                mapZone = sMapMgr->CreateBaseMap(c.carte);
+            point = ChercherPointZone(mapZone, joueur, bot, niveau, c.x, c.y, c.z, c.rayon);
+            if (!point.trouve)
+            {
+                uint32 const essaisZone = point.essais;
+                point = ChercherPointCarte(joueur->GetMap(), joueur, bot, niveau);
+                point.essais += essaisZone;
+                carteDest = carteJoueur;
+                if (point.trouve)
+                    point.source = "repli";
+            }
+        }
+        else
+            point = ChercherPointCarte(joueur->GetMap(), joueur, bot, niveau);
         rechercheMs = GetMSTimeDiffToNow(debutMs);
         if (!point.trouve)
         {
@@ -9296,22 +9495,35 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     uint32 const scoreAvant = ScoreEquipement(bot, bot->GetLevel());
     uint32 scoreApres = scoreAvant;
     uint32 reequipe = 0;   // qualite du dernier reequipement, 0 : aucun
-    if (bot->IsMounted() && (scoreAvant > scoreJoueur + PREPARATION_SCORE_ECART ||
-                             scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur))
-        bot->Dismount();
-    if (scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur)
+    if (apex.actif && apex.palier >= 20)
     {
-        Reequiper(bot, 0);
-        reequipe = sPlayerbotAIConfig.randomGearQualityLimit;
+        // Apex, paliers 20 a 60 : VERS LE HAUT, jusqu'a la qualite du palier, quel que soit l'equipement du joueur.
+        if (bot->IsMounted())
+            bot->Dismount();
+        Reequiper(bot, apex.qualite);
+        reequipe = apex.qualite;
         scoreApres = ScoreEquipement(bot, bot->GetLevel());
     }
-    for (uint32 qualite : {uint32(ITEM_QUALITY_UNCOMMON), uint32(ITEM_QUALITY_NORMAL)})
+    else
     {
-        if (scoreApres <= scoreJoueur + PREPARATION_SCORE_ECART)
-            break;
-        Reequiper(bot, qualite);
-        reequipe = qualite;
-        scoreApres = ScoreEquipement(bot, bot->GetLevel());
+        if (bot->IsMounted() && (scoreAvant > scoreJoueur + PREPARATION_SCORE_ECART ||
+                                 scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur))
+            bot->Dismount();
+        if (scoreAvant + PREPARATION_SCORE_ECART < scoreJoueur)
+        {
+            // Apex, palier 10 : aligne sur le joueur, mais jamais au-dessus de la qualite du palier (vert).
+            Reequiper(bot, apex.actif ? apex.qualite : 0);
+            reequipe = apex.actif ? apex.qualite : sPlayerbotAIConfig.randomGearQualityLimit;
+            scoreApres = ScoreEquipement(bot, bot->GetLevel());
+        }
+        for (uint32 qualite : {uint32(ITEM_QUALITY_UNCOMMON), uint32(ITEM_QUALITY_NORMAL)})
+        {
+            if (scoreApres <= scoreJoueur + PREPARATION_SCORE_ECART)
+                break;
+            Reequiper(bot, qualite);
+            reequipe = qualite;
+            scoreApres = ScoreEquipement(bot, bot->GetLevel());
+        }
     }
     if (reequipe)
     {
@@ -9334,11 +9546,14 @@ bool ExecuterPreparation(CoaDirCommande const& c)
     // Meme carte (embuscade) : un TeleportTo PROCHE, meme fil, meme garde de depart.
     if (deplacer)
     {
-        if (CoaDirecteur::Sauter(bot, WorldLocation(carteJoueur, point.x, point.y, point.z + 0.5f, bot->GetOrientation())))
-            carteApres = carteJoueur;   // engage : effectif a l'accuse (tick suivant)
+        if (CoaDirecteur::Sauter(bot, WorldLocation(carteDest, point.x, point.y, point.z + 0.5f, bot->GetOrientation())))
+            carteApres = carteDest;   // engage : effectif a l'accuse (tick suivant)
         else
             sautRefuse = true;
     }
+    // Apex : la proie (ou son garde) porte le drapeau JcJ : un chasseur de la faction adverse peut l'attaquer.
+    if (apex.actif && !sautRefuse)
+        bot->UpdatePvP(true, true);
     uint32 const dureeMs = GetMSTimeDiffToNow(debutMs);
     uint32 const apres = bot->GetLevel();
     {
@@ -9349,7 +9564,8 @@ bool ExecuterPreparation(CoaDirCommande const& c)
         preparesLe[c.cible] = Maintenant();
         nbPrepares.store(static_cast<uint32>(preparesLe.size()), std::memory_order_relaxed);
     }
-    float const pjx = point.x - joueur->GetPositionX(), pjy = point.y - joueur->GetPositionY();
+    float const pjx = carteDest == carteJoueur ? point.x - joueur->GetPositionX() : 0.0f;
+    float const pjy = carteDest == carteJoueur ? point.y - joueur->GetPositionY() : 0.0f;
     LOG_INFO("playerbots", "coa directeur reserve: id={} guid={} niveau_avant={} niveau_apres={} carte_avant={}"
              " carte_apres={} duree_ms={} motif={} point={} distance_joueur={:.0f} essais={} recherche_ms={}"
              " score_joueur={} score_avant={} score_apres={} reequipe={}", c.id,
@@ -9357,6 +9573,11 @@ bool ExecuterPreparation(CoaDirCommande const& c)
              changeNiveau ? "prepare" : (reequipe ? "reequipe" : "deja_au_niveau"),
              point.source, deplacer ? std::sqrt(pjx * pjx + pjy * pjy) : 0.0f, point.essais, rechercheMs,
              scoreJoueur, scoreAvant, scoreApres, reequipe);
+    if (apex.actif)
+        LOG_INFO("playerbots", "coa directeur apex: id={} guid={} joueur={} palier={} qualite={} point={} carte_visee={}"
+                 " carte_apres={} niveau={} score_apres={} jcj={} saut_refuse={}", c.id, c.cible, c.joueur, apex.palier,
+                 apex.qualite, point.source, carteVisee, carteApres, apres, scoreApres, bot->IsPvP() ? 1 : 0,
+                 sautRefuse ? 1 : 0);
     // Ceinture : la fabrique ne doit toucher ni la guilde ni le niveau demande.
     if (bot->GetGuildId() != guilde || (changeNiveau && apres != niveau))
         LOG_ERROR("playerbots", "coa directeur reserve_ecart: id={} guid={} guilde_avant={} guilde_apres={}"
@@ -10145,6 +10366,74 @@ void ExecuterAffectation(CoaDirCommande const& recue)
     Accuser(c, "execute", nullptr);
 }
 
+// ================================================================== Apex : `valider` (31/10/2026)
+//
+// coa-project/docs/CONCEPTION-apex-chasses-paliers.md § 3, etape 5. Le service (contrats.py) est SEUL juge de la
+// chasse (P-134) : a la fin `abattu` (coup fatal du joueur ou de son groupe sur la proie de la reserve), il emet
+// `valider` : cible = joueur = l'humain, valeur = la quete de chasse, action V-<arc>. Ici, au fil monde (P-137) : le
+// joueur EN LIGNE, la quete dans son journal et INCOMPLETE -> Player::AreaExploredOrEventHappens (la quete porte
+// QUEST_SPECIAL_FLAGS_EXPLORATION_OR_EVENT : l'objectif « explore » est rempli, puis CompleteQuest si tout le reste
+// l'est). Rien d'autre : ni courrier, ni parole, ni or. Seules les six quetes de chasse sont admises (une commande
+// forgee ne peut pas remplir une autre quete). Refus : `hors_ligne` et `joueur_indisponible` (le service reemet a la
+// reconnexion, il voit la photo), `quete_absente` (abandonnee, jamais prise : final), `quete_inconnue`, `bornes`,
+// `pas_humain`. Deja complete ou rendue : `execute`, raison `deja_complete` (la validation est due une fois).
+constexpr std::array<uint32, 6> APEX_QUETES_CHASSE = {26111, 26121, 26131, 26141, 26151, 26161};
+
+void ExecuterValider(CoaDirCommande const& c)
+{
+    if (c.cible == 0 || c.joueur != c.cible || c.valeur <= 0)
+    {
+        Refuser(c, "bornes");
+        return;
+    }
+    uint32 const quete = static_cast<uint32>(c.valeur);
+    if (std::find(APEX_QUETES_CHASSE.begin(), APEX_QUETES_CHASSE.end(), quete) == APEX_QUETES_CHASSE.end() ||
+        !sObjectMgr->GetQuestTemplate(quete))
+    {
+        Refuser(c, "quete_inconnue");
+        return;
+    }
+    Player* p = ObjectAccessor::FindPlayerByLowGUID(c.cible);
+    if (!p)
+    {
+        Refuser(c, "hors_ligne");
+        return;
+    }
+    if (!Humain(p))
+    {
+        Refuser(c, "pas_humain");
+        return;
+    }
+    if (!p->IsInWorld() || p->IsBeingTeleported())
+    {
+        Refuser(c, "joueur_indisponible");
+        return;
+    }
+    QuestStatus const avant = p->GetQuestStatus(quete);
+    if (avant == QUEST_STATUS_COMPLETE || avant == QUEST_STATUS_REWARDED)
+    {
+        LOG_INFO("playerbots", "coa directeur valider: id={} joueur={} quete={} statut_avant={} motif=deja_complete",
+                 c.id, c.cible, quete, uint32(avant));
+        CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+        Accuser(c, "execute", "deja_complete");
+        return;
+    }
+    if (avant != QUEST_STATUS_INCOMPLETE)
+    {
+        // Quete abandonnee (le jeu ne le signale pas au service) ou jamais prise : rien n'est fait, journalise.
+        LOG_INFO("playerbots", "coa directeur valider: id={} joueur={} quete={} statut_avant={} motif=quete_absente",
+                 c.id, c.cible, quete, uint32(avant));
+        Refuser(c, "quete_absente");
+        return;
+    }
+    p->AreaExploredOrEventHappens(quete);
+    QuestStatus const apres = p->GetQuestStatus(quete);
+    LOG_INFO("playerbots", "coa directeur valider: id={} joueur={} quete={} statut_avant={} statut_apres={} action={}",
+             c.id, c.cible, quete, uint32(avant), uint32(apres), c.action);
+    CoaDirecteur::Compter(CoaDirecteur::COA_DIR_EXECUTEES);
+    Accuser(c, "execute", apres == QUEST_STATUS_COMPLETE ? nullptr : "objectifs_restants");
+}
+
 // Controles avant tout verbe, dans l'ordre de la SPEC § 4.4.
 void Recevoir(CoaDirCommande const& c)
 {
@@ -10177,7 +10466,9 @@ void Recevoir(CoaDirCommande const& c)
     // et le budget ; il garde l'implementation (3) et les colonnes (3 quinquies).
     bool const menage = c.verbe == CoaDirVerbe::Evenement && (c.texte == "retirer" || c.texte == "retirer:immediat");
     // 3. verbe allume ET porte par ce binaire
-    if (c.verbe == CoaDirVerbe::Inconnu || !VerbeImplemente(c.verbe) || (!menage && !VerbeAllume(c.verbe)))
+    // Apex (31/10/2026) : `valider` est allume par AiPlayerbot.Directeur.Apex, pas par Directeur.Verbes.
+    bool const allume = VerbeApex(c.verbe) ? sPlayerbotAIConfig.directeurApex : VerbeAllume(c.verbe);
+    if (c.verbe == CoaDirVerbe::Inconnu || !VerbeImplemente(c.verbe) || (!menage && !allume))
     {
         Refuser(c, "verbe_eteint");
         return;
@@ -10217,6 +10508,12 @@ void Recevoir(CoaDirCommande const& c)
         Refuser(c, "colonnes_imprevu");
         return;
     }
+    // 3 septies (Apex, 31/10/2026). `valider` sans la valeur d'ENUM au demarrage : `valeur` pourrait manquer.
+    if (VerbeApex(c.verbe) && (!source || !source->ColonnesValider() || !source->ColonnesD3()))
+    {
+        Refuser(c, "colonnes_valider");
+        return;
+    }
     // 4. arret, avant le budget : un arret ne consomme pas de jeton. `repondre`
     // en est exempte (decision n° 4 du 26/09) : une ligne qui dit « vous etes a
     // l'arret » n'est pas une mise en scene. Le ciel et la meteo visent le
@@ -10227,7 +10524,11 @@ void Recevoir(CoaDirCommande const& c)
                               c.verbe == CoaDirVerbe::Meteo || c.verbe == CoaDirVerbe::Prime ||
                               c.verbe == CoaDirVerbe::Evenement;   // lot C : vise le joueur lui-meme
     // Lot R3 : `recompenser` en est exempte aussi : une prime GAGNEE se paie, arret ou non.
-    if (c.verbe != CoaDirVerbe::Repondre && c.verbe != CoaDirVerbe::Recompenser && !menage &&
+    // Apex (31/10/2026) : `valider` aussi : une chasse GAGNEE se valide, arret ou non ; et la preparation d'une chasse
+    // (texte « apex: ») : c'est un contenu de QUETE, invisible, que `.directeur stop` ne bloque pas (relecture).
+    bool const prepApex = c.verbe == CoaDirVerbe::Chasser && c.texte.compare(0, 5, "apex:") == 0;
+    if (c.verbe != CoaDirVerbe::Repondre && c.verbe != CoaDirVerbe::Recompenser && c.verbe != CoaDirVerbe::Valider &&
+        !prepApex && !menage &&
         ((c.joueur && CoaDirecteur::EstArrete(c.joueur)) || (visePersonne && CoaDirecteur::EstArrete(c.cible))))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REFUS_ARRET);
@@ -10244,7 +10545,8 @@ void Recevoir(CoaDirCommande const& c)
     }
     // 5. budget (`retirer` du lot D en est exempt : `menage`, plus haut). Revue 16/10 : `recompenser` puise dans son
     // seau propre (PrendreJetonDe), pas dans le seau commun : une part gagnee n'attend plus la fin d'un gros evenement.
-    bool const recompense = c.verbe == CoaDirVerbe::Recompenser;
+    // Apex (31/10/2026) : `valider` puise dans le meme seau propre que `recompenser` (rare, jamais d'un evenement).
+    bool const recompense = c.verbe == CoaDirVerbe::Recompenser || c.verbe == CoaDirVerbe::Valider;
     if (!menage && !(recompense ? PrendreJetonDe(jetonsRecompense, jetonsRecompenseMs) : PrendreJeton()))
     {
         CoaDirecteur::Compter(CoaDirecteur::COA_DIR_REFUS_BUDGET);
@@ -10299,6 +10601,9 @@ void Recevoir(CoaDirCommande const& c)
             break;
         case CoaDirVerbe::Soigner:
             ExecuterSoigner(c);
+            break;
+        case CoaDirVerbe::Valider:
+            ExecuterValider(c);
             break;
         default:
             Refuser(c, "verbe_eteint");   // inatteignable : VerbeImplemente l'a filtre
@@ -11797,7 +12102,9 @@ std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, ui
         "SELECT id, IFNULL(etape, ''),"
         " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.cible')), 'null'), ''),"
         " IFNULL(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(params, '$.cible_nom')), 'null'), ''),"
-        " CAST(IFNULL(GREATEST(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue) - {}, 0), -1) AS CHAR)"
+        " CAST(IFNULL(GREATEST(TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), fin_prevue) - {}, 0), -1) AS CHAR),"
+        // Apex (31/10/2026) : une chasse de palier (params.apex_palier) : sa proie porte le drapeau JcJ, pas le FFA.
+        " IFNULL(CAST(JSON_EXTRACT(params, '$.apex_palier') AS CHAR), '')"
         " FROM coa_dir_arc WHERE joueur = {} AND genre = 'contrat' AND statut = 'actif'"
         " ORDER BY id DESC LIMIT 1",
         TRAQUE_MARGE_ARC_S, guid);
@@ -11811,6 +12118,7 @@ std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, ui
     // Pendant une pause en donjon, contrats.py repousse fin_prevue d'une heure de plus (PAUSE_MAX_S) : au-dela de
     // la duree d'un contrat (30 min + 5 min de preparation), l'echeance n'est pas lisible ici, `-1`.
     std::string reste = ChampOnglet(f[4]);
+    bool const apex = !f[5].IsNull() && GuidTraqueur(f[5].Get<std::string>()) != 0;
     if (uint32 const r = GuidTraqueur(reste); r > TRAQUE_RESTE_MAX_S)
         reste = "-1";
     std::string etat;
@@ -11832,7 +12140,8 @@ std::string CorpsTraqueur(Player* joueur, uint32 intervalleMs, uint32& arcLu, ui
             etat = "mort";
         else
         {
-            etat = bot->IsFFAPvP() ? "piste" : "refuge";
+            // Apex : la proie marquee JcJ (UpdatePvP) est « en piste » : le chasseur de la faction adverse peut l'attaquer.
+            etat = (bot->IsFFAPvP() || (apex && bot->IsPvP())) ? "piste" : "refuge";
             uint32 const d = DistanceTraqueur(joueur->GetExactDist2d(bot));
             float const rad = joueur->GetAbsoluteAngle(bot);   // [0, 2 pi[, 0 = nord (+x), sens trigonometrique
             uint32 const deg = static_cast<uint32>(std::lround(rad * 180.0f / static_cast<float>(M_PI))) % 360;

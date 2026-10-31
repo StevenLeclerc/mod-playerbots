@@ -591,6 +591,12 @@ public:
     // un pot-de-vin au chasseur), et la seconde fuite de `fuite_gardes`. Faux (defaut) : ces deux noms sont inconnus
     // (cible passive, journalise une fois) et `fuite_gardes` fuit une seule fois, comme T5.
     bool directeurReactionsT6;
+    // Apex, chasses de palier (31/10/2026, coa-project/docs/CONCEPTION-apex-chasses-paliers.md § 3). Vrai : la
+    // preparation `P-0` de texte « apex:<palier>:<qualite> » (proie de la faction adverse, drapeau JcJ, point de zone,
+    // equipement vers le haut, regle High Risk non exigee), la reaction `defense_gardes` et le verbe `valider`. Faux
+    // (defaut, le Live) : ces preparations sont refusees `apex_eteint`, `valider` est refuse `verbe_eteint`,
+    // `defense_gardes` est inconnue (cible passive).
+    bool directeurApex;
     // Lot D5 « l'imprevu », partie jeu (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md § 3.1, § 3.2 ;
     // code dans Ai/Coa/CoaDirecteurImprevu.inc). Faux (defaut) : les verbes `attirer` et `soigner` sont refuses
     // `attirer_eteint` / `soigner_eteint` (meme listes dans Directeur.Verbes), le registre se vide a la seconde.
