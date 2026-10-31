@@ -8703,6 +8703,17 @@ void SuivreReactions()
             if (defense)
             {
                 LeverRepos(e.cible);
+                // 31/10 (vu au Live, palier 10) : la proie aux prises avec le chasseur SANS cible (ou sur un autre
+                // joueur) est remise sur lui : un joueur n'entre pas dans la liste de menace du bot (AttackersValue), et
+                // sous WildPvp.MinLevel rien d'autre ne le lui designe. Jamais quand elle frappe un monstre ou un familier
+                // (sinon sa cible oscillerait chaque seconde), ni le chasseur hors de vue (revue independante, 31/10).
+                Unit* const victime = cible->GetVictim();
+                if ((!victime || (victime->IsPlayer() && victime != chasseur)) && chasseur->IsAlive() &&
+                    cible->IsInCombatWith(chasseur) && chasseur->GetMapId() == cible->GetMapId() &&
+                    chasseur->GetInstanceId() == cible->GetInstanceId() &&
+                    chasseur->GetExactDist2d(cible) <= REACTION_ENGAGE_YD && cible->IsWithinLOSInMap(chasseur) &&
+                    EngagerChasseur(cible, chasseur))
+                    LOG_DEBUG("playerbots", "coa directeur reaction: arc={} cible={} reengagee", e.arc, e.cible);
                 // Apex : les gardes arrives apres le declenchement engagent a leur tour (libres seulement).
                 if (defenseGardes)
                     EngagerGardes(e, cible, chasseur, true);
@@ -8748,7 +8759,8 @@ void SuivreReactions()
             bool const dejaEnCombat = auxPrises;
             LeverImmobile(e.cible);
             LeverRepos(e.cible);
-            bool const engage = !dejaEnCombat && EngagerChasseur(cible, chasseur);
+            // 31/10 : engagee AUSSI quand le chasseur a frappe le premier (elle ne ripostait pas, vu au Live).
+            bool const engage = (!dejaEnCombat || cible->GetVictim() != chasseur) && EngagerChasseur(cible, chasseur);
             uint32 const gardesEngages = defenseGardes ? EngagerGardes(e, cible, chasseur, false) : 0;
             e.declenchee = true;
             JournaliserReaction(e, "defense", Acore::StringFormat(" engage={} deja_en_combat={} distance={:.0f}"
