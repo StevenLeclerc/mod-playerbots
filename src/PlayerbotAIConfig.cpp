@@ -898,6 +898,8 @@ bool PlayerbotAIConfig::Initialize()
     directeurReactions = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Reactions", false);
     // Lot T6 (13/10/2026) : fuite montee, seconde fuite, soudoiement. Eteint par defaut (sans effet sans Reactions).
     directeurReactionsT6 = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.ReactionsT6", false);
+    // Apex (31/10/2026) : chasses de palier du Tinker Apex. Eteint par defaut.
+    directeurApex = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Apex", false);
     // Lot D5 (15/10/2026) : verbes `attirer` (creatures existantes attirees, mode patrouille) et `soigner` (patient
     // impose a un bot soigneur deja present). Eteints par defaut.
     directeurAttirer = sConfigMgr->GetOption<bool>("AiPlayerbot.Directeur.Attirer", false);

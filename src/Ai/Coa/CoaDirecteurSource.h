@@ -56,6 +56,8 @@ enum class CoaDirVerbe : uint8
     Soigner,        // le bot `cible` soigne le joueur `joueur` (valeur = seuil de PV, duree_s <= 420)
     // Paix de zone (19/10/2026, coa-project exploitation/directeur/paix_zone.py), AVANT Inconnu :
     Paix,           // cible = id de ZONE (Player::GetZoneId), carte = sa carte, duree_s 60..3600, joueur 0
+    // Apex, chasses de palier (31/10/2026, coa-project/docs/CONCEPTION-apex-chasses-paliers.md § 3), AVANT Inconnu :
+    Valider,        // la quete de chasse `valeur` du joueur `cible` (= `joueur`) est remplie (AreaExploredOrEventHappens)
     Inconnu     // valeur recue que ce binaire ne connait pas : toujours refusee
 };
 
@@ -162,6 +164,10 @@ public:
     // (migration data/sql/characters/updates/2026_10_19_00_coa_directeur_paix.sql, controle « contient ») ? Faux :
     // `paix` est refuse `colonnes_paix`, les autres verbes passent. Vrai implique ColonnesRecompense().
     virtual bool ColonnesPaix() const { return false; }
+    // Apex (31/10/2026). L'ENUM de `verbe` porte-t-il les treize valeurs R3 en tete ET contient-il 'valider' (controle
+    // « contient » : l'ENUM du Live porte 'paix', celui du PTR non) ? Faux : `valider` est refuse `colonnes_valider`.
+    // Vrai implique ColonnesRecompense().
+    virtual bool ColonnesValider() const { return false; }
 };
 
 #endif

@@ -4816,6 +4816,19 @@ AiPlayerbot.Directeur.Reactions = 0
 #        Default: 0
 AiPlayerbot.Directeur.ReactionsT6 = 0
 
+#    AiPlayerbot.Directeur.Apex
+#        Chasses de palier du Tinker Apex (31/10/2026, coa-project/docs/CONCEPTION-apex-chasses-paliers.md) :
+#          - preparation `chasser P-0` de texte « apex:<palier>:<qualite> » : regle High Risk du joueur NON exigee,
+#            proie TOUJOURS deplacee (point de zone du palier si la commande en porte un, sinon 600-1 200 yd du
+#            joueur), equipement jusqu'a la qualite donnee (2 vert, 3 bleu ; palier 10 : aligne sur le joueur),
+#            drapeau JcJ pose sur la proie et reaffirme tant que son arc court ;
+#          - reaction `defense_gardes` (exige aussi Directeur.Reactions) : la defense, plus deux gardes ;
+#          - verbe `valider` (hors Directeur.Verbes, c'est CETTE option qui l'allume ; ENUM 'valider' exige) : la
+#            quete de chasse (26111, 26121, 26131, 26141, 26151, 26161 seulement) du joueur en ligne est remplie.
+#        Lue par PlayerbotAIConfig::Initialize() SEULEMENT : `reload config` PUIS `playerbots rndbot reload`.
+#        Default: 0
+AiPlayerbot.Directeur.Apex = 0
+
 ###################################################################################################
 # DIRECTEUR, LOT D5 « L'IMPREVU », PARTIE JEU (15/10/2026, coa-project/docs/ETUDE-directeur-D5-imprevu.md)
 #
