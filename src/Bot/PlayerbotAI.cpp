@@ -4755,8 +4755,9 @@ bool IsSelfBot(Player* player)
 
 bool IsAlliance(uint8 race)
 {
-    return race == RACE_HUMAN || race == RACE_DWARF || race == RACE_NIGHTELF || race == RACE_GNOME ||
-           race == RACE_DRAENEI;
+    // Faction par la table des races (ChrRaces.dbc), comme CoaCompagnons : les races copies (21, 22 Horde ; 23
+    // Alliance) n'entrent dans aucune liste figee.
+    return Player::TeamIdForRace(race) == TEAM_ALLIANCE;
 }
 
 Player* PlayerbotAI::FindNewMaster()
